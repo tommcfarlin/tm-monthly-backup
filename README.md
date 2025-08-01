@@ -88,6 +88,16 @@ python tests/run_tests.py --integration-only
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
+## Documentation
+
+### User Guides
+- [CLI Usage Guide](docs/cli-usage.md) - Complete command-line reference
+- [Troubleshooting Guide](docs/troubleshooting.md) - Solutions for common issues
+
+### Developer Documentation
+- [Development Workflow](docs/development-workflow.md) - Contribution guidelines
+- [Test Documentation](tests/README.md) - Test suite information
+
 ## Development
 
 See [docs/development-workflow.md](docs/development-workflow.md) for contribution guidelines.
