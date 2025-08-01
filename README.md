@@ -4,13 +4,17 @@ A robust Python CLI utility for automating monthly photo organization from Apple
 
 ## Features
 
-- Converts HEIC files to high-quality JPEG with EXIF preservation
-- Organizes files by type: photos, videos, screenshots
-- Renames files using EXIF timestamp format (YYYY.MM.DD.HH.MM.SS)
-- Removes Apple sidecar (.aae) files automatically
-- Handles duplicate timestamps intelligently
-- Dry-run mode for safe testing
-- Comprehensive error handling and logging
+- **Smart File Processing**: Converts HEIC files to high-quality JPEG with EXIF preservation
+- **Intelligent Organization**: Separates files into photos, videos, screenshots, and generated content
+- **Timestamp-Based Renaming**: Uses EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS format)
+- **Video Metadata Extraction**: Extracts creation dates from video file metadata (MOV, MP4, etc.)
+- **AI Content Detection**: Automatically identifies and separates AI-generated images and heavily edited photos
+- **Screenshot Recognition**: Detects iOS screenshots with pattern matching
+- **Automatic Cleanup**: Removes Apple sidecar (.aae) files
+- **Duplicate Handling**: Intelligently resolves timestamp conflicts
+- **Rich CLI Experience**: Beautiful progress bars, colored output, and detailed summaries
+- **Dry-Run Mode**: Safe testing without file modifications
+- **Comprehensive Logging**: Detailed error handling and processing reports
 
 ## Requirements
 
@@ -25,10 +29,24 @@ git clone https://github.com/tommcfarlin/tm-monthly-backup.git
 cd tm-monthly-backup
 ```
 
-2. Install dependencies:
+2. Create and activate a virtual environment (recommended):
+```bash
+python3 -m venv tm-backup-env
+source tm-backup-env/bin/activate  # On Windows: tm-backup-env\Scripts\activate
+```
+
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+
+### Dependencies
+- `click>=8.0.0` - CLI interface framework
+- `pillow>=10.0.0` - Image processing and EXIF data extraction
+- `pillow-heif>=0.10.0` - HEIC file format support
+- `python-dateutil>=2.8.0` - Advanced date/time parsing
+- `rich>=13.0.0` - Beautiful CLI progress bars and formatting
+- `hachoir>=3.1.0` - Video metadata extraction
 
 ## Usage
 
@@ -37,13 +55,16 @@ pip install -r requirements.txt
 
 ```bash
 # Dry run (recommended first)
-python src/main.py --dry-run
+python -m src.main --dry-run
 
-# Process files
-python src/main.py
+# Process files with progress display
+python -m src.main
 
-# View help
-python src/main.py --help
+# Verbose output for debugging
+python -m src.main --verbose
+
+# View help and options
+python -m src.main --help
 ```
 
 ## Directory Structure
@@ -52,21 +73,44 @@ python src/main.py --help
 tm-monthly-backup/
 ├── export/          # Place exported iCloud files here
 ├── backup/          # Organized output files
-│   ├── photos/      # JPG, PNG, GIF files
-│   ├── videos/      # MOV, MP4, M4V files
-│   └── screenshots/ # PNG screenshot files
+│   ├── photos/      # Real photos with EXIF timestamps
+│   ├── videos/      # Videos with metadata timestamps
+│   ├── screenshots/ # iOS screenshots and screen captures
+│   ├── generated/   # AI-generated and heavily edited content
+│   └── unknown/     # Unrecognized file types (if any)
 ├── src/             # Source code
 ├── tests/           # Test suite
 └── docs/            # Documentation
 ```
 
+## Smart Content Detection
+
+### AI-Generated Content
+Automatically detects and separates AI-generated images:
+- **C2PA Metadata**: Files with ChatGPT, GPT-4o, or OpenAI signatures
+- **UUID Filenames**: 36-character UUID-format names (often generated content)
+- **Editing Software**: Files processed by editing software without original EXIF data
+
+### Video Timestamps
+Extracts real creation dates from video metadata:
+- **MOV, MP4, M4V**: Uses embedded creation timestamps
+- **Screen Recordings**: Handles screen capture metadata
+- **Fallback Handling**: Uses filesystem dates when metadata unavailable
+
+### Screenshot Recognition
+Identifies iOS and macOS screenshots:
+- **Filename Patterns**: `IMG_3XXX.PNG`, `Screenshot`, `Screen Shot`
+- **iOS Patterns**: Recognizes standard iOS screenshot naming
+
 ## File Processing
 
 - **HEIC files**: Converted to JPEG (lossless) with EXIF preservation
 - **Apple sidecar files (.aae)**: Deleted automatically
-- **Naming convention**: Files renamed to EXIF timestamp format
+- **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS)
+- **Video metadata**: Extracts creation timestamps from video file headers
 - **Duplicate handling**: Timestamp conflicts resolved by incrementing seconds
-- **Missing EXIF**: Files moved to special handling directory
+- **AI content separation**: Generated and heavily edited content goes to dedicated folder
+- **Missing metadata**: Fallback to filesystem timestamps with user warnings
 
 ## Testing
 

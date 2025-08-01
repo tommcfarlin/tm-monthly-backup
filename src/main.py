@@ -7,7 +7,14 @@ import sys
 import click
 from pathlib import Path
 
-from .cli_interface import CLIInterface, setup_logging
+# Add src directory to Python path for direct execution
+if __name__ == '__main__':
+    sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from cli_interface import CLIInterface, setup_logging
+except ImportError:
+    from .cli_interface import CLIInterface, setup_logging
 
 
 @click.command()

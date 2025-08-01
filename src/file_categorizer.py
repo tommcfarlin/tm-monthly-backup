@@ -16,6 +16,7 @@ class FileCategory(Enum):
     PHOTO = "photos"
     VIDEO = "videos"
     SCREENSHOT = "screenshots"
+    GENERATED = "generated"  # AI-generated or heavily edited content
     UNKNOWN = "unknown"
     SIDECAR = "sidecar"
 
@@ -48,6 +49,7 @@ class FileCategorizer:
             FileCategory.PHOTO: [],
             FileCategory.VIDEO: [],
             FileCategory.SCREENSHOT: [],
+            FileCategory.GENERATED: [],
             FileCategory.UNKNOWN: [],
             FileCategory.SIDECAR: []
         }
@@ -81,11 +83,17 @@ class FileCategorizer:
             # Additional heuristics for screenshot detection
             if self._is_likely_screenshot(filename):
                 return FileCategory.SCREENSHOT
+            # Check if it's AI-generated or heavily edited content
+            if self._is_generated_content(file_path):
+                return FileCategory.GENERATED
             # If PNG but not clearly a screenshot, treat as photo
             return FileCategory.PHOTO
 
         # Check for photos
         if ext in self.photo_exts:
+            # Check if it's AI-generated or heavily edited content
+            if self._is_generated_content(file_path):
+                return FileCategory.GENERATED
             return FileCategory.PHOTO
 
         # Check for videos
@@ -112,9 +120,77 @@ class FileCategorizer:
             'img_',  # iOS screenshot pattern
             'simulator screen shot',  # iOS Simulator
             'screen recording',
+            'img_3',  # iOS screenshot pattern (IMG_3XXX)
+            'screen_',
+            'capture',
         ]
 
+        # iOS screenshots often have specific patterns
+        # IMG_XXXX.PNG where XXXX is 4+ digits starting with 3
+        if filename.startswith('img_3') and filename.endswith('.png'):
+            return True
+
         return any(pattern in filename for pattern in screenshot_patterns)
+
+    def _is_generated_content(self, file_path: str) -> bool:
+        """
+        Detect AI-generated or heavily edited content using pure Python.
+
+        Args:
+            file_path: Path to file
+
+        Returns:
+            True if file appears to be AI-generated or heavily edited
+        """
+        try:
+            from PIL import Image
+
+            with Image.open(file_path) as img:
+                # Check for C2PA/AI metadata in PNG files
+                if file_path.lower().endswith('.png'):
+                    # Look for C2PA markers in PNG text chunks
+                    if hasattr(img, 'text') and img.text:
+                        for key, value in img.text.items():
+                            if any(ai_marker in str(value).lower() for ai_marker in
+                                   ['gpt', 'chatgpt', 'openai', 'c2pa', 'ai', 'generated']):
+                                logger.info(f"Detected AI-generated content: {file_path}")
+                                return True
+
+                # Check EXIF data for editing software + missing original timestamps
+                exif = img.getexif()
+                if exif:
+                    from PIL.ExifTags import TAGS
+
+                    has_editing_software = False
+                    has_original_timestamp = False
+
+                    for tag_id, value in exif.items():
+                        tag = TAGS.get(tag_id, str(tag_id))
+
+                        # Check for editing software
+                        if tag == 'Software' and any(editor in str(value).lower() for editor in
+                                                    ['snapseed', 'photoshop', 'lightroom', 'gimp', 'canva']):
+                            has_editing_software = True
+
+                        # Check for original timestamp tags
+                        if tag in ['DateTimeOriginal', 'DateTimeDigitized']:
+                            has_original_timestamp = True
+
+                    # If edited but no original timestamp, likely heavily processed
+                    if has_editing_software and not has_original_timestamp:
+                        logger.info(f"Detected heavily edited content: {file_path}")
+                        return True
+
+                # Check for UUID-style filenames (often generated content)
+                filename = Path(file_path).stem
+                if len(filename) == 36 and filename.count('-') == 4:  # UUID format
+                    logger.info(f"Detected UUID filename (likely generated): {file_path}")
+                    return True
+
+        except Exception as e:
+            logger.debug(f"Error checking generated content for {file_path}: {e}")
+
+        return False
 
     def batch_categorize(self, file_paths: List[str]) -> Dict[FileCategory, List[str]]:
         """
@@ -171,7 +247,8 @@ class FileCategorizer:
         return {
             FileCategory.PHOTO: self.get_files_by_category(FileCategory.PHOTO),
             FileCategory.VIDEO: self.get_files_by_category(FileCategory.VIDEO),
-            FileCategory.SCREENSHOT: self.get_files_by_category(FileCategory.SCREENSHOT)
+            FileCategory.SCREENSHOT: self.get_files_by_category(FileCategory.SCREENSHOT),
+            FileCategory.GENERATED: self.get_files_by_category(FileCategory.GENERATED)
         }
 
     def get_target_directory(self, category: FileCategory, base_backup_dir: str) -> str:
@@ -191,6 +268,8 @@ class FileCategorizer:
             return os.path.join(base_backup_dir, "videos")
         elif category == FileCategory.SCREENSHOT:
             return os.path.join(base_backup_dir, "screenshots")
+        elif category == FileCategory.GENERATED:
+            return os.path.join(base_backup_dir, "generated")
         elif category == FileCategory.UNKNOWN:
             return os.path.join(base_backup_dir, "unknown")
         else:
@@ -207,7 +286,7 @@ class FileCategorizer:
             List of created directory paths
         """
         directories = []
-        for category in [FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT, FileCategory.UNKNOWN]:
+        for category in [FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT, FileCategory.GENERATED, FileCategory.UNKNOWN]:
             target_dir = self.get_target_directory(category, base_backup_dir)
             os.makedirs(target_dir, exist_ok=True)
             directories.append(target_dir)
@@ -225,6 +304,7 @@ class FileCategorizer:
             'photos': len(self.categorized_files[FileCategory.PHOTO]),
             'videos': len(self.categorized_files[FileCategory.VIDEO]),
             'screenshots': len(self.categorized_files[FileCategory.SCREENSHOT]),
+            'generated': len(self.categorized_files[FileCategory.GENERATED]),
             'unknown': len(self.categorized_files[FileCategory.UNKNOWN]),
             'sidecar': len(self.categorized_files[FileCategory.SIDECAR]),
             'total': sum(len(files) for files in self.categorized_files.values())

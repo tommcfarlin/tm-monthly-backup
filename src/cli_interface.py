@@ -18,6 +18,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from .file_processor import FileProcessor
+from .file_categorizer import FileCategory
 
 # Initialize rich console
 console = Console()
@@ -91,7 +92,9 @@ class CLIInterface:
         # Check export directory
         if not export_path.exists():
             self.console.print(f"[red]Error: Export directory does not exist: {export_path}[/red]")
-            self.console.print(f"[yellow]Please create the directory and place your exported photos there.[/yellow]")
+            self.console.print(f"[yellow]Please create the directory and place your exported photos there:[/yellow]")
+            self.console.print(f"[dim]  mkdir {export_path}[/dim]")
+            self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {export_path}/[/dim]")
             return False
 
         if not any(export_path.iterdir()):
@@ -193,58 +196,19 @@ class CLIInterface:
             progress.update(categorize_task, completed=1)
 
             # Delete sidecar files
-            sidecar_files = categorized.get(self.processor.categorizer.FileCategory.SIDECAR, [])
+            sidecar_files = categorized.get(FileCategory.SIDECAR, [])
             if sidecar_files:
                 progress.update(sidecar_task, total=len(sidecar_files))
                 self.processor._delete_sidecar_files(sidecar_files, dry_run)
             progress.update(sidecar_task, completed=progress.tasks[sidecar_task].total or 1)
 
-            # Process files by category
-            processable_files = self.processor.categorizer.get_processable_files()
+            # Process all files using the FileProcessor's main method
+            # This replaces the duplicate processing loop that was causing duplicates
+            self.processor.process_all_files(dry_run=dry_run)
 
-            # Count HEIC files for conversion progress
-            heic_count = sum(1 for files in processable_files.values()
-                           for file_path in files
-                           if self.processor.heic_converter.is_heic_file(file_path))
-
-            if heic_count > 0:
-                progress.update(convert_task, total=heic_count)
-            else:
-                progress.update(convert_task, total=1, completed=1)
-
-            # Count total files for organization progress
-            total_files = sum(len(files) for files in processable_files.values())
-            progress.update(organize_task, total=total_files)
-
-            # Create target directories
-            if not dry_run:
-                self.processor.categorizer.ensure_target_directories(self.processor.backup_dir)
-
-            # Process each category
-            files_processed = 0
-            heic_processed = 0
-
-            for category, files in processable_files.items():
-                for file_path in files:
-                    try:
-                        # Update conversion progress for HEIC files
-                        if self.processor.heic_converter.is_heic_file(file_path):
-                            heic_processed += 1
-                            progress.update(convert_task, completed=heic_processed)
-
-                        # Process the file
-                        target_dir = self.processor.categorizer.get_target_directory(
-                            category, self.processor.backup_dir
-                        )
-                        self.processor._process_single_file(file_path, category, target_dir, dry_run)
-
-                        # Update organization progress
-                        files_processed += 1
-                        progress.update(organize_task, completed=files_processed)
-
-                    except Exception as e:
-                        logging.error(f"Failed to process file {file_path}: {e}")
-                        self.processor.failed_files.append(('process_file', file_path, str(e)))
+            # Update progress bars to completed
+            progress.update(convert_task, completed=progress.tasks[convert_task].total or 1)
+            progress.update(organize_task, completed=progress.tasks[organize_task].total or 1)
 
             # Ensure all progress bars are complete
             progress.update(convert_task, completed=progress.tasks[convert_task].total or 1)
@@ -307,6 +271,9 @@ class CLIInterface:
             breakdown_table.add_row("Photos", str(stats.get('photos', 0)), "backup/photos/")
             breakdown_table.add_row("Videos", str(stats.get('videos', 0)), "backup/videos/")
             breakdown_table.add_row("Screenshots", str(stats.get('screenshots', 0)), "backup/screenshots/")
+
+            if stats.get('generated', 0) > 0:
+                breakdown_table.add_row("Generated", str(stats['generated']), "backup/generated/", style="magenta")
 
             if stats.get('unknown', 0) > 0:
                 breakdown_table.add_row("Unknown", str(stats['unknown']), "backup/unknown/", style="yellow")
