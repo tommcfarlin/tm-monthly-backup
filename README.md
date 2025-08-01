@@ -68,6 +68,26 @@ tm-monthly-backup/
 - **Duplicate handling**: Timestamp conflicts resolved by incrementing seconds
 - **Missing EXIF**: Files moved to special handling directory
 
+## Testing
+
+The project includes a comprehensive test suite covering unit tests and integration tests.
+
+### Run All Tests
+```bash
+python tests/run_tests.py
+```
+
+### Run Specific Test Types
+```bash
+# Unit tests only
+python tests/run_tests.py --unit-only
+
+# Integration tests only
+python tests/run_tests.py --integration-only
+```
+
+See [tests/README.md](tests/README.md) for detailed testing documentation.
+
 ## Development
 
 See [docs/development-workflow.md](docs/development-workflow.md) for contribution guidelines.
