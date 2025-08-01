@@ -22,7 +22,7 @@ except ImportError:
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.option('--export-dir', default='export', help='Directory containing exported files (default: export)')
 @click.option('--backup-dir', default='backup', help='Directory for organized output (default: backup)')
-@click.version_option(version='0.1.0', prog_name='tm-monthly-backup')
+@click.version_option(version='1.0.0', prog_name='tm-monthly-backup')
 def main(dry_run, verbose, export_dir, backup_dir):
     """
     Process exported Apple Photos files and organize them by type.

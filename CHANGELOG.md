@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2025-08-01
+
 ### Added
 - **Smart AI Content Detection**: Automatically identifies and separates AI-generated images (C2PA metadata, ChatGPT signatures)
 - **Video Metadata Extraction**: Real timestamp extraction from MOV, MP4, M4V files using hachoir library
