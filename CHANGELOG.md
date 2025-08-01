@@ -8,11 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial project structure
-- Development workflow documentation
-- Directory structure for export and backup operations
+- Comprehensive CLI usage documentation with examples and configuration options
+- Detailed troubleshooting guide covering common issues and solutions
+- Complete user and developer documentation structure
+- Advanced debugging and diagnostic procedures
+- Performance optimization guidelines
+- Environment-specific troubleshooting for macOS, Windows, and Linux
 
 ### Changed
+- Enhanced README with structured documentation links
+- Improved documentation organization with user vs developer guides
 
 ### Deprecated
 
