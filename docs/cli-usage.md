@@ -262,40 +262,6 @@ jpeg_quality: 95
 keep_heic_originals: false
 ```
 
-## Integration Examples
-
-### Automated Workflow
-
-```bash
-#!/bin/bash
-# Monthly backup automation script
-
-# Set variables
-EXPORT_DIR="$HOME/Downloads/icloud-export"
-BACKUP_DIR="$HOME/Photos/monthly-$(date +%Y-%m)"
-
-# Create backup directory
-mkdir -p "$BACKUP_DIR"
-
-# Process files
-python src/main.py --export-dir "$EXPORT_DIR" --backup-dir "$BACKUP_DIR" --verbose
-
-# Cleanup export directory after successful processing
-if [ $? -eq 0 ]; then
-    echo "Processing successful, cleaning up export directory..."
-    rm -rf "$EXPORT_DIR"/*
-else
-    echo "Processing failed, keeping export files for review"
-fi
-```
-
-### Cron Job
-
-```bash
-# Monthly automated backup on the 1st of each month at 2 AM
-0 2 1 * * /path/to/monthly-backup-script.sh
-```
-
 ## Exit Codes
 
 The CLI uses standard exit codes for integration with scripts:
