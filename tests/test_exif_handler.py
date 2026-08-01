@@ -290,6 +290,149 @@ class TestExifHandler(unittest.TestCase):
         self.assertIn("nonexistent.jpg", self.handler.missing_exif_files)
 
 
+class TestSubIfdTimestampExtraction(unittest.TestCase):
+    """
+    Real-fixture tests for issue #25: DateTimeOriginal lives in the Exif
+    sub-IFD (behind pointer 0x8769), not IFD0. These tests build genuine
+    on-disk JPEGs whose timestamp tags are written into the sub-IFD, then
+    assert the round-trip landed there before exercising extract_timestamp.
+
+    A fixture that accidentally writes DateTimeOriginal into IFD0 would pass
+    against the pre-#25 code and prove nothing, so every fixture asserts the
+    tag is present in get_ifd(0x8769) and ABSENT from the top-level getexif().
+    """
+
+    EXIF_IFD = 0x8769
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_jpeg(self, name, sub_ifd_tags=None, ifd0_tags=None):
+        """
+        Write a JPEG whose sub_ifd_tags go into the Exif sub-IFD and whose
+        ifd0_tags go into IFD0. Tag keys are ExifTags.Base members.
+
+        Returns the file path.
+        """
+        image = Image.new('RGB', (16, 16), color='red')
+        exif = Image.Exif()
+
+        for tag, value in (ifd0_tags or {}).items():
+            exif[tag.value] = value
+
+        if sub_ifd_tags:
+            sub = exif.get_ifd(self.EXIF_IFD)
+            for tag, value in sub_ifd_tags.items():
+                sub[tag.value] = value
+
+        path = os.path.join(self.temp_dir, name)
+        image.save(path, format='JPEG', exif=exif)
+        return path
+
+    def _assert_in_sub_ifd_only(self, path, tag):
+        """
+        Guard: verify `tag` round-tripped into the Exif sub-IFD and is NOT in
+        top-level getexif(). If this fails the fixture is worthless.
+        """
+        reopened = Image.open(path)
+        top = reopened.getexif()
+        sub = top.get_ifd(self.EXIF_IFD)
+        self.assertIn(
+            tag.value, sub,
+            f"{tag.name} did not land in the Exif sub-IFD; fixture is invalid",
+        )
+        self.assertNotIn(
+            tag.value, top,
+            f"{tag.name} leaked into IFD0; fixture would pass against broken code",
+        )
+
+    def test_fixture_writes_datetimeoriginal_to_sub_ifd(self):
+        """The fixture recipe provably targets the sub-IFD, not IFD0."""
+        path = self._write_jpeg(
+            "sub_only.jpg",
+            sub_ifd_tags={ExifTags.Base.DateTimeOriginal: "2018:01:02 03:04:05"},
+        )
+        self._assert_in_sub_ifd_only(path, ExifTags.Base.DateTimeOriginal)
+
+    def test_datetimeoriginal_in_sub_ifd_is_resolved(self):
+        """
+        A JPEG whose only timestamp is DateTimeOriginal in the sub-IFD resolves
+        to that value and is NOT recorded as missing EXIF (AC #1). This FAILS
+        against the pre-#25 reader, which only sees IFD0.
+        """
+        path = self._write_jpeg(
+            "sub_only.jpg",
+            sub_ifd_tags={ExifTags.Base.DateTimeOriginal: "2018:01:02 03:04:05"},
+        )
+        self._assert_in_sub_ifd_only(path, ExifTags.Base.DateTimeOriginal)
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertEqual(result, datetime(2018, 1, 2, 3, 4, 5))
+        self.assertNotIn(path, self.handler.missing_exif_files)
+
+    def test_sub_ifd_original_wins_over_ifd0_datetime(self):
+        """
+        DateTimeOriginal (sub-IFD) must win over a differing DateTime (IFD0),
+        honoring declared priority (AC #2).
+        """
+        path = self._write_jpeg(
+            "both.jpg",
+            sub_ifd_tags={ExifTags.Base.DateTimeOriginal: "2018:01:02 03:04:05"},
+            ifd0_tags={ExifTags.Base.DateTime: "2019:03:04 05:06:07"},
+        )
+        self._assert_in_sub_ifd_only(path, ExifTags.Base.DateTimeOriginal)
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertEqual(result, datetime(2018, 1, 2, 3, 4, 5))
+
+    def test_datetime_only_still_resolves(self):
+        """
+        Fallback: an image with only DateTime in IFD0 (no sub-IFD) still
+        resolves to DateTime.
+        """
+        path = self._write_jpeg(
+            "dt_only.jpg",
+            ifd0_tags={ExifTags.Base.DateTime: "2019:03:04 05:06:07"},
+        )
+
+        # Confirm there is no sub-IFD DateTimeOriginal to steal priority.
+        reopened = Image.open(path)
+        self.assertNotIn(
+            ExifTags.Base.DateTimeOriginal.value,
+            reopened.getexif().get_ifd(self.EXIF_IFD),
+        )
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertEqual(result, datetime(2019, 3, 4, 5, 6, 7))
+        self.assertNotIn(path, self.handler.missing_exif_files)
+
+    def test_malformed_original_falls_through_to_datetime(self):
+        """
+        A malformed higher-priority DateTimeOriginal (sub-IFD) falls through to
+        a valid DateTime (IFD0) instead of returning None (AC #3), and the file
+        is not left flagged as missing EXIF.
+        """
+        path = self._write_jpeg(
+            "malformed.jpg",
+            sub_ifd_tags={ExifTags.Base.DateTimeOriginal: "not-a-date"},
+            ifd0_tags={ExifTags.Base.DateTime: "2019:03:04 05:06:07"},
+        )
+        self._assert_in_sub_ifd_only(path, ExifTags.Base.DateTimeOriginal)
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertEqual(result, datetime(2019, 3, 4, 5, 6, 7))
+        self.assertNotIn(path, self.handler.missing_exif_files)
+
+
 class TestVideoTimestampExtraction(unittest.TestCase):
     """Test cases for ExifHandler._extract_video_timestamp"""
 

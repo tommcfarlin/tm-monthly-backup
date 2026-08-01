@@ -35,6 +35,12 @@ class ExifHandler:
         'DateTimeDigitized'    # Digitization time
     ]
 
+    # Pointer tag (ExifTags.IFD.Exif) to the Exif sub-IFD. The preferred
+    # timestamp tags DateTimeOriginal (0x9003) and DateTimeDigitized (0x9004)
+    # live behind this pointer, NOT in IFD0, so Image.getexif() does not expose
+    # them at the top level. They are only reachable via getexif().get_ifd().
+    EXIF_IFD = 0x8769
+
     # Video file extensions that need special handling
     VIDEO_EXTENSIONS = {
         '.mov', '.mp4', '.m4v', '.avi', '.mkv', '.wmv',
@@ -72,17 +78,25 @@ class ExifHandler:
                     self.missing_exif_files.append(file_path)
                     return None
 
-                # Build a name -> value lookup so we can honor tag priority
-                exif_by_name = {
-                    TAGS.get(tag_id, tag_id): value
-                    for tag_id, value in exif_data.items()
-                }
+                # Flatten IFD0 and the Exif sub-IFD into one name -> value
+                # lookup so the priority walk can actually see the preferred
+                # DateTimeOriginal / DateTimeDigitized tags.
+                candidates = self._timestamp_candidates(exif_data, file_path)
 
                 # Walk TIMESTAMP_TAGS in declared priority order and take the
-                # first tag that is actually present in the EXIF data.
+                # first tag that is present AND parses to a valid datetime. A
+                # malformed higher-priority value falls through to the next
+                # candidate rather than aborting the search.
                 for tag_name in self.TIMESTAMP_TAGS:
-                    if tag_name in exif_by_name:
-                        return self._parse_exif_datetime(exif_by_name[tag_name], file_path)
+                    if tag_name not in candidates:
+                        continue
+                    parsed = self._parse_exif_datetime(candidates[tag_name], file_path)
+                    if parsed is not None:
+                        # A malformed higher-priority tag may have recorded this
+                        # file as missing; a successful parse supersedes that.
+                        while file_path in self.missing_exif_files:
+                            self.missing_exif_files.remove(file_path)
+                        return parsed
 
                 logger.warning(f"No timestamp tags found in EXIF data for {file_path}")
                 self.missing_exif_files.append(file_path)
@@ -92,6 +106,44 @@ class ExifHandler:
             logger.error(f"Error reading EXIF data from {file_path}: {e}")
             self.missing_exif_files.append(file_path)
             return None
+
+    def _timestamp_candidates(self, exif: "Image.Exif", file_path: str) -> dict:
+        """
+        Flatten IFD0 and the Exif sub-IFD into a tag-name -> value mapping.
+
+        Image.getexif() exposes IFD0 only, where the sole timestamp tag is
+        DateTime (file modification time). The preferred DateTimeOriginal and
+        DateTimeDigitized tags live in the Exif sub-IFD behind pointer tag
+        0x8769, reachable via Image.Exif.get_ifd(). This merges both so the
+        priority walk in extract_timestamp can see every declared tag.
+
+        IFD0 values win over sub-IFD values for any shared tag id (setdefault),
+        though in practice the timestamp tags do not overlap between the two.
+
+        Args:
+            exif: The Image.Exif object returned by Image.getexif()
+            file_path: File path, used for logging only
+
+        Returns:
+            Mapping of resolved tag name -> raw tag value
+        """
+        merged = {}
+        for tag_id, value in exif.items():
+            merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+
+        # get_ifd returns {} when the sub-IFD is absent. The guard also covers
+        # exif objects that predate the sub-IFD API (e.g. plain-dict test doubles
+        # lack get_ifd) and malformed pointers that raise on access.
+        try:
+            sub_ifd = exif.get_ifd(self.EXIF_IFD)
+        except (AttributeError, KeyError, OSError, ValueError) as exc:
+            logger.debug(f"No Exif sub-IFD in {file_path}: {exc}")
+            sub_ifd = {}
+
+        for tag_id, value in sub_ifd.items():
+            merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+
+        return merged
 
     def _extract_video_timestamp(self, file_path: str) -> Optional[datetime]:
         """

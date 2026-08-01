@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Timestamp Rollover Crash**: `ExifHandler.handle_duplicate_timestamp` no longer raises `ValueError` when incrementing past a second, minute, hour, or month boundary. Replaced the manual `datetime.replace` arithmetic with `timedelta`, which handles all rollovers correctly.
-- **EXIF Timestamp Priority**: `ExifHandler.extract_timestamp` now walks `TIMESTAMP_TAGS` in declared priority order and returns `DateTimeOriginal` when present, instead of returning whichever timestamp tag the EXIF dictionary happened to surface first.
+- **EXIF Sub-IFD Timestamp Reachability**: `ExifHandler.extract_timestamp` now reads the Exif sub-IFD (pointer tag `0x8769`) via `Image.Exif.get_ifd`, merging it with IFD0 before the priority walk. `DateTimeOriginal` (0x9003) and `DateTimeDigitized` (0x9004) live in the sub-IFD, which `Image.getexif()` does not expose at the top level, so every photo was previously named from IFD0 `DateTime` (file modification time) instead of capture time. The declared priority `DateTimeOriginal` > `DateTime` > `DateTimeDigitized` is now actually honored, and a malformed higher-priority tag falls through to the next candidate rather than aborting. Applies to HEIC as well, since pillow-heif exposes EXIF through the same API.
 
 ## [1.0.0] - 2025-08-01
 
