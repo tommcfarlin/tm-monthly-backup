@@ -68,27 +68,28 @@ class TestFileCategorizer(unittest.TestCase):
         self.assertIn('.aae', categorizer.sidecar_exts)
 
     def test_categorize_photo_extensions(self):
-        """Test categorization of photo file extensions"""
-        photo_files = [
-            "image.jpg",
-            "photo.jpeg",
-            "picture.JPEG",  # Test case insensitive
-            "screenshot.png",  # PNG without screenshot pattern -> photo
-            "image.gif",
-            "photo.heic",
-            "picture.tiff",
-            "raw.dng"
-        ]
+        """Every photo-extension fixture maps to the exact category the code returns.
 
-        for filename in photo_files:
+        ``logo.png`` is a genuine (non-screenshot) PNG and must resolve to PHOTO:
+        if PNG handling ever regresses to classifying every ``.png`` as a
+        SCREENSHOT, this assertion fails rather than silently accepting either
+        outcome (the previous ``assertIn([PHOTO, SCREENSHOT])`` was a tautology).
+        """
+        expected = {
+            "image.jpg": FileCategory.PHOTO,
+            "photo.jpeg": FileCategory.PHOTO,
+            "picture.JPEG": FileCategory.PHOTO,  # case insensitive
+            "logo.png": FileCategory.PHOTO,      # PNG w/o screenshot pattern -> photo
+            "image.gif": FileCategory.PHOTO,
+            "photo.heic": FileCategory.PHOTO,
+            "picture.tiff": FileCategory.PHOTO,
+            "raw.dng": FileCategory.PHOTO,
+        }
+
+        for filename, want in expected.items():
             file_path = self.create_test_file(filename)
             category = self.categorizer.categorize_file(file_path)
-
-            if filename == "screenshot.png":
-                # PNG files need pattern analysis
-                self.assertIn(category, [FileCategory.PHOTO, FileCategory.SCREENSHOT])
-            else:
-                self.assertEqual(category, FileCategory.PHOTO, f"Failed for {filename}")
+            self.assertEqual(category, want, f"Failed for {filename}")
 
     def test_categorize_video_extensions(self):
         """Test categorization of video file extensions"""
@@ -514,23 +515,27 @@ class TestFileCategorization_EdgeCases(unittest.TestCase):
             self.assertEqual(category, expected_category, f"Failed for {filename}")
 
     def test_empty_filename_handling(self):
-        """Test handling of edge case filenames"""
-        # These should not crash the categorizer
+        """Edge-case filenames resolve to UNKNOWN and never crash the categorizer.
+
+        None of these carry a recognized extension (``Path('.jpg').suffix`` is
+        ``''``), so each must categorize as UNKNOWN. ``categorize_file`` parses
+        the path only, so the inputs need not exist on disk and no exception is
+        expected -- if the categorizer raises, this test errors instead of
+        swallowing it in a bare ``except`` (the previous version could not fail).
+        """
         edge_cases = [
-            ".jpg",  # Hidden file with extension
+            ".jpg",  # Hidden-file name; suffix is '' -> no recognized extension
             ".",     # Current directory
             "..",    # Parent directory
         ]
 
         for filename in edge_cases:
-            try:
-                file_path = self.create_test_file(filename)
-                category = self.categorizer.categorize_file(file_path)
-                # Should handle gracefully and return some category
-                self.assertIsInstance(category, FileCategory)
-            except:
-                # It's also acceptable to raise an exception for invalid filenames
-                pass
+            category = self.categorizer.categorize_file(filename)
+            self.assertEqual(
+                category,
+                FileCategory.UNKNOWN,
+                f"expected UNKNOWN for {filename!r}, got {category}",
+            )
 
 
 if __name__ == '__main__':
