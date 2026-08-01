@@ -19,6 +19,7 @@ class TestFileCategory(unittest.TestCase):
         self.assertEqual(FileCategory.PHOTO.value, "photos")
         self.assertEqual(FileCategory.VIDEO.value, "videos")
         self.assertEqual(FileCategory.SCREENSHOT.value, "screenshots")
+        self.assertEqual(FileCategory.GENERATED.value, "generated")
         self.assertEqual(FileCategory.UNKNOWN.value, "unknown")
         self.assertEqual(FileCategory.SIDECAR.value, "sidecar")
 
@@ -254,8 +255,13 @@ class TestFileCategorizer(unittest.TestCase):
 
         result = self.categorizer.get_processable_files()
 
-        # Should only include photos, videos, and screenshots
-        expected_categories = {FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT}
+        # Should include photos, videos, screenshots, and generated
+        expected_categories = {
+            FileCategory.PHOTO,
+            FileCategory.VIDEO,
+            FileCategory.SCREENSHOT,
+            FileCategory.GENERATED
+        }
         self.assertEqual(set(result.keys()), expected_categories)
 
         self.assertEqual(result[FileCategory.PHOTO], ["photo.jpg"])
@@ -298,13 +304,14 @@ class TestFileCategorizer(unittest.TestCase):
             "/test/backup/photos",
             "/test/backup/videos",
             "/test/backup/screenshots",
+            "/test/backup/generated",
             "/test/backup/unknown"
         ]
 
         self.assertEqual(result, expected_dirs)
 
         # Check that makedirs was called for each directory
-        self.assertEqual(mock_makedirs.call_count, 4)
+        self.assertEqual(mock_makedirs.call_count, 5)
         for expected_dir in expected_dirs:
             mock_makedirs.assert_any_call(expected_dir, exist_ok=True)
 
@@ -323,6 +330,7 @@ class TestFileCategorizer(unittest.TestCase):
             'photos': 2,
             'videos': 1,
             'screenshots': 1,
+            'generated': 0,
             'unknown': 0,
             'sidecar': 2,
             'total': 6
@@ -375,6 +383,70 @@ class TestFileCategorizer(unittest.TestCase):
             file_path = self.create_test_file(filename)
             category = self.categorizer.categorize_file(file_path)
             self.assertEqual(category, expected_category, f"Failed for {filename}")
+
+
+class TestGeneratedContentDetection(unittest.TestCase):
+    """Test cases for FileCategorizer._is_generated_content"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.categorizer = FileCategorizer()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        """Clean up test fixtures"""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_ai_marker_in_png_text(self):
+        """PNG text chunks containing AI markers are detected as generated"""
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        file_path = os.path.join(self.temp_dir, "ai_image.png")
+        image = Image.new('RGB', (10, 10), color='green')
+        metadata = PngInfo()
+        metadata.add_text("Comment", "Created with ChatGPT / OpenAI")
+        image.save(file_path, pnginfo=metadata)
+
+        self.assertTrue(self.categorizer._is_generated_content(file_path))
+
+    def test_plain_png_not_generated(self):
+        """A plain PNG with no AI markers is not flagged as generated"""
+        from PIL import Image
+
+        file_path = os.path.join(self.temp_dir, "plain.png")
+        Image.new('RGB', (10, 10), color='blue').save(file_path)
+
+        self.assertFalse(self.categorizer._is_generated_content(file_path))
+
+    def test_editing_software_without_original_timestamp(self):
+        """Editing software with no original timestamp is flagged as generated"""
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+
+        # Resolve the numeric tag id for 'Software'
+        software_tag = next(tag_id for tag_id, name in TAGS.items() if name == 'Software')
+
+        file_path = os.path.join(self.temp_dir, "edited.jpg")
+        image = Image.new('RGB', (10, 10), color='red')
+        exif = image.getexif()
+        exif[software_tag] = "Adobe Photoshop 2024"
+        image.save(file_path, exif=exif)
+
+        self.assertTrue(self.categorizer._is_generated_content(file_path))
+
+    def test_uuid_stem_detected(self):
+        """A UUID-style filename stem is flagged as generated"""
+        from PIL import Image
+
+        # 36-char UUID stem with four dashes
+        file_path = os.path.join(
+            self.temp_dir, "12345678-1234-1234-1234-123456789abc.jpg"
+        )
+        Image.new('RGB', (10, 10), color='red').save(file_path)
+
+        self.assertTrue(self.categorizer._is_generated_content(file_path))
 
 
 class TestFileCategorization_EdgeCases(unittest.TestCase):

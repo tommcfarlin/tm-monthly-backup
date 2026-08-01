@@ -146,24 +146,30 @@ class TestExifHandler(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("test.jpg", self.handler.missing_exif_files)
 
-    @patch('os.path.getmtime')
-    def test_get_fallback_timestamp(self, mock_getmtime):
+    @patch('os.stat')
+    def test_get_fallback_timestamp(self, mock_stat):
         """Test fallback timestamp from filesystem"""
-        # Mock file modification time
+        # Mock a stat result exposing the attributes get_fallback_timestamp reads.
+        # st_birthtime != st_ctime so the creation-time branch is exercised.
         mock_timestamp = 1705330245.0  # 2024-01-15 14:30:45 UTC
-        mock_getmtime.return_value = mock_timestamp
+        stat_result = Mock()
+        stat_result.st_birthtime = mock_timestamp
+        stat_result.st_ctime = 1000000000.0
+        stat_result.st_mtime = 1600000000.0
+        mock_stat.return_value = stat_result
 
         result = self.handler.get_fallback_timestamp("test_file.jpg")
 
-        # Should return datetime object from timestamp
+        # Should return datetime object from the birthtime timestamp
         self.assertIsInstance(result, datetime)
-        mock_getmtime.assert_called_once_with("test_file.jpg")
+        self.assertEqual(result, datetime.fromtimestamp(mock_timestamp))
+        mock_stat.assert_called_once_with("test_file.jpg")
 
-    @patch('os.path.getmtime')
-    def test_get_fallback_timestamp_error(self, mock_getmtime):
+    @patch('os.stat')
+    def test_get_fallback_timestamp_error(self, mock_stat):
         """Test fallback timestamp when filesystem error occurs"""
         # Mock OSError
-        mock_getmtime.side_effect = OSError("File not found")
+        mock_stat.side_effect = OSError("File not found")
 
         result = self.handler.get_fallback_timestamp("test_file.jpg")
 
@@ -282,6 +288,78 @@ class TestExifHandler(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn("nonexistent.jpg", self.handler.missing_exif_files)
+
+
+class TestVideoTimestampExtraction(unittest.TestCase):
+    """Test cases for ExifHandler._extract_video_timestamp"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.handler = ExifHandler()
+
+    @patch('src.exif_handler.HACHOIR_AVAILABLE', False)
+    def test_extract_video_timestamp_no_hachoir(self):
+        """When hachoir is unavailable, extraction returns None and logs the file"""
+        result = self.handler._extract_video_timestamp("movie.mov")
+
+        self.assertIsNone(result)
+        self.assertIn("movie.mov", self.handler.missing_exif_files)
+
+    @patch('src.exif_handler.HACHOIR_AVAILABLE', True)
+    @patch('src.exif_handler.extractMetadata', create=True)
+    @patch('src.exif_handler.createParser', create=True)
+    def test_extract_video_timestamp_from_metadata(self, mock_create_parser, mock_extract_metadata):
+        """A creation_date in video metadata is returned as a datetime"""
+        expected = datetime(2024, 1, 15, 14, 30, 45)
+
+        class FakeMetadata:
+            creation_date = expected
+
+        mock_create_parser.return_value = MagicMock()  # truthy context manager
+        mock_extract_metadata.return_value = FakeMetadata()
+
+        result = self.handler._extract_video_timestamp("movie.mov")
+
+        self.assertEqual(result, expected)
+        self.assertEqual(len(self.handler.missing_exif_files), 0)
+
+    @patch('src.exif_handler.HACHOIR_AVAILABLE', True)
+    @patch('src.exif_handler.createParser', create=True)
+    def test_extract_video_timestamp_no_parser(self, mock_create_parser):
+        """When no parser can be created, extraction returns None and logs the file"""
+        mock_create_parser.return_value = None
+
+        result = self.handler._extract_video_timestamp("movie.mov")
+
+        self.assertIsNone(result)
+        self.assertIn("movie.mov", self.handler.missing_exif_files)
+
+
+class TestFilenameTimestampExtraction(unittest.TestCase):
+    """Test cases for ExifHandler._extract_timestamp_from_filename"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.handler = ExifHandler()
+
+    def test_pattern_dash_separated(self):
+        """Pattern 1: YYYY-MM-DD-HH-MM-SS style filenames"""
+        result = self.handler._extract_timestamp_from_filename(
+            "IMG_2024-01-15-14-30-45.jpg"
+        )
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
+
+    def test_pattern_compact(self):
+        """Pattern 2: YYYYMMDD_HHMMSS style filenames"""
+        result = self.handler._extract_timestamp_from_filename(
+            "VID_20240115_143045.mov"
+        )
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
+
+    def test_no_match_returns_none(self):
+        """Filenames without a recognizable date pattern return None"""
+        result = self.handler._extract_timestamp_from_filename("Attachment-1.jpg")
+        self.assertIsNone(result)
 
 
 class TestExifHandlerIntegration(unittest.TestCase):

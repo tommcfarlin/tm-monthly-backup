@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Timestamp Rollover Crash**: `ExifHandler.handle_duplicate_timestamp` no longer raises `ValueError` when incrementing past a second, minute, hour, or month boundary. Replaced the manual `datetime.replace` arithmetic with `timedelta`, which handles all rollovers correctly.
+- **EXIF Timestamp Priority**: `ExifHandler.extract_timestamp` now walks `TIMESTAMP_TAGS` in declared priority order and returns `DateTimeOriginal` when present, instead of returning whichever timestamp tag the EXIF dictionary happened to surface first.
+
 ## [1.0.0] - 2025-08-01
 
 ### Added
