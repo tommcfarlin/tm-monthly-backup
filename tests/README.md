@@ -77,7 +77,16 @@ python -m unittest tests.test_exif_handler.TestExifHandler.test_extract_timestam
 
 ## Test Data
 
-Tests use temporary directories and mock objects to avoid requiring real image files with EXIF data. The test suite is designed to run in any environment without external dependencies.
+Tests build real image files on disk in temporary directories via the shared,
+self-verifying fixtures in `tests/fixtures.py`. `make_exif_jpeg` writes genuine
+EXIF laid out the way a camera does it -- `DateTimeOriginal` /
+`DateTimeDigitized` in the Exif sub-IFD (0x8769), `DateTime` in IFD0 -- and
+reopens each file to confirm the round-trip before returning, so a caller cannot
+silently construct a broken fixture. The EXIF read path is therefore exercised
+end-to-end against real bytes. Mocking is reserved for conditions that are
+awkward to reproduce deterministically on disk (e.g. a low-level I/O error on
+open). The suite still runs in any environment without external dependencies
+beyond Pillow.
 
 ## Coverage Areas
 

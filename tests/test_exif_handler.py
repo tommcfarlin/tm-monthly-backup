@@ -6,12 +6,16 @@ import unittest
 import tempfile
 import os
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from PIL import Image, ExifTags
-import io
 
 from src.exif_handler import ExifHandler
+from tests.fixtures import (
+    make_corrupt_jpeg,
+    make_exif_jpeg,
+    make_no_exif_jpeg,
+    read_ifds,
+)
 
 
 class TestExifHandler(unittest.TestCase):
@@ -28,51 +32,9 @@ class TestExifHandler(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def create_test_image_with_exif(self, timestamp_str: str = "2024:01:15 14:30:45") -> str:
-        """
-        Create a test image file with EXIF timestamp data.
-
-        Args:
-            timestamp_str: EXIF timestamp string
-
-        Returns:
-            Path to created test image
-        """
-        # Create a simple test image
-        image = Image.new('RGB', (100, 100), color='red')
-
-        # Create EXIF data
-        exif_dict = {
-            ExifTags.TAGS['DateTimeOriginal']: timestamp_str,
-            ExifTags.TAGS['DateTime']: timestamp_str,
-        }
-
-        # Convert to EXIF format
-        exif_bytes = image._getexif() or {}
-        for tag, value in exif_dict.items():
-            # Find the numeric tag ID
-            for tag_id, tag_name in ExifTags.TAGS.items():
-                if tag_name == tag:
-                    exif_bytes[tag_id] = value
-                    break
-
-        # Save image with EXIF data
-        test_file = os.path.join(self.temp_dir, "test_image.jpg")
-        image.save(test_file, exif=exif_bytes)
-
-        return test_file
-
-    def create_test_image_without_exif(self) -> str:
-        """
-        Create a test image file without EXIF data.
-
-        Returns:
-            Path to created test image
-        """
-        image = Image.new('RGB', (100, 100), color='blue')
-        test_file = os.path.join(self.temp_dir, "no_exif_image.jpg")
-        image.save(test_file)
-        return test_file
+    def _path(self, name: str) -> str:
+        """Return an absolute path inside this test's temp directory."""
+        return os.path.join(self.temp_dir, name)
 
     def test_init(self):
         """Test ExifHandler initialization"""
@@ -85,54 +47,59 @@ class TestExifHandler(unittest.TestCase):
             'DateTimeDigitized'
         ])
 
-    @patch('src.exif_handler.Image')
-    def test_extract_timestamp_success(self, mock_image):
-        """Test successful timestamp extraction"""
-        # Mock image with EXIF data
-        mock_img = MagicMock()
-        mock_exif = {
-            306: "2024:01:15 14:30:45"  # DateTime tag
-        }
-        mock_img.getexif.return_value = mock_exif
-        mock_image.open.return_value.__enter__.return_value = mock_img
+    def test_fixture_produces_non_empty_exif(self):
+        """
+        The shared fixture writes real EXIF: a file it produces has a non-empty
+        getexif() (acceptance guard against a helper that silently writes none).
+        """
+        path = make_exif_jpeg(
+            self._path("has_exif.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+        top, sub = read_ifds(path)
 
-        # Mock TAGS mapping
-        with patch.dict('src.exif_handler.TAGS', {306: 'DateTime'}):
-            result = self.handler.extract_timestamp("test_file.jpg")
+        self.assertTrue(top, "fixture produced an empty top-level getexif()")
+        # DateTimeOriginal must be realistic: absent from IFD0, present in the
+        # Exif sub-IFD (0x8769), matching how real cameras write it.
+        self.assertNotIn(ExifTags.Base.DateTimeOriginal.value, top)
+        self.assertIn(ExifTags.Base.DateTimeOriginal.value, sub)
 
-        expected = datetime(2024, 1, 15, 14, 30, 45)
-        self.assertEqual(result, expected)
+    def test_extract_timestamp_success(self):
+        """Timestamp extraction from a real DateTime tag in IFD0."""
+        path = make_exif_jpeg(
+            self._path("dt.jpg"),
+            date_time="2024:01:15 14:30:45",
+        )
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
         self.assertEqual(len(self.handler.missing_exif_files), 0)
 
-    @patch('src.exif_handler.Image')
-    def test_extract_timestamp_no_exif(self, mock_image):
-        """Test timestamp extraction when no EXIF data present"""
-        # Mock image without EXIF data
-        mock_img = MagicMock()
-        mock_img.getexif.return_value = {}
-        mock_image.open.return_value.__enter__.return_value = mock_img
+    def test_extract_timestamp_no_exif(self):
+        """A real JPEG with no EXIF resolves to None and is logged as missing."""
+        path = make_no_exif_jpeg(self._path("bare.jpg"))
 
-        result = self.handler.extract_timestamp("test_file.jpg")
+        result = self.handler.extract_timestamp(path)
 
         self.assertIsNone(result)
-        self.assertIn("test_file.jpg", self.handler.missing_exif_files)
+        self.assertIn(path, self.handler.missing_exif_files)
 
-    @patch('src.exif_handler.Image')
-    def test_extract_timestamp_no_timestamp_tags(self, mock_image):
-        """Test timestamp extraction when EXIF exists but no timestamp tags"""
-        # Mock image with EXIF but no timestamp tags
-        mock_img = MagicMock()
-        mock_exif = {
-            271: "Test Camera"  # Make tag (not a timestamp)
-        }
-        mock_img.getexif.return_value = mock_exif
-        mock_image.open.return_value.__enter__.return_value = mock_img
+    def test_extract_timestamp_no_timestamp_tags(self):
+        """
+        A real JPEG carrying EXIF but no timestamp tag resolves to None and is
+        logged as missing. The Make tag lives in IFD0 and is not a timestamp.
+        """
+        image = Image.new("RGB", (48, 48), color="green")
+        exif = image.getexif()
+        exif[ExifTags.Base.Make.value] = "Test Camera"
+        path = self._path("make_only.jpg")
+        image.save(path, format="JPEG", exif=exif)
 
-        with patch.dict('src.exif_handler.TAGS', {271: 'Make'}):
-            result = self.handler.extract_timestamp("test_file.jpg")
+        result = self.handler.extract_timestamp(path)
 
         self.assertIsNone(result)
-        self.assertIn("test_file.jpg", self.handler.missing_exif_files)
+        self.assertIn(path, self.handler.missing_exif_files)
 
     def test_parse_exif_datetime_valid(self):
         """Test parsing valid EXIF datetime string"""
@@ -251,37 +218,30 @@ class TestExifHandler(unittest.TestCase):
 
         self.assertEqual(len(self.handler.missing_exif_files), 0)
 
-    @patch('src.exif_handler.Image')
-    def test_extract_timestamp_prefers_datetime_original(self, mock_image):
-        """Test that DateTimeOriginal is preferred over other timestamp tags"""
-        # Mock image with multiple timestamp tags
-        mock_img = MagicMock()
-        mock_exif = {
-            306: "2024:01:15 10:00:00",  # DateTime
-            36867: "2024:01:15 14:30:45",  # DateTimeOriginal (should be preferred)
-            36868: "2024:01:15 15:00:00"   # DateTimeDigitized
-        }
-        mock_img.getexif.return_value = mock_exif
-        mock_image.open.return_value.__enter__.return_value = mock_img
+    # Tag-priority (DateTimeOriginal wins over DateTime) is exercised end-to-end
+    # against real sub-IFD bytes in TestSubIfdTimestampExtraction below. The old
+    # mock version of that test placed DateTimeOriginal in a flat dict (IFD0),
+    # which is structurally unlike any real photo and passed against broken code
+    # (issue #25 correction), so it was removed rather than converted.
 
-        # Mock TAGS mapping
-        tags_mapping = {
-            306: 'DateTime',
-            36867: 'DateTimeOriginal',
-            36868: 'DateTimeDigitized'
-        }
+    def test_extract_timestamp_corrupt_file(self):
+        """A real, undecodable file resolves to None and is logged as missing."""
+        path = make_corrupt_jpeg(self._path("corrupt.jpg"))
 
-        with patch.dict('src.exif_handler.TAGS', tags_mapping):
-            result = self.handler.extract_timestamp("test_file.jpg")
+        result = self.handler.extract_timestamp(path)
 
-        # Should prefer DateTimeOriginal
-        expected = datetime(2024, 1, 15, 14, 30, 45)
-        self.assertEqual(result, expected)
+        self.assertIsNone(result)
+        self.assertIn(path, self.handler.missing_exif_files)
 
     @patch('src.exif_handler.Image')
-    def test_extract_timestamp_file_error(self, mock_image):
-        """Test timestamp extraction when file cannot be opened"""
-        # Mock file open error
+    def test_extract_timestamp_open_error(self, mock_image):
+        """
+        A low-level open failure is caught, returns None, and logs the file.
+
+        Kept as a mock: this pins the exception handler for I/O errors that are
+        awkward to reproduce deterministically on disk (e.g. permission or
+        device errors), distinct from the corrupt-header case above.
+        """
         mock_image.open.side_effect = IOError("Cannot open file")
 
         result = self.handler.extract_timestamp("nonexistent.jpg")
@@ -317,31 +277,31 @@ class TestSubIfdTimestampExtraction(unittest.TestCase):
         Write a JPEG whose sub_ifd_tags go into the Exif sub-IFD and whose
         ifd0_tags go into IFD0. Tag keys are ExifTags.Base members.
 
+        Delegates to the shared, self-verifying ``make_exif_jpeg`` builder so
+        the sub-IFD layout is validated at build time; this method only adapts
+        the dict-of-Base-members call convention these tests were written with.
+
         Returns the file path.
         """
-        image = Image.new('RGB', (16, 16), color='red')
-        exif = Image.Exif()
+        sub_ifd_tags = sub_ifd_tags or {}
+        ifd0_tags = ifd0_tags or {}
 
-        for tag, value in (ifd0_tags or {}).items():
-            exif[tag.value] = value
+        kwargs = {}
+        if ExifTags.Base.DateTime in ifd0_tags:
+            kwargs["date_time"] = ifd0_tags[ExifTags.Base.DateTime]
+        if ExifTags.Base.DateTimeOriginal in sub_ifd_tags:
+            kwargs["date_time_original"] = sub_ifd_tags[ExifTags.Base.DateTimeOriginal]
+        if ExifTags.Base.DateTimeDigitized in sub_ifd_tags:
+            kwargs["date_time_digitized"] = sub_ifd_tags[ExifTags.Base.DateTimeDigitized]
 
-        if sub_ifd_tags:
-            sub = exif.get_ifd(self.EXIF_IFD)
-            for tag, value in sub_ifd_tags.items():
-                sub[tag.value] = value
-
-        path = os.path.join(self.temp_dir, name)
-        image.save(path, format='JPEG', exif=exif)
-        return path
+        return make_exif_jpeg(os.path.join(self.temp_dir, name), **kwargs)
 
     def _assert_in_sub_ifd_only(self, path, tag):
         """
         Guard: verify `tag` round-tripped into the Exif sub-IFD and is NOT in
         top-level getexif(). If this fails the fixture is worthless.
         """
-        reopened = Image.open(path)
-        top = reopened.getexif()
-        sub = top.get_ifd(self.EXIF_IFD)
+        top, sub = read_ifds(path)
         self.assertIn(
             tag.value, sub,
             f"{tag.name} did not land in the Exif sub-IFD; fixture is invalid",
@@ -403,11 +363,8 @@ class TestSubIfdTimestampExtraction(unittest.TestCase):
         )
 
         # Confirm there is no sub-IFD DateTimeOriginal to steal priority.
-        reopened = Image.open(path)
-        self.assertNotIn(
-            ExifTags.Base.DateTimeOriginal.value,
-            reopened.getexif().get_ifd(self.EXIF_IFD),
-        )
+        _top, sub = read_ifds(path)
+        self.assertNotIn(ExifTags.Base.DateTimeOriginal.value, sub)
 
         result = self.handler.extract_timestamp(path)
 
@@ -431,6 +388,70 @@ class TestSubIfdTimestampExtraction(unittest.TestCase):
 
         self.assertEqual(result, datetime(2019, 3, 4, 5, 6, 7))
         self.assertNotIn(path, self.handler.missing_exif_files)
+
+
+class TestBoundaryTimestampFixtures(unittest.TestCase):
+    """
+    Boundary-date fixtures the suite historically lacked. Each builds a real
+    JPEG whose DateTimeOriginal sits in the Exif sub-IFD, extracts it, and
+    asserts the resulting YYYY.MM.DD.HH.MM.SS filename -- exercising the full
+    read + format path across calendar edges.
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _extract_and_format(self, name, exif_datetime):
+        """Build a sub-IFD DateTimeOriginal fixture, extract, and format."""
+        path = make_exif_jpeg(
+            os.path.join(self.temp_dir, name),
+            date_time_original=exif_datetime,
+        )
+        result = self.handler.extract_timestamp(path)
+        self.assertIsNotNone(result, f"{exif_datetime} failed to resolve")
+        return self.handler.format_timestamp_filename(result)
+
+    def test_leap_day(self):
+        """Feb 29 on a leap year round-trips to the expected filename."""
+        self.assertEqual(
+            self._extract_and_format("leap.jpg", "2024:02:29 12:00:00"),
+            "2024.02.29.12.00.00",
+        )
+
+    def test_year_end(self):
+        """The final second of a year round-trips to the expected filename."""
+        self.assertEqual(
+            self._extract_and_format("yearend.jpg", "2023:12:31 23:59:59"),
+            "2023.12.31.23.59.59",
+        )
+
+    def test_month_end(self):
+        """The final second of a month round-trips to the expected filename."""
+        self.assertEqual(
+            self._extract_and_format("monthend.jpg", "2024:01:31 23:59:59"),
+            "2024.01.31.23.59.59",
+        )
+
+    def test_invalid_exif_datetime_lands_in_missing(self):
+        """
+        A file whose only timestamp is a malformed EXIF string (impossible
+        month/day/time) resolves to None and is recorded as missing EXIF,
+        pinning the _parse_exif_datetime failure path against real bytes.
+        """
+        path = make_exif_jpeg(
+            os.path.join(self.temp_dir, "invalid.jpg"),
+            date_time_original="2024:13:45 99:99:99",
+        )
+
+        result = self.handler.extract_timestamp(path)
+
+        self.assertIsNone(result)
+        self.assertIn(path, self.handler.get_missing_exif_files())
 
 
 class TestVideoTimestampExtraction(unittest.TestCase):
