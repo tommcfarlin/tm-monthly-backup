@@ -205,22 +205,23 @@ class TestWorkflowIntegration(unittest.TestCase):
 
     def test_missing_exif_handling(self):
         """Test handling of files with missing EXIF data"""
-        # Create test file
-        test_file = self.create_test_file("no_exif.jpg")
+        # Create a file that is not a real image, so real EXIF extraction
+        # fails and the handler records it as a missing-EXIF file. This tests
+        # the actual code path rather than mocking extract_timestamp (which
+        # would bypass the logic that appends to missing_exif_files).
+        self.create_test_file("no_exif.jpg")
 
-        # Mock EXIF extraction to return None (missing EXIF)
-        with patch.object(self.processor.exif_handler, 'extract_timestamp') as mock_extract:
-            mock_extract.return_value = None
+        # Use a deterministic fallback so processing does not depend on the
+        # filesystem clock, but let extract_timestamp run for real.
+        with patch.object(self.processor.exif_handler, 'get_fallback_timestamp') as mock_fallback:
+            fallback_time = datetime(2024, 1, 15, 12, 0, 0)
+            mock_fallback.return_value = fallback_time
 
-            # Mock fallback timestamp
-            with patch.object(self.processor.exif_handler, 'get_fallback_timestamp') as mock_fallback:
-                fallback_time = datetime(2024, 1, 15, 12, 0, 0)
-                mock_fallback.return_value = fallback_time
+            results = self.processor.process_all_files(dry_run=True)
 
-                results = self.processor.process_all_files(dry_run=True)
-
-                # Should still process the file using fallback
-                self.assertEqual(results['missing_exif_files'], 1)
+            # The unreadable image should be recorded as a missing-EXIF file
+            # and still be processed via the fallback timestamp.
+            self.assertEqual(results['missing_exif_files'], 1)
 
     def test_directory_creation(self):
         """Test that backup directories are created properly"""

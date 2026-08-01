@@ -4,7 +4,7 @@ EXIF timestamp extraction and handling module for photos and videos
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from pathlib import Path
 from PIL import Image
@@ -72,12 +72,17 @@ class ExifHandler:
                     self.missing_exif_files.append(file_path)
                     return None
 
-                # Try each timestamp tag in order of preference
-                for tag_id, value in exif_data.items():
-                    tag_name = TAGS.get(tag_id, tag_id)
+                # Build a name -> value lookup so we can honor tag priority
+                exif_by_name = {
+                    TAGS.get(tag_id, tag_id): value
+                    for tag_id, value in exif_data.items()
+                }
 
-                    if tag_name in self.TIMESTAMP_TAGS:
-                        return self._parse_exif_datetime(value, file_path)
+                # Walk TIMESTAMP_TAGS in declared priority order and take the
+                # first tag that is actually present in the EXIF data.
+                for tag_name in self.TIMESTAMP_TAGS:
+                    if tag_name in exif_by_name:
+                        return self._parse_exif_datetime(exif_by_name[tag_name], file_path)
 
                 logger.warning(f"No timestamp tags found in EXIF data for {file_path}")
                 self.missing_exif_files.append(file_path)
@@ -290,15 +295,8 @@ class ExifHandler:
         max_attempts = 3600  # Max 1 hour of adjustments
 
         while attempts < max_attempts:
-            adjusted = adjusted.replace(second=adjusted.second + 1)
-
-            # Handle second overflow
-            if adjusted.second >= 60:
-                adjusted = adjusted.replace(second=0, minute=adjusted.minute + 1)
-                if adjusted.minute >= 60:
-                    adjusted = adjusted.replace(minute=0, hour=adjusted.hour + 1)
-                    if adjusted.hour >= 24:
-                        adjusted = adjusted.replace(hour=0, day=adjusted.day + 1)
+            # timedelta handles second/minute/hour/day/month/year rollover
+            adjusted = adjusted + timedelta(seconds=1)
 
             formatted = self.format_timestamp_filename(adjusted)
             if formatted not in existing_files:
