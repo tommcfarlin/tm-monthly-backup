@@ -10,6 +10,10 @@ This directory contains comprehensive tests for the tm-monthly-backup applicatio
 
 ### Integration Tests
 - **`test_integration.py`** - End-to-end workflow tests and component integration
+- **`test_landing_paths.py`** - Real-pipeline landing-path tests that run
+  `process_all_files(dry_run=False)` against real fixtures and assert files
+  actually arrive at `backup/<category>/<timestamp>.<ext>` with the right
+  contents (no mocking of `shutil.move`, `os.remove`, or the HEIC converter)
 
 ### Test Runner
 - **`run_tests.py`** - Custom test runner with filtering options
@@ -75,6 +79,16 @@ python -m unittest tests.test_exif_handler.TestExifHandler.test_extract_timestam
 - Performance testing with multiple files
 - Error recovery and resilience testing
 
+### Landing-Path Tests
+- Photos land at their exact EXIF-derived path (`backup/photos/<timestamp>.jpg`)
+- HEIC fixtures are converted end-to-end to JPEG and the original `.heic` is
+  removed -- without mocking the converter -- with pixel dimensions/contents
+  verified so a name-only rename cannot pass
+- Each processable category (photo, screenshot, video, generated) lands in its
+  own subdirectory, one file each, with per-file identity checks against swaps
+- `.aae` sidecars are deleted, unknown files are left untouched in export, and
+  the backup tree contains exactly the expected renamed files
+
 ## Test Data
 
 Tests build real image files on disk in temporary directories via the shared,
@@ -82,8 +96,10 @@ self-verifying fixtures in `tests/fixtures.py`. `make_exif_jpeg` writes genuine
 EXIF laid out the way a camera does it -- `DateTimeOriginal` /
 `DateTimeDigitized` in the Exif sub-IFD (0x8769), `DateTime` in IFD0 -- and
 reopens each file to confirm the round-trip before returning, so a caller cannot
-silently construct a broken fixture. The EXIF read path is therefore exercised
-end-to-end against real bytes. Mocking is reserved for conditions that are
+silently construct a broken fixture. `make_exif_heic` is the HEIC analogue: it
+encodes a genuine HEIF image via pillow-heif and reopens it to confirm both the
+HEIF decode and that `DateTimeOriginal` landed in the Exif sub-IFD. The EXIF read
+path is therefore exercised end-to-end against real bytes. Mocking is reserved for conditions that are
 awkward to reproduce deterministically on disk (e.g. a low-level I/O error on
 open). The suite still runs in any environment without external dependencies
 beyond Pillow.
@@ -93,6 +109,9 @@ beyond Pillow.
 ✅ **EXIF Processing** - Timestamp extraction, parsing, formatting
 ✅ **File Categorization** - Extension matching, pattern detection
 ✅ **Workflow Integration** - End-to-end processing scenarios
+✅ **Landing Paths** - Files verified to arrive at their renamed
+   `backup/<category>/<timestamp>.<ext>` destinations with correct contents
+✅ **HEIC Conversion** - Real HEIC-to-JPEG conversion end-to-end, original removed
 ✅ **Error Handling** - Graceful failure and recovery
 ✅ **CLI Interface** - User interaction and progress display
 ✅ **Performance** - Processing speed with multiple files
