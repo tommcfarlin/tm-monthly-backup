@@ -73,11 +73,17 @@ python -m unittest tests.test_exif_handler.TestExifHandler.test_extract_timestam
 - Edge cases and error scenarios
 
 ### Integration Tests
-- Complete workflow simulation
+- Complete workflow simulation with real (non-dry) runs that assert files land
+  at their renamed `backup/<category>/<timestamp>.<ext>` destinations
+- Duplicate-timestamp collision resolution end-to-end, including across
+  categories (the global `used_timestamps` set)
 - CLI interface validation
 - Real-world usage scenarios
-- Performance testing with multiple files
-- Error recovery and resilience testing
+- Correctness at scale (many files land as many distinct renamed files)
+- Error recovery and resilience: a real `shutil.move` failure is captured while
+  the other files still land (no mocking of `_process_single_file`)
+- Processing-state cleanup: every state container is populated by a real run and
+  proven empty after `clear_processing_state()`
 
 ### Landing-Path Tests
 - Photos land at their exact EXIF-derived path (`backup/photos/<timestamp>.jpg`)
@@ -112,9 +118,9 @@ beyond Pillow.
 ✅ **Landing Paths** - Files verified to arrive at their renamed
    `backup/<category>/<timestamp>.<ext>` destinations with correct contents
 ✅ **HEIC Conversion** - Real HEIC-to-JPEG conversion end-to-end, original removed
-✅ **Error Handling** - Graceful failure and recovery
+✅ **Error Handling** - Graceful failure and recovery (real move failure, other files still land)
 ✅ **CLI Interface** - User interaction and progress display
-✅ **Performance** - Processing speed with multiple files
+✅ **Scale** - Correctness across many files (collision resolution, no overwrites)
 
 ## Dependencies
 
@@ -130,7 +136,9 @@ Optional:
 
 Each test:
 - Uses temporary directories that are cleaned up automatically
-- Mocks external dependencies and file operations
+- Performs real file operations against those temp trees; mocking is reserved
+  for conditions awkward to reproduce deterministically (e.g. a forced
+  `shutil.move` failure or a low-level open error)
 - Runs independently without affecting other tests
 - Can be executed in any order
 
