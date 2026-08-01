@@ -89,6 +89,17 @@ class CLIInterface:
         export_path = Path(self.processor.export_dir)
         backup_path = Path(self.processor.backup_dir)
 
+        # Refuse to run when the export and backup directories overlap (same
+        # directory, or one nested inside the other). Such a configuration lets
+        # a run consume and clobber its own inputs, so reject it up front before
+        # creating anything.
+        overlap_error = FileProcessor.directory_overlap_error(
+            self.processor.export_dir, self.processor.backup_dir
+        )
+        if overlap_error:
+            self.console.print(f"[red]Error: {overlap_error}[/red]")
+            return False
+
         # Check export directory
         if not export_path.exists():
             self.console.print(f"[red]Error: Export directory does not exist: {export_path}[/red]")

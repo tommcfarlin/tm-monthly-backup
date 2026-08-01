@@ -31,6 +31,8 @@ class FileProcessor:
         self.backup_dir = backup_dir
 
         # Initialize component handlers
+        # (overlap is validated lazily at process time; see
+        # ``directory_overlap_error`` and ``process_all_files``)
         self.exif_handler = ExifHandler()
         self.heic_converter = HeicConverter()
         self.categorizer = FileCategorizer()
@@ -41,6 +43,51 @@ class FileProcessor:
         self.failed_files = []
         self.conversion_log = []
 
+    @staticmethod
+    def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
+        """
+        Return an actionable message if export/backup directories overlap.
+
+        The tool consumes the export tree (it deletes ``.aae`` sidecars and the
+        original ``.heic`` after conversion) and writes sorted output into the
+        backup tree. If the two roots are the same, or one is nested inside the
+        other, a run can re-ingest and destroy its own inputs. Any such overlap
+        is a misconfiguration and must be rejected before any filesystem
+        mutation.
+
+        Paths are resolved with :meth:`pathlib.Path.resolve` first so symlinked
+        or relative aliases of the same location are caught, then compared for
+        equality and containment in both directions.
+
+        Args:
+            export_dir: Source directory containing exported files.
+            backup_dir: Destination directory for organized output.
+
+        Returns:
+            A human-readable error message naming both paths when they overlap,
+            or ``None`` when the configuration is safe.
+        """
+        export_root = Path(export_dir).resolve()
+        backup_root = Path(backup_dir).resolve()
+
+        if export_root == backup_root:
+            return (
+                "--export-dir and --backup-dir must not be the same directory: "
+                f"{export_root}"
+            )
+        if backup_root.is_relative_to(export_root):
+            return (
+                f"--backup-dir ({backup_root}) must not be inside --export-dir "
+                f"({export_root}); each run would re-ingest and destroy the archive"
+            )
+        if export_root.is_relative_to(backup_root):
+            return (
+                f"--export-dir ({export_root}) must not be inside --backup-dir "
+                f"({backup_root}); the source tree would be consumed from within "
+                "the destination"
+            )
+        return None
+
     def process_all_files(self, dry_run: bool = False) -> Dict[str, any]:
         """
         Process all files in export directory.
@@ -50,8 +97,21 @@ class FileProcessor:
 
         Returns:
             Dictionary with processing results and statistics
+
+        Raises:
+            ValueError: If the export and backup directories overlap (same
+                directory, or one nested inside the other), which would let a
+                run destroy its own inputs.
         """
         logger.info(f"Starting file processing (dry_run={dry_run})")
+
+        # Refuse to run when the export and backup roots overlap: the export
+        # tree is consumed in place, so an overlapping destination lets a run
+        # clobber files it is meant to preserve. Guard before any scan/mutation.
+        overlap_error = self.directory_overlap_error(self.export_dir, self.backup_dir)
+        if overlap_error:
+            logger.error(overlap_error)
+            raise ValueError(overlap_error)
 
         # Scan export directory
         all_files = self._scan_export_directory()
