@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock
 from src.file_processor import FileProcessor
 from src.file_categorizer import FileCategory
 from src.cli_interface import CLIInterface
+from tests.fixtures import make_exif_jpeg, make_no_exif_jpeg
 
 
 class TestWorkflowIntegration(unittest.TestCase):
@@ -61,31 +62,39 @@ class TestWorkflowIntegration(unittest.TestCase):
 
     def create_test_image_with_exif(self, filename: str, timestamp_str: str = "2024:01:15 14:30:45") -> str:
         """
-        Create a test image file with EXIF data.
+        Create a real JPEG in the export directory with a genuine EXIF timestamp.
+
+        The timestamp is written into the Exif sub-IFD (0x8769) as
+        DateTimeOriginal, exactly the way a camera lays it out, via the shared
+        self-verifying fixture builder. Unlike the previous version, the file it
+        produces actually carries EXIF the tool can extract.
 
         Args:
-            filename: Name of image file to create
-            timestamp_str: EXIF timestamp string
+            filename: Name of image file to create.
+            timestamp_str: EXIF DateTimeOriginal string ("YYYY:MM:DD HH:MM:SS").
 
         Returns:
-            Full path to created image
+            Full path to created image.
         """
-        try:
-            from PIL import Image
-            from PIL.ExifTags import TAGS
+        return make_exif_jpeg(
+            os.path.join(self.export_dir, filename),
+            date_time_original=timestamp_str,
+        )
 
-            # Create a simple test image
-            image = Image.new('RGB', (100, 100), color='red')
+    def create_test_image_without_exif(self, filename: str) -> str:
+        """
+        Create a real JPEG in the export directory that carries no EXIF data.
 
-            # For testing purposes, we'll use a simpler approach
-            # In real tests, proper EXIF would be added
-            file_path = os.path.join(self.export_dir, filename)
-            image.save(file_path, format='JPEG')
+        Exercises the missing-EXIF / filesystem-fallback path with genuine image
+        bytes rather than a text file renamed to ``.jpg``.
 
-            return file_path
-        except ImportError:
-            # Fallback if PIL not available in test environment
-            return self.create_test_file(filename)
+        Args:
+            filename: Name of image file to create.
+
+        Returns:
+            Full path to created image.
+        """
+        return make_no_exif_jpeg(os.path.join(self.export_dir, filename))
 
     def test_empty_export_directory(self):
         """Test processing when export directory is empty"""
@@ -222,6 +231,36 @@ class TestWorkflowIntegration(unittest.TestCase):
             # The unreadable image should be recorded as a missing-EXIF file
             # and still be processed via the fallback timestamp.
             self.assertEqual(results['missing_exif_files'], 1)
+
+    def test_exif_helper_embeds_real_exif(self):
+        """
+        The EXIF helper embeds real EXIF: extract_timestamp returns the embedded
+        value rather than None, and the file is not flagged as missing EXIF.
+        """
+        photo_path = self.create_test_image_with_exif(
+            "embedded.jpg", timestamp_str="2024:01:15 14:30:45"
+        )
+
+        result = self.processor.exif_handler.extract_timestamp(photo_path)
+
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
+        self.assertNotIn(
+            photo_path, self.processor.exif_handler.get_missing_exif_files()
+        )
+
+    def test_no_exif_helper_falls_back(self):
+        """
+        The without-EXIF helper produces a real JPEG carrying no timestamp: it
+        resolves to None and lands in the missing-EXIF log (fallback path).
+        """
+        photo_path = self.create_test_image_without_exif("bare.jpg")
+
+        result = self.processor.exif_handler.extract_timestamp(photo_path)
+
+        self.assertIsNone(result)
+        self.assertIn(
+            photo_path, self.processor.exif_handler.get_missing_exif_files()
+        )
 
     def test_directory_creation(self):
         """Test that backup directories are created properly"""
