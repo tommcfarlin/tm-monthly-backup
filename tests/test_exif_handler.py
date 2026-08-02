@@ -9,12 +9,18 @@ from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 from PIL import Image, ExifTags
 
-from src.exif_handler import ExifHandler
+from src.exif_handler import (
+    ExifHandler,
+    find_quicktime_creationdate,
+    parse_local_creationdate,
+)
 from tests.fixtures import (
     make_corrupt_jpeg,
     make_exif_jpeg,
     make_no_exif_jpeg,
+    quicktime_creationdate_moov,
     read_ifds,
+    write_quicktime_mov,
 )
 
 
@@ -497,6 +503,155 @@ class TestVideoTimestampExtraction(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn("movie.mov", self.handler.missing_exif_files)
+
+
+class TestParseLocalCreationdate(unittest.TestCase):
+    """Directly exercise parse_local_creationdate's wall-clock semantics (#28)"""
+
+    def test_negative_offset_keeps_local_wall_clock(self):
+        """A -0400 capture keeps its written clock time; the offset is dropped"""
+        result = parse_local_creationdate("2024-06-15T21:33:03-0400")
+        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+
+    def test_positive_offset_keeps_local_wall_clock(self):
+        """A +0530 capture keeps its written clock time, not a UTC-shifted one"""
+        result = parse_local_creationdate("2026-01-15T09:00:00+0530")
+        self.assertEqual(result, datetime(2026, 1, 15, 9, 0, 0))
+
+    def test_zulu_utc_keeps_wall_clock_reading(self):
+        """A trailing Z parses; the wall-clock reading is kept as written"""
+        result = parse_local_creationdate("2024-06-15T18:30:00Z")
+        self.assertEqual(result, datetime(2026, 7, 4, 18, 30, 0))
+
+    def test_colon_offset_form_parses(self):
+        """The expanded -04:00 offset form parses to the same wall clock"""
+        result = parse_local_creationdate("2024-06-15T21:33:03-04:00")
+        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+
+    def test_returns_naive_datetime(self):
+        """The result carries no tzinfo, so it formats as a local wall clock"""
+        result = parse_local_creationdate("2024-06-15T21:33:03-0400")
+        self.assertIsNone(result.tzinfo)
+
+    def test_empty_string_returns_none(self):
+        """An empty/missing value yields None rather than raising"""
+        self.assertIsNone(parse_local_creationdate(""))
+
+    def test_garbage_returns_none(self):
+        """An unparseable value yields None rather than raising"""
+        self.assertIsNone(parse_local_creationdate("not-a-date"))
+
+
+class TestFindQuicktimeCreationdate(unittest.TestCase):
+    """Exercise the box scanner against hand-built moov/meta/keys/ilst bytes (#28)"""
+
+    def test_scans_mov_style_meta(self):
+        """QuickTime-style meta (no version/flags) is scanned correctly"""
+        moov = quicktime_creationdate_moov(
+            "2024-06-15T21:33:03-0400", meta_style="mov"
+        )
+        self.assertEqual(
+            find_quicktime_creationdate(moov), "2024-06-15T21:33:03-0400"
+        )
+
+    def test_scans_iso_style_meta(self):
+        """ISO/MP4-style meta (leading version/flags) is scanned correctly"""
+        moov = quicktime_creationdate_moov(
+            "2024-06-15T21:33:03-0400", meta_style="iso"
+        )
+        self.assertEqual(
+            find_quicktime_creationdate(moov), "2024-06-15T21:33:03-0400"
+        )
+
+    def test_absent_key_returns_none(self):
+        """A moov with no meta atom yields None (caller falls back to hachoir)"""
+        # An mvhd-only moov: build one, then strip the meta atom off the end.
+        moov = quicktime_creationdate_moov(
+            "2024-06-15T21:33:03-0400", include_mvhd=True
+        )
+        # mvhd box is first; keep only it by slicing to its declared size.
+        import struct
+        mvhd_size = struct.unpack(">I", moov[:4])[0]
+        self.assertIsNone(find_quicktime_creationdate(moov[:mvhd_size]))
+
+    def test_truncated_buffer_does_not_raise(self):
+        """A truncated moov returns None instead of crashing the scan"""
+        moov = quicktime_creationdate_moov("2024-06-15T21:33:03-0400")
+        self.assertIsNone(find_quicktime_creationdate(moov[:len(moov) // 2]))
+
+
+class TestVideoLocalCreationDate(unittest.TestCase):
+    """End-to-end: the Apple local creationdate names the file, not UTC (#28)"""
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mov(self, name, creationdate, **kwargs):
+        path = os.path.join(self.temp_dir, name)
+        return write_quicktime_mov(path, creationdate, **kwargs)
+
+    def test_late_evening_capture_keeps_local_calendar_day(self):
+        """A 21:33 EDT capture (01:33Z next day) is named on the LOCAL day"""
+        # mvhd carries the UTC time (2024-06-16 01:33:03) so this proves the
+        # local key wins over the UTC atom, not merely that mvhd was ignored.
+        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        path = self._mov(
+            "IMG_LATE.MOV",
+            "2024-06-15T21:33:03-0400",
+            mvhd_creation_1904=utc_1904,
+        )
+        result = self.handler.extract_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(
+            self.handler.format_timestamp_filename(result), "2024.06.15.21.33.03"
+        )
+
+    def test_video_and_photo_same_instant_share_stem(self):
+        """A video and photo shot at the same instant get the same filename stem"""
+        # Photo: EXIF DateTimeOriginal is local wall clock 14:30:00.
+        photo = make_exif_jpeg(
+            os.path.join(self.temp_dir, "pic.jpg"),
+            date_time_original="2024:07:04 14:30:00",
+        )
+        # Video: same instant, 14:30 EDT == 18:30 UTC, Apple key carries local.
+        video = self._mov("clip.mov", "2024-07-04T14:30:00-0400")
+        photo_dt = self.handler.extract_timestamp(photo)
+        video_dt = self.handler.extract_timestamp(video)
+        self.assertEqual(
+            self.handler.format_timestamp_filename(photo_dt),
+            self.handler.format_timestamp_filename(video_dt),
+        )
+
+    def test_dst_summer_and_winter_offsets(self):
+        """A July -0400 and a January -0500 capture each keep their local clock"""
+        summer = self._mov("summer.mov", "2024-06-15T21:33:03-0400")
+        winter = self._mov("winter.mov", "2026-01-15T21:33:03-0500")
+        self.assertEqual(
+            self.handler.extract_timestamp(summer),
+            datetime(2026, 7, 4, 21, 33, 3),
+        )
+        self.assertEqual(
+            self.handler.extract_timestamp(winter),
+            datetime(2026, 1, 15, 21, 33, 3),
+        )
+
+    def test_local_key_preferred_even_without_hachoir(self):
+        """The Apple key path works even when hachoir is unavailable"""
+        path = self._mov("nohachoir.mov", "2024-06-15T21:33:03-0400")
+        with patch("src.exif_handler.HACHOIR_AVAILABLE", False):
+            result = self.handler.extract_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(len(self.handler.missing_exif_files), 0)
+
+    @staticmethod
+    def _seconds_1904(dt_utc: datetime) -> int:
+        """Seconds from 1904-01-01 to a UTC datetime, for building mvhd fixtures"""
+        return int((dt_utc - datetime(1904, 1, 1)).total_seconds())
 
 
 class TestFilenameTimestampExtraction(unittest.TestCase):
