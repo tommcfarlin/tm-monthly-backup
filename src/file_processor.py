@@ -220,6 +220,12 @@ class FileProcessor:
         original_path = file_path
         current_path = file_path
 
+        # When a HEIC is converted, this holds the original ``.heic`` path so it
+        # can be deleted only *after* its verified-good JPEG has safely landed in
+        # ``backup/`` (see Step 3). Deleting earlier risks leaving the user with
+        # neither the original nor a filed copy if a later step fails.
+        heic_original_to_delete = None
+
         # Step 1: Convert HEIC to JPEG if needed
         if self.heic_converter.is_heic_file(file_path):
             if dry_run:
@@ -229,14 +235,35 @@ class FileProcessor:
             else:
                 converted_path = self.heic_converter.convert_heic_to_jpeg(file_path)
                 if converted_path:
+                    # Verify the conversion is genuinely valid BEFORE the original
+                    # -- the only copy of the photo -- becomes eligible for
+                    # deletion. ``convert_heic_to_jpeg`` returns its output path
+                    # right after ``image.save`` without inspecting the result, so
+                    # a truncated write, a full disk, or a partial decode all yield
+                    # a "successful" return. ``verify_conversion`` confirms the
+                    # JPEG exists, decodes, matches the source dimensions, and
+                    # preserved EXIF -- against the actual mkstemp path from #26.
+                    if not self.heic_converter.verify_conversion(file_path, converted_path):
+                        logger.error(
+                            f"HEIC conversion verification failed, keeping original: {file_path}"
+                        )
+                        # Remove the unverifiable artifact so a corrupt JPEG is not
+                        # left in export to be re-ingested on a later run. The
+                        # original ``.heic`` is left untouched for the user.
+                        try:
+                            os.remove(converted_path)
+                        except OSError:
+                            pass
+                        self.failed_files.append(
+                            ('convert_heic', file_path, 'conversion verification failed')
+                        )
+                        return
+
                     self.conversion_log.append((file_path, converted_path))
                     current_path = converted_path
-                    # Delete original HEIC after successful conversion
-                    try:
-                        os.remove(file_path)
-                        logger.info(f"Deleted original HEIC file: {file_path}")
-                    except Exception as e:
-                        logger.warning(f"Could not delete original HEIC file {file_path}: {e}")
+                    # Defer deletion of the original HEIC until after the JPEG has
+                    # been moved into backup/ -- see Step 3.
+                    heic_original_to_delete = file_path
                 else:
                     logger.error(f"HEIC conversion failed for {file_path}")
                     return
@@ -271,6 +298,15 @@ class FileProcessor:
                 # Move file
                 shutil.move(current_path, target_path)
                 logger.info(f"Moved: {current_path} -> {target_path}")
+
+                # The verified-good JPEG is now safely filed in backup/, so it is
+                # finally safe to delete the original HEIC. Route through the
+                # single safe-delete implementation; verification already happened
+                # pre-move (the JPEG has since moved out of reach), so skip it here.
+                if heic_original_to_delete is not None:
+                    self.heic_converter.cleanup_original_heic(
+                        heic_original_to_delete, verify_first=False
+                    )
 
                 # Track used timestamp
                 self.used_timestamps.add(timestamp_filename)

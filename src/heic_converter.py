@@ -192,24 +192,47 @@ class HeicConverter:
             logger.error(f"Error verifying conversion: {e}")
             return False
 
-    def cleanup_original_heic(self, heic_path: str, verify_first: bool = True) -> bool:
+    def cleanup_original_heic(
+        self,
+        heic_path: str,
+        converted_jpeg: Optional[str] = None,
+        verify_first: bool = True,
+    ) -> bool:
         """
-        Delete original HEIC file after successful conversion.
+        Delete an original HEIC file after a verified-good conversion.
+
+        This is the single, safe implementation of "delete an original HEIC".
+        When ``verify_first`` is set, the deletion is gated on
+        :meth:`verify_conversion` against the *actual* converted JPEG path the
+        caller was handed by :meth:`convert_heic_to_jpeg`. Since #26 that path is
+        a unique ``mkstemp`` name, not a fixed ``{stem}.jpg`` sibling, so the
+        caller must pass ``converted_jpeg`` explicitly -- there is no longer a
+        derivable name to fall back on, and guessing one risks verifying (and
+        then deleting against) the wrong file.
 
         Args:
-            heic_path: Path to original HEIC file
-            verify_first: Whether to verify conversion before deletion
+            heic_path: Path to the original HEIC file to delete.
+            converted_jpeg: Path to the converted JPEG. Required when
+                ``verify_first`` is True; verification targets exactly this file.
+            verify_first: Whether to re-verify the conversion before deleting. Pass
+                False only when the caller has already verified the conversion and
+                has since moved the JPEG out of reach (e.g. filed into ``backup/``).
 
         Returns:
-            True if file was deleted successfully
+            True if the original was deleted, False if verification failed, the
+            converted path was missing when required, or the unlink errored.
         """
         try:
             heic_file = Path(heic_path)
 
             if verify_first:
-                # Find corresponding JPEG file
-                jpeg_path = heic_file.parent / f"{heic_file.stem}.jpg"
-                if not self.verify_conversion(heic_path, str(jpeg_path)):
+                if converted_jpeg is None:
+                    logger.error(
+                        "Refusing to delete original without a converted path to "
+                        f"verify against, keeping original: {heic_path}"
+                    )
+                    return False
+                if not self.verify_conversion(heic_path, converted_jpeg):
                     logger.error(f"Conversion verification failed, keeping original: {heic_path}")
                     return False
 
