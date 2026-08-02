@@ -4,6 +4,7 @@ HEIC to JPEG conversion module with EXIF preservation
 
 import os
 import logging
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 from PIL import Image
@@ -52,21 +53,42 @@ class HeicConverter:
 
         Returns:
             Path to converted JPEG file, None if conversion failed
+
+        The JPEG is written to a guaranteed-unique path rather than a fixed
+        ``{stem}.jpg``. If a real sibling named ``{stem}.jpg`` (or an
+        uppercase ``{stem}.JPG`` on a case-insensitive APFS volume) already
+        sits beside the HEIC, a fixed name would silently overwrite and destroy
+        that photo. Callers must use the returned path -- the on-disk name is an
+        implementation detail of the transient conversion output.
         """
+        output_path = None
         try:
             if not self.is_heic_file(heic_path):
                 logger.warning(f"File is not HEIC format: {heic_path}")
                 return None
 
-            # Determine output path
+            # Determine the target directory for the converted JPEG.
             heic_file = Path(heic_path)
-            if output_dir:
-                output_path = Path(output_dir) / f"{heic_file.stem}.jpg"
-            else:
-                output_path = heic_file.parent / f"{heic_file.stem}.jpg"
+            target_dir = Path(output_dir) if output_dir else heic_file.parent
 
             # Ensure output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Reserve a guaranteed-unique output path on the same filesystem as
+            # the target directory. ``tempfile.mkstemp`` creates the file
+            # atomically with ``O_CREAT | O_EXCL``, so it can never collide with
+            # -- and therefore never overwrite -- an existing sibling, including
+            # a case-insensitive ``{stem}.JPG`` match on APFS. Keeping it on the
+            # same volume also lets the downstream ``shutil.move`` stay a cheap
+            # rename. The final backup filename is timestamp-derived, so this
+            # intermediate name never reaches the user.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{heic_file.stem}-",
+                suffix=".jpg",
+                dir=str(target_dir),
+            )
+            os.close(fd)
+            output_path = Path(tmp_name)
 
             # Open and convert HEIC image
             with Image.open(heic_path) as image:
@@ -97,6 +119,13 @@ class HeicConverter:
         except Exception as e:
             logger.error(f"Failed to convert HEIC file {heic_path}: {e}")
             self.failed_conversions.append((heic_path, str(e)))
+            # Remove the reserved-but-unwritten temp file so a 0-byte artifact is
+            # not left behind in export to be re-ingested on a later run.
+            if output_path is not None:
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
             return None
 
     def batch_convert(self, heic_files: list, output_dir: str = None) -> Tuple[list, list]:
