@@ -322,6 +322,14 @@ class FileProcessor:
         original_path = file_path
         current_path = file_path
 
+        # The suffix the file will carry once it is filed in ``backup/``. For a
+        # HEIC this is the JPEG suffix its conversion produces, not the original
+        # ``.heic`` -- derived here (issue #10) so a dry run plans the SAME final
+        # extension a real run lands. For every other file it is simply the
+        # source suffix. Both modes read this single value, so the planned
+        # destination name can never diverge on extension between them.
+        planned_extension = Path(file_path).suffix
+
         # When a HEIC is converted, this holds the original ``.heic`` path so it
         # can be deleted only *after* its verified-good JPEG has safely landed in
         # ``backup/`` (see Step 3). Deleting earlier risks leaving the user with
@@ -330,10 +338,18 @@ class FileProcessor:
 
         # Step 1: Convert HEIC to JPEG if needed
         if self.heic_converter.is_heic_file(file_path):
+            # A converted HEIC always lands under the ``.jpg`` suffix: the
+            # converter writes an ``mkstemp`` ``.jpg`` and the final backup name
+            # is timestamp-derived, so the on-disk intermediate name never
+            # reaches the plan. Both modes therefore plan a ``.jpg`` destination;
+            # the ONLY difference is whether the conversion side effect runs.
+            planned_extension = '.jpg'
             if dry_run:
                 logger.info("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
-                # For dry run, simulate the converted filename
-                converted_path = str(Path(file_path).with_suffix('.jpg'))
+                # ``current_path`` deliberately stays the ``.heic``: its EXIF
+                # timestamp is identical to the converted JPEG's (conversion
+                # preserves EXIF), so the timestamp read below matches a real run
+                # without performing -- or writing -- any conversion.
             else:
                 converted_path = self.heic_converter.convert_heic_to_jpeg(file_path)
                 if converted_path:
@@ -385,7 +401,9 @@ class FileProcessor:
             timestamp = self.exif_handler.get_fallback_timestamp(current_path)
             logger.warning("Using fallback timestamp for %s", current_path)
 
-        file_extension = Path(current_path).suffix
+        # Use the extension the file will actually carry in backup/ (``.jpg`` for
+        # a converted HEIC), so the dry-run plan and the real run agree (#10).
+        file_extension = planned_extension
 
         # Step 3: Move the file into its category directory under a
         # collision-free timestamp name.
@@ -798,9 +816,12 @@ class FileProcessor:
         files resolving to the same second within one run still report distinct
         paths, matching a real run.
 
-        Note (#10): because no placeholder is written, a dry run cannot reflect
-        the reservations of *other* dry-run files beyond this in-memory bookkeeping
-        -- full dry-run/real parity for pre-existing conflicts is tracked there.
+        Because no placeholder is written, a dry run reflects the reservations of
+        *other* dry-run files purely through this in-memory bookkeeping. That
+        bookkeeping mirrors what :meth:`_reserve_destination` does on disk, so the
+        two agree on both pre-existing conflicts (seeded from disk) and
+        within-batch collisions (the in-memory ``names.add``); dry-run/real
+        destination parity is asserted end to end in the #10 parity test.
 
         Args:
             target_dir: Directory the file would be filed into.
