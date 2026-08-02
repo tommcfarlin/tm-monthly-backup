@@ -245,14 +245,13 @@ class TestWorkflowIntegration(unittest.TestCase):
         )
 
     def test_duplicate_timestamp_across_categories(self):
-        """A photo and a screenshot sharing a timestamp resolve across categories.
+        """A photo and a screenshot sharing a timestamp both keep it (#21).
 
-        ``used_timestamps`` is global to the processor, so a screenshot colliding
-        with an already-placed photo is bumped by one second even though it lands
-        in a different directory (the cross-category behavior pinned by #21).
-        Photos are processed before screenshots, so the photo keeps ``.45`` and
-        the screenshot is pushed to ``.46``. The identity mutation of
-        ``handle_duplicate_timestamp`` leaves the screenshot at ``.45`` and fails.
+        Collision tracking is scoped per target directory, so a screenshot that
+        resolves to the same second as an already-placed photo is NOT bumped:
+        the two land in different directories and can never collide on disk.
+        Both keep their true ``.45`` timestamp. Before the #21 fix the shared
+        global set spuriously pushed the screenshot to ``.46``.
         """
         self.create_test_image_with_exif("IMG_9999.jpg", "2024:01:15 14:30:45")
         # The screenshot carries no EXIF; its filename yields the same 14:30:45.
@@ -267,8 +266,14 @@ class TestWorkflowIntegration(unittest.TestCase):
         )
         self.assertTrue(
             os.path.isfile(os.path.join(
+                self.backup_dir, "screenshots", "2024.01.15.14.30.45.png")),
+            "screenshot must keep its true .45 timestamp (different directory)",
+        )
+        # And the spurious cross-category bump is gone entirely.
+        self.assertFalse(
+            os.path.exists(os.path.join(
                 self.backup_dir, "screenshots", "2024.01.15.14.30.46.png")),
-            "screenshot should be bumped to .46 by the global used-timestamp set",
+            "screenshot must not be bumped by a photo in another directory",
         )
 
     def test_error_handling_workflow(self):
@@ -466,7 +471,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         # Every container is empty after the clear.
         self.assertEqual(self.processor.processed_files, [])
-        self.assertEqual(self.processor.used_timestamps, set())
+        self.assertEqual(self.processor.used_timestamps, {})
         self.assertEqual(self.processor.failed_files, [])
         self.assertEqual(self.processor.conversion_log, [])
         self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
