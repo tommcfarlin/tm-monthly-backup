@@ -3,13 +3,15 @@ EXIF timestamp extraction and handling module for photos and videos
 """
 
 import os
+import struct
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS
 import pillow_heif
+from dateutil import parser as dateutil_parser
 
 # Video metadata extraction
 try:
@@ -23,6 +25,209 @@ except ImportError:
 pillow_heif.register_heif_opener()
 
 logger = logging.getLogger(__name__)
+
+# --- QuickTime / MP4 metadata box scanning ---------------------------------
+#
+# Apple writes the TRUE LOCAL wall-clock capture time (with its UTC offset)
+# into the ``com.apple.quicktime.creationdate`` metadata key, e.g.
+# ``2024-06-15T21:33:03-0400``. That key lives in a ``moov/meta`` structure
+# made of a ``keys`` atom (which names each key) and an ``ilst`` atom (which
+# holds each key's value, addressed by the key's 1-based index). hachoir does
+# NOT surface this key -- it only reports the ``mvhd`` creation_time, which is
+# defined as UTC and therefore lands late-evening captures on the wrong
+# calendar day. So we scan the box structure ourselves (see issue #28).
+
+# The Apple metadata key carrying the true local capture time.
+QUICKTIME_CREATIONDATE_KEY = b"com.apple.quicktime.creationdate"
+
+# Child atoms that appear directly inside a ``meta`` atom. Used to tell the
+# QuickTime ``meta`` layout (children immediately follow the header) from the
+# ISO/MP4 layout (a 4-byte version+flags precedes the children).
+_META_CHILD_ATOMS = frozenset((b"hdlr", b"keys", b"ilst"))
+
+# Upper bound on how many bytes of a ``moov`` atom we will read into memory.
+# Real ``moov`` atoms (sample tables + metadata) are small relative to the
+# media data; this cap keeps a malformed or hostile file from exhausting RAM.
+_MAX_MOOV_BYTES = 128 * 1024 * 1024
+
+
+def _iter_boxes(buf: bytes, start: int, end: int) -> Iterator[Tuple[bytes, int, int]]:
+    """
+    Yield ``(type, body_offset, box_end)`` for each ISO base-media box in a span.
+
+    Walks the flat list of boxes between ``start`` and ``end`` in ``buf``,
+    honoring 32-bit sizes, the 64-bit ``largesize`` escape (size field == 1)
+    and the "extends to end" escape (size field == 0). ``body_offset`` points
+    at the first byte after the box header; ``box_end`` at the first byte after
+    the whole box. Iteration stops on any malformed or out-of-range size rather
+    than raising, so a truncated tail cannot crash the scan.
+
+    Args:
+        buf: Buffer containing the boxes.
+        start: Offset of the first box to consider.
+        end: Exclusive offset at which to stop.
+
+    Yields:
+        ``(type, body_offset, box_end)`` for each well-formed box.
+    """
+    off = start
+    while off + 8 <= end:
+        size = struct.unpack(">I", buf[off:off + 4])[0]
+        typ = buf[off + 4:off + 8]
+        if size == 1:  # 64-bit largesize follows the type
+            if off + 16 > end:
+                return
+            size = struct.unpack(">Q", buf[off + 8:off + 16])[0]
+            body = off + 16
+        elif size == 0:  # box runs to the end of the enclosing span
+            size = end - off
+            body = off + 8
+        else:
+            body = off + 8
+        if size < (body - off) or off + size > end:
+            return
+        yield typ, body, off + size
+        off += size
+
+
+def _meta_children_start(buf: bytes, body: int, box_end: int) -> int:
+    """
+    Return the offset of the first child atom inside a ``meta`` box.
+
+    QuickTime (.mov) writes ``meta`` as a plain container whose children start
+    immediately; ISO/MP4 writes ``meta`` as a full box with a leading 4-byte
+    version+flags. We disambiguate by checking whether a known child atom type
+    sits at the QuickTime position or the ISO position, defaulting to the
+    QuickTime layout.
+
+    Args:
+        buf: Buffer containing the ``meta`` box.
+        body: Offset of the first byte after the ``meta`` header.
+        box_end: Exclusive offset at which the ``meta`` box ends.
+
+    Returns:
+        Offset at which to begin iterating the ``meta`` box's children.
+    """
+    if body + 8 <= box_end and buf[body + 4:body + 8] in _META_CHILD_ATOMS:
+        return body
+    if body + 12 <= box_end and buf[body + 8:body + 12] in _META_CHILD_ATOMS:
+        return body + 4
+    return body
+
+
+def find_quicktime_creationdate(moov: bytes) -> Optional[str]:
+    """
+    Find the ``com.apple.quicktime.creationdate`` string in a ``moov`` payload.
+
+    Scans ``moov`` for a ``meta`` atom, resolves the 1-based index of the
+    creationdate key in its ``keys`` atom, then reads that index's value from
+    the ``ilst`` atom's ``data`` box. Returns the raw ISO-8601 string (e.g.
+    ``2024-06-15T21:33:03-0400``) or ``None`` if any piece is absent.
+
+    Args:
+        moov: The payload (children) of a ``moov`` box.
+
+    Returns:
+        The creationdate string if present, otherwise ``None``.
+    """
+    for typ, body, box_end in _iter_boxes(moov, 0, len(moov)):
+        if typ != b"meta":
+            continue
+        start = _meta_children_start(moov, body, box_end)
+        value = _scan_meta_for_creationdate(moov, start, box_end)
+        if value is not None:
+            return value
+    return None
+
+
+def _scan_meta_for_creationdate(buf: bytes, start: int, end: int) -> Optional[str]:
+    """Locate ``keys``/``ilst`` in a ``meta`` box and return the creationdate value."""
+    keys_span = None
+    ilst_span = None
+    for typ, body, box_end in _iter_boxes(buf, start, end):
+        if typ == b"keys":
+            keys_span = (body, box_end)
+        elif typ == b"ilst":
+            ilst_span = (body, box_end)
+    if keys_span is None or ilst_span is None:
+        return None
+    index = _creationdate_key_index(buf, keys_span[0], keys_span[1])
+    if index is None:
+        return None
+    return _ilst_string_value(buf, ilst_span[0], ilst_span[1], index)
+
+
+def _creationdate_key_index(buf: bytes, start: int, end: int) -> Optional[int]:
+    """
+    Return the 1-based index of the creationdate key within a ``keys`` atom.
+
+    A ``keys`` atom is a 4-byte version+flags, a 4-byte entry count, then one
+    entry per key: a 4-byte size, a 4-byte namespace (e.g. ``mdta``) and the
+    key name. Keys are numbered from 1 in declaration order; that number is how
+    the matching ``ilst`` item is addressed.
+    """
+    pos = start + 8  # skip version/flags (4) + entry_count (4)
+    index = 0
+    while pos + 8 <= end:
+        entry_size = struct.unpack(">I", buf[pos:pos + 4])[0]
+        if entry_size < 8 or pos + entry_size > end:
+            return None
+        key_name = buf[pos + 8:pos + entry_size]
+        index += 1
+        if key_name == QUICKTIME_CREATIONDATE_KEY:
+            return index
+        pos += entry_size
+    return None
+
+
+def _ilst_string_value(buf: bytes, start: int, end: int, index: int) -> Optional[str]:
+    """
+    Read the UTF-8 string stored under ``index`` in an ``ilst`` atom.
+
+    Each ``ilst`` item is a box whose type is the 4-byte big-endian key index.
+    Inside sits a ``data`` box: a 4-byte type indicator, a 4-byte locale and
+    then the payload bytes. Returns the decoded, trimmed string or ``None``.
+    """
+    for typ, body, box_end in _iter_boxes(buf, start, end):
+        if struct.unpack(">I", typ)[0] != index:
+            continue
+        for data_typ, data_body, data_end in _iter_boxes(buf, body, box_end):
+            if data_typ != b"data":
+                continue
+            payload = buf[data_body + 8:data_end]  # skip type indicator + locale
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            return text.strip("\x00").strip() or None
+    return None
+
+
+def parse_local_creationdate(value: str) -> Optional[datetime]:
+    """
+    Parse an Apple creationdate string to a naive LOCAL wall-clock datetime.
+
+    Apple stamps the local capture time together with its UTC offset, e.g.
+    ``2024-06-15T21:33:03-0400``. The backup tool names files by the local
+    wall-clock reading, so we keep the clock time exactly as written and drop
+    the offset (``21:33:03`` stays ``21:33:03``) rather than converting to UTC.
+    ``python-dateutil`` handles the compact ``-0400`` / ``+0530`` offsets and a
+    trailing ``Z`` that ``datetime.fromisoformat`` rejects on older Pythons.
+
+    Args:
+        value: An ISO-8601 datetime string, optionally carrying an offset.
+
+    Returns:
+        A timezone-naive ``datetime`` in local wall-clock terms, or ``None`` if
+        the string cannot be parsed.
+    """
+    try:
+        parsed = dateutil_parser.isoparse(value)
+    except (ValueError, OverflowError, TypeError):
+        return None
+    # Keep the wall-clock reading; discard the offset so the file is named by
+    # the local time Apple recorded, not a UTC-shifted value.
+    return parsed.replace(tzinfo=None)
 
 
 class ExifHandler:
@@ -148,6 +353,131 @@ class ExifHandler:
     def _extract_video_timestamp(self, file_path: str) -> Optional[datetime]:
         """
         Extract creation timestamp from video metadata.
+
+        Prefers Apple's ``com.apple.quicktime.creationdate`` key, which records
+        the TRUE local wall-clock capture time with its UTC offset, and names
+        the file by that local reading (see issue #28). Only when that key is
+        absent does it fall back to hachoir's ``mvhd`` creation_time, which is
+        UTC; that fallback can therefore be off by the UTC offset and land a
+        late-evening capture on the next calendar day. This is a pre-existing
+        limitation preserved here, not one this change introduces.
+
+        Args:
+            file_path: Path to video file
+
+        Returns:
+            datetime object if found, None if missing/invalid
+        """
+        # Preferred path: Apple's local wall-clock creationdate. Independent of
+        # hachoir, so it works even when hachoir cannot be imported.
+        local_creation = self._extract_quicktime_creationdate(file_path)
+        if local_creation is not None:
+            logger.info(
+                f"Extracted local video creation date: {file_path} -> {local_creation}"
+            )
+            return local_creation
+
+        return self._extract_video_timestamp_hachoir(file_path)
+
+    def _extract_quicktime_creationdate(self, file_path: str) -> Optional[datetime]:
+        """
+        Return the local wall-clock creation time from Apple metadata, if any.
+
+        Reads the file's ``moov`` atom and scans it for the
+        ``com.apple.quicktime.creationdate`` value, parsing it to a naive local
+        datetime. Any I/O or structural problem yields ``None`` so the caller
+        falls back to the hachoir/mvhd path; this helper never records a file
+        as missing on its own.
+
+        Args:
+            file_path: Path to the video file.
+
+        Returns:
+            A naive local ``datetime``, or ``None`` if the key is absent or the
+            file cannot be scanned.
+        """
+        try:
+            moov = self._read_moov_bytes(file_path)
+        except OSError as exc:
+            logger.debug(f"Could not read video boxes from {file_path}: {exc}")
+            return None
+        if moov is None:
+            return None
+
+        value = find_quicktime_creationdate(moov)
+        if not value:
+            return None
+
+        parsed = parse_local_creationdate(value)
+        if parsed is None:
+            logger.warning(
+                f"Unparseable QuickTime creationdate in {file_path}: {value!r}"
+            )
+        return parsed
+
+    def _read_moov_bytes(self, file_path: str) -> Optional[bytes]:
+        """
+        Read the payload of the top-level ``moov`` atom into memory.
+
+        Walks only the top-level box headers, seeking past large boxes such as
+        ``mdat`` without reading them, and reads the ``moov`` payload once it is
+        found (bounded by ``_MAX_MOOV_BYTES``). ``moov`` may appear before or
+        after the media data, so the whole top level is scanned.
+
+        Args:
+            file_path: Path to the video file.
+
+        Returns:
+            The bytes of the ``moov`` box payload, or ``None`` if there is no
+            ``moov`` atom or it exceeds the size cap.
+        """
+        with open(file_path, "rb") as handle:
+            offset = 0
+            while True:
+                header = handle.read(8)
+                if len(header) < 8:
+                    return None
+                size = struct.unpack(">I", header[:4])[0]
+                typ = header[4:8]
+                body_offset = offset + 8
+                if size == 1:  # 64-bit largesize
+                    ext = handle.read(8)
+                    if len(ext) < 8:
+                        return None
+                    size = struct.unpack(">Q", ext)[0]
+                    body_offset = offset + 16
+                elif size == 0:  # box extends to end of file
+                    size = None
+
+                if typ == b"moov":
+                    if size is not None:
+                        payload_len = offset + size - body_offset
+                        if payload_len < 0 or payload_len > _MAX_MOOV_BYTES:
+                            logger.debug(
+                                f"moov atom too large or invalid in {file_path}"
+                            )
+                            return None
+                        return handle.read(payload_len)
+                    payload = handle.read(_MAX_MOOV_BYTES + 1)
+                    if len(payload) > _MAX_MOOV_BYTES:
+                        logger.debug(f"moov atom too large in {file_path}")
+                        return None
+                    return payload
+
+                if size is None:
+                    return None  # a size==0 non-moov box runs to EOF; nothing after
+                if size < 8:
+                    return None  # malformed header; stop scanning
+                offset += size
+                handle.seek(offset)
+
+    def _extract_video_timestamp_hachoir(self, file_path: str) -> Optional[datetime]:
+        """
+        Fall back to hachoir's ``mvhd`` creation_time (UTC) extraction.
+
+        Used only when Apple's local ``com.apple.quicktime.creationdate`` key is
+        absent. The value hachoir reports is UTC, so a file named from it may be
+        off by the local UTC offset -- a pre-existing limitation retained here.
 
         Args:
             file_path: Path to video file

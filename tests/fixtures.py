@@ -19,6 +19,7 @@ build time rather than surfacing as a mysterious test result later.
 """
 
 import os
+import struct
 from typing import Optional, Tuple
 
 import pillow_heif
@@ -32,6 +33,9 @@ pillow_heif.register_heif_opener()
 # Pointer tag to the Exif sub-IFD. DateTimeOriginal (0x9003) and
 # DateTimeDigitized (0x9004) live behind this pointer, not in IFD0.
 EXIF_IFD = 0x8769
+
+# The Apple metadata key that carries the true local wall-clock capture time.
+QUICKTIME_CREATIONDATE_KEY = b"com.apple.quicktime.creationdate"
 
 
 class FixtureError(RuntimeError):
@@ -187,6 +191,51 @@ def make_no_exif_jpeg(
     return path
 
 
+def make_png_with_text(
+    path: str,
+    text_chunks: dict,
+    *,
+    color: str = "green",
+    size: Tuple[int, int] = (16, 16),
+) -> str:
+    """
+    Write a real PNG carrying the given ``tEXt`` chunks.
+
+    Used to exercise AI/C2PA provenance detection (issue #8) with genuine PNG
+    bytes rather than a mock. Each ``key -> value`` pair is written as a text
+    chunk via :class:`PIL.PngImagePlugin.PngInfo`. After writing, the file is
+    reopened and every chunk is asserted to have round-tripped into
+    ``Image.text`` exactly as given; a mismatch raises :class:`FixtureError` so a
+    provenance test can never pass against a fixture whose metadata never landed.
+
+    Args:
+        path: Destination path for the PNG.
+        text_chunks: Mapping of text-chunk key -> value to embed.
+        color: Fill color for the generated image.
+        size: (width, height) of the generated image in pixels.
+
+    Returns:
+        The path that was written.
+    """
+    from PIL.PngImagePlugin import PngInfo
+
+    image = Image.new("RGB", size, color=color)
+    metadata = PngInfo()
+    for key, value in text_chunks.items():
+        metadata.add_text(key, value)
+    image.save(path, format="PNG", pnginfo=metadata)
+
+    with Image.open(path) as reopened:
+        landed = dict(getattr(reopened, "text", {}) or {})
+    for key, value in text_chunks.items():
+        _require(
+            landed.get(key) == value,
+            f"PNG text chunk {key!r} round-tripped as {landed.get(key)!r}, "
+            f"expected {value!r} for {path}",
+        )
+    return path
+
+
 def make_corrupt_jpeg(path: str, *, content: bytes = b"this is not a JPEG") -> str:
     """
     Write a file with a ``.jpg`` name but a body Pillow cannot decode.
@@ -335,6 +384,139 @@ def _verify_heic_roundtrip(
             f"{tag.name} round-tripped as {sub.get(tag.value)!r}, "
             f"expected {expected!r} for {path}",
         )
+
+
+def _box(box_type: bytes, payload: bytes) -> bytes:
+    """Wrap ``payload`` in an ISO base-media box header (32-bit size + type)."""
+    return struct.pack(">I", 8 + len(payload)) + box_type + payload
+
+
+def quicktime_creationdate_moov(
+    creationdate: str,
+    *,
+    include_mvhd: bool = True,
+    mvhd_creation_1904: int = 0,
+    meta_style: str = "mov",
+) -> bytes:
+    """
+    Build a synthetic ``moov`` payload carrying an Apple creationdate key.
+
+    Constructs a structurally faithful ``meta`` atom -- a ``keys`` atom naming
+    ``com.apple.quicktime.creationdate`` and an ``ilst`` atom holding its value
+    in a ``data`` box -- exactly the layout an iPhone writes. Optionally
+    prepends an ``mvhd`` atom whose UTC creation seconds deliberately DIFFER
+    from the local creationdate, so a test can prove the local key wins over the
+    UTC time.
+
+    Args:
+        creationdate: ISO-8601 string to store (e.g. ``2024-06-15T21:33:03-0400``).
+        include_mvhd: Whether to include a leading ``mvhd`` atom.
+        mvhd_creation_1904: ``mvhd`` creation time in seconds since 1904-01-01 UTC.
+        meta_style: ``"mov"`` (QuickTime: children follow the header) or
+            ``"iso"`` (MP4: a 4-byte version+flags precedes the children).
+
+    Returns:
+        The bytes of a ``moov`` box payload (its children, no ``moov`` header).
+    """
+    if meta_style not in ("mov", "iso"):
+        raise ValueError(f"meta_style must be 'mov' or 'iso', got {meta_style!r}")
+
+    key = QUICKTIME_CREATIONDATE_KEY
+    key_entry = struct.pack(">I", 8 + len(key)) + b"mdta" + key
+    keys_payload = struct.pack(">I", 0) + struct.pack(">I", 1) + key_entry
+    keys = _box(b"keys", keys_payload)
+
+    # data box: 4-byte type indicator (1 == UTF-8), 4-byte locale, then payload.
+    data_payload = struct.pack(">I", 1) + struct.pack(">I", 0) + creationdate.encode("utf-8")
+    data = _box(b"data", data_payload)
+    # ilst item: box whose type is the 4-byte big-endian key index (1).
+    item = struct.pack(">I", 8 + len(data)) + struct.pack(">I", 1) + data
+    ilst = _box(b"ilst", item)
+
+    meta_children = keys + ilst
+    if meta_style == "iso":
+        meta_children = struct.pack(">I", 0) + meta_children  # version + flags
+    meta = _box(b"meta", meta_children)
+
+    moov_payload = b""
+    if include_mvhd:
+        # mvhd v0 (100-byte body): version+flags(4), creation(4), modification(4),
+        # timescale(4), duration(4), then rate/volume/matrix/... The timescale is
+        # deliberately non-zero and duration non-empty so hachoir can parse this
+        # atom (a zero timescale makes hachoir divide by zero and skip it).
+        mvhd_payload = (
+            struct.pack(">I", 0)                     # version + flags
+            + struct.pack(">I", mvhd_creation_1904)  # creation_time (UTC, 1904)
+            + struct.pack(">I", mvhd_creation_1904)  # modification_time
+            + struct.pack(">I", 1000)                # timescale (units per second)
+            + struct.pack(">I", 1000)                # duration (== 1 second)
+            + b"\x00" * 80                           # rate/volume/matrix/next_id
+        )
+        moov_payload += _box(b"mvhd", mvhd_payload)
+    moov_payload += meta
+
+    _verify_creationdate_moov(moov_payload, creationdate)
+    return moov_payload
+
+
+def write_quicktime_mov(
+    path: str,
+    creationdate: str,
+    *,
+    include_mvhd: bool = True,
+    mvhd_creation_1904: int = 0,
+    meta_style: str = "mov",
+) -> str:
+    """
+    Write a minimal ``.mov`` file whose only real content is the Apple metadata.
+
+    The file is an ``ftyp`` box followed by a ``moov`` box built by
+    :func:`quicktime_creationdate_moov`. It carries no media samples -- just
+    enough box structure for the box scanner under test. After writing, the file
+    is reopened and re-scanned; a mismatch raises :class:`FixtureError` so a
+    broken fixture can never yield a false pass.
+
+    Args:
+        path: Destination path (should end in ``.mov`` or ``.mp4``).
+        creationdate: ISO-8601 creationdate string to embed.
+        include_mvhd: Whether to include a ``mvhd`` atom with a UTC time.
+        mvhd_creation_1904: ``mvhd`` creation seconds since 1904-01-01 UTC.
+        meta_style: ``"mov"`` or ``"iso"`` ``meta`` layout.
+
+    Returns:
+        The path that was written.
+    """
+    moov_payload = quicktime_creationdate_moov(
+        creationdate,
+        include_mvhd=include_mvhd,
+        mvhd_creation_1904=mvhd_creation_1904,
+        meta_style=meta_style,
+    )
+    ftyp = _box(b"ftyp", b"qt  " + struct.pack(">I", 512) + b"qt  ")
+    with open(path, "wb") as handle:
+        handle.write(ftyp + _box(b"moov", moov_payload))
+
+    # Confirm the value survives to disk (the in-memory scan already ran inside
+    # quicktime_creationdate_moov); the scanner is exercised end-to-end by the
+    # tests that read this file back through ExifHandler.
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    _require(
+        creationdate.encode("utf-8") in raw,
+        f"creationdate {creationdate!r} not present in written file {path}",
+    )
+    return path
+
+
+def _verify_creationdate_moov(moov_payload: bytes, expected: str) -> None:
+    """Re-scan a built ``moov`` payload and assert the creationdate round-trips."""
+    from src.exif_handler import find_quicktime_creationdate
+
+    found = find_quicktime_creationdate(moov_payload)
+    _require(
+        found == expected,
+        f"built moov scanned back as {found!r}, expected {expected!r}",
+    )
 
 
 def _require(condition: bool, message: str) -> None:

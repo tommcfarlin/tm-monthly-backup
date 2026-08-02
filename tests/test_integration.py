@@ -11,6 +11,8 @@ from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
+from PIL import Image
+
 from src.file_processor import FileProcessor
 from src.file_categorizer import FileCategory
 from src.cli_interface import CLIInterface
@@ -96,6 +98,26 @@ class TestWorkflowIntegration(unittest.TestCase):
         """
         return make_no_exif_jpeg(os.path.join(self.export_dir, filename))
 
+    def create_test_png(self, filename: str) -> str:
+        """
+        Create a real, decodable PNG in the export directory.
+
+        Screenshots carry a ``.png`` extension and are now decode-verified
+        before being filed (issue #58), so a screenshot fixture must be genuine
+        image bytes rather than a text file renamed ``.png`` -- otherwise it
+        would (correctly) be quarantined instead of processed. The PNG carries no
+        EXIF; its timestamp comes from the filename or the filesystem fallback.
+
+        Args:
+            filename: Name of the PNG to create.
+
+        Returns:
+            Full path to the created PNG.
+        """
+        path = os.path.join(self.export_dir, filename)
+        Image.new("RGB", (24, 24), "purple").save(path, format="PNG")
+        return path
+
     def test_empty_export_directory(self):
         """Test processing when export directory is empty"""
         results = self.processor.process_all_files(dry_run=True)
@@ -143,8 +165,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.create_test_image_with_exif("photo2.jpeg", "2024:02:20 10:11:12")
         self.create_test_file("video1.mov")
         self.create_test_file("video2.mp4")
-        self.create_test_file("Screenshot 2024-01-15.png")
-        self.create_test_file("IMG_1234.png")  # iOS screenshot pattern
+        self.create_test_png("Screenshot 2024-01-15.png")
+        self.create_test_png("IMG_1234.png")  # iOS screenshot pattern
         self.create_test_file("sidecar1.aae")
         self.create_test_file("sidecar2.aae")
         self.create_test_file("unknown.txt")
@@ -260,7 +282,7 @@ class TestWorkflowIntegration(unittest.TestCase):
         """
         self.create_test_image_with_exif("IMG_9999.jpg", "2024:01:15 14:30:45")
         # The screenshot carries no EXIF; its filename yields the same 14:30:45.
-        self.create_test_file("Screenshot 2024-01-15-14-30-45.png")
+        self.create_test_png("Screenshot 2024-01-15-14-30-45.png")
 
         self.processor.process_all_files(dry_run=False)
 
@@ -323,11 +345,13 @@ class TestWorkflowIntegration(unittest.TestCase):
 
     def test_missing_exif_handling(self):
         """Test handling of files with missing EXIF data"""
-        # Create a file that is not a real image, so real EXIF extraction
-        # fails and the handler records it as a missing-EXIF file. This tests
-        # the actual code path rather than mocking extract_timestamp (which
-        # would bypass the logic that appends to missing_exif_files).
-        self.create_test_file("no_exif.jpg")
+        # Create a real JPEG that carries no EXIF, so genuine EXIF extraction
+        # returns None and the handler records it as a missing-EXIF file. Using
+        # real image bytes (not a text file renamed .jpg) is what exercises this
+        # path now: an undecodable file would instead be quarantined before EXIF
+        # extraction ever runs (issue #58). This tests the actual code path
+        # rather than mocking extract_timestamp.
+        self.create_test_image_without_exif("no_exif.jpg")
 
         # Use a deterministic fallback so processing does not depend on the
         # filesystem clock, but let extract_timestamp run for real.
@@ -705,10 +729,11 @@ class TestEndToEndWorkflow(unittest.TestCase):
         files, which exercises collision resolution across many identical
         filesystem-fallback timestamps. No test asserts on wall-clock time.
         """
+        # Real, decodable JPEGs carrying no EXIF: they survive the decode gate
+        # (issue #58) and fall back to filesystem-timestamp naming, so their
+        # near-identical timestamps still exercise collision resolution at scale.
         for i in range(50):
-            file_path = os.path.join(self.export_dir, f"photo_{i:03d}.jpg")
-            with open(file_path, 'w') as f:
-                f.write(f"Photo {i}")
+            make_no_exif_jpeg(os.path.join(self.export_dir, f"photo_{i:03d}.jpg"))
 
         results = self.processor.process_all_files(dry_run=False)
 
