@@ -209,8 +209,28 @@ class FileProcessor:
 
             for filename in filenames:
                 # Skip hidden files
-                if not filename.startswith('.'):
-                    files.append(os.path.join(root, filename))
+                if filename.startswith('.'):
+                    continue
+
+                path = os.path.join(root, filename)
+
+                # Reject anything that is not a regular file (issue #54).
+                # os.walk yields directory entries, but its ``filenames`` list
+                # can still include FIFOs (named pipes), sockets, and device
+                # nodes -- non-regular files an untrusted archive (tar/cpio)
+                # can materialize in export/. Opening a FIFO for reading blocks
+                # forever until a writer appears, hanging the entire run (even
+                # --dry-run) once a later Image.open reaches it. os.path.isfile
+                # uses os.stat -- it never opens the file, so this check cannot
+                # itself block -- and returns True only for regular files and
+                # symlinks pointing at regular files. A symlink to a real image
+                # is therefore kept (its target is resolved/named in issue #63);
+                # FIFOs, sockets, devices, and broken symlinks are skipped.
+                if not os.path.isfile(path):
+                    logger.warning(f"Skipping non-regular file: {path}")
+                    continue
+
+                files.append(path)
 
         return files
 
