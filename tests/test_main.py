@@ -1,0 +1,208 @@
+"""
+Test suite for the CLI entry point in ``src/main.py``.
+
+Covers the exit-code taxonomy directly via ``determine_exit_code`` and drives
+the ``main`` command through click's ``CliRunner`` to pin each terminal branch:
+success, dry run, partial failure, cancellation, the precondition/config-error
+paths, ``KeyboardInterrupt`` handling, the unexpected-exception handler, and
+``--version``.
+"""
+
+import os
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from click.testing import CliRunner
+
+from src.main import (
+    EXIT_CANCELLED,
+    EXIT_PARTIAL_FAILURE,
+    EXIT_PRECONDITION,
+    EXIT_SUCCESS,
+    determine_exit_code,
+    main,
+)
+from tests.fixtures import make_exif_jpeg
+
+
+class TestDetermineExitCode(unittest.TestCase):
+    """The pure result-dict -> exit-code mapping."""
+
+    def test_cancelled_wins_over_failures(self):
+        """A cancelled run maps to 130 even if a failure count is present."""
+        self.assertEqual(
+            determine_exit_code({"status": "cancelled", "files_failed": 3}),
+            EXIT_CANCELLED,
+        )
+
+    def test_failures_map_to_partial(self):
+        """A completed run with failures maps to the partial-failure code."""
+        self.assertEqual(
+            determine_exit_code({"status": "completed", "files_failed": 2}),
+            EXIT_PARTIAL_FAILURE,
+        )
+
+    def test_clean_run_maps_to_success(self):
+        """A completed run with no failures maps to success."""
+        self.assertEqual(
+            determine_exit_code({"status": "completed", "files_failed": 0}),
+            EXIT_SUCCESS,
+        )
+
+    def test_empty_dict_maps_to_success(self):
+        """A dict lacking both keys defaults to success (empty/dry run)."""
+        self.assertEqual(determine_exit_code({}), EXIT_SUCCESS)
+
+
+class TestMainCli(unittest.TestCase):
+    """End-to-end invocation of ``main`` through CliRunner."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+        self.temp_dir = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.temp_dir, "export")
+        self.backup_dir = os.path.join(self.temp_dir, "backup")
+        os.makedirs(self.export_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _args(self, *extra):
+        return [
+            "--export-dir",
+            self.export_dir,
+            "--backup-dir",
+            self.backup_dir,
+            *extra,
+        ]
+
+    def test_version_option(self):
+        """--version prints the program name/version and exits cleanly."""
+        result = self.runner.invoke(main, ["--version"])
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("tm-monthly-backup", result.output)
+        self.assertIn("1.0.0", result.output)
+
+    def test_missing_export_dir_is_precondition_failure(self):
+        """A nonexistent export directory exits with the precondition code."""
+        missing = os.path.join(self.temp_dir, "does_not_exist")
+        result = self.runner.invoke(
+            main, ["--export-dir", missing, "--backup-dir", self.backup_dir]
+        )
+
+        self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Cannot proceed", result.output)
+
+    def test_successful_run_exits_zero(self):
+        """A confirmed run over a decodable photo processes it and exits 0."""
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        # 'y' confirms the "Proceed with processing" prompt.
+        result = self.runner.invoke(main, self._args(), input="y\n")
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("All files processed successfully", result.output)
+        self.assertTrue(
+            os.path.exists(os.path.join(self.backup_dir, "photos"))
+        )
+
+    def test_dry_run_exits_zero_and_changes_nothing(self):
+        """--dry-run reports intent, exits 0, and moves no files."""
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        result = self.runner.invoke(main, self._args("--dry-run"))
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("Dry run completed", result.output)
+        # The source file is still in export/, untouched.
+        self.assertTrue(
+            os.path.exists(os.path.join(self.export_dir, "pic.jpg"))
+        )
+
+    def test_declining_prompt_is_cancelled(self):
+        """Answering no to the confirmation exits with the cancel code."""
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        result = self.runner.invoke(main, self._args(), input="n\n")
+
+        self.assertEqual(result.exit_code, EXIT_CANCELLED)
+
+    def test_partial_failure_exit_code_and_message(self):
+        """A completed run reporting failures exits 1 with a summary line."""
+        fake_results = {
+            "status": "completed",
+            "files_processed": 1,
+            "files_failed": 2,
+            "files_quarantined": 0,
+        }
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            return_value=fake_results,
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args())
+
+        self.assertEqual(result.exit_code, EXIT_PARTIAL_FAILURE)
+        # Rich styles the count separately, so match the surrounding phrase.
+        self.assertIn("Completed with", result.output)
+        self.assertIn("failures", result.output)
+
+    def test_cancelled_status_skips_results_table(self):
+        """A cancelled status exits 130 without rendering a results table."""
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            return_value={"status": "cancelled"},
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args())
+
+        self.assertEqual(result.exit_code, EXIT_CANCELLED)
+
+    def test_value_error_is_configuration_precondition(self):
+        """A ValueError from processing is reported as a config precondition."""
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            side_effect=ValueError("overlapping directories"),
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args())
+
+        self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Configuration error", result.output)
+
+    def test_keyboard_interrupt_is_cancelled(self):
+        """A SIGINT during processing exits with the cancel code."""
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            side_effect=KeyboardInterrupt,
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args())
+
+        self.assertEqual(result.exit_code, EXIT_CANCELLED)
+        self.assertIn("interrupted by user", result.output)
+
+    def test_unexpected_exception_is_precondition_with_traceback(self):
+        """An unexpected error exits 2; --verbose adds a traceback."""
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            side_effect=RuntimeError("boom"),
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args("--verbose"))
+
+        self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Unexpected error", result.output)
+        # --verbose prints the traceback frames.
+        self.assertIn("RuntimeError", result.output)
+
+
+if __name__ == "__main__":
+    unittest.main()
