@@ -268,7 +268,7 @@ class TestLandingPaths(unittest.TestCase):
     # ------------------------------------------------------------------ #
 
     def test_sidecar_deleted_and_backup_tree_is_exactly_expected(self):
-        """.aae sidecars are deleted; the backup tree holds only renamed files."""
+        """.aae sidecars are deleted; unknowns are filed under their own name."""
         make_exif_jpeg(
             self._export_path("IMG_0004.jpg"),
             date_time_original="2024:07:08 09:10:11",
@@ -290,15 +290,24 @@ class TestLandingPaths(unittest.TestCase):
             any(name.lower().endswith(".aae") for name in self._tree(self.backup_dir)),
             "an .aae sidecar leaked into the backup tree",
         )
-        # Unknown files are not processed; they stay in export, out of backup.
-        self.assertTrue(
-            os.path.exists(unknown_path), "unknown file should remain in export"
+        # The unknown file is routed to backup/unknown/ under its original name
+        # (issue #29): it no longer lingers in export.
+        self.assertFalse(
+            os.path.exists(unknown_path),
+            "unknown file should have been moved out of export",
         )
-        # The backup tree contains exactly the one expected renamed file.
+        # The backup tree contains exactly the renamed photo and the unknown
+        # file preserved by name -- and no phantom empty unknown/ (files only).
         self.assertEqual(
             self._tree(self.backup_dir),
-            {os.path.join("photos", "2024.07.08.09.10.11.jpg")},
+            {
+                os.path.join("photos", "2024.07.08.09.10.11.jpg"),
+                os.path.join("unknown", "notes.xyz"),
+            },
         )
+        # Contents survived the move, not just the name.
+        with open(self._backup_path("unknown", "notes.xyz"), "rb") as handle:
+            self.assertEqual(handle.read(), b"unknown blob")
 
 
 if __name__ == "__main__":

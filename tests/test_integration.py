@@ -132,11 +132,12 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(record['category'], 'photos')
 
     def test_mixed_file_types_processing(self):
-        """Every file type lands in its own backup dir; sidecars go, unknown stays.
+        """Every file type lands in its own backup dir; sidecars go, unknown routed.
 
         A real run must actually route each processable file into its category
-        directory, delete sidecars, and leave unknown files in place -- not
-        merely tally categorization counts.
+        directory, delete sidecars, and file unknown files into backup/unknown/
+        under their original name (issue #29) -- not merely tally categorization
+        counts.
         """
         self.create_test_image_with_exif("photo1.jpg", "2024:01:15 14:30:45")
         self.create_test_image_with_exif("photo2.jpeg", "2024:02:20 10:11:12")
@@ -169,7 +170,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(_count("photos"), 2)
         self.assertEqual(_count("videos"), 2)
         self.assertEqual(_count("screenshots"), 2)
-        self.assertEqual(results['files_processed'], 6)  # 2+2+2 processable
+        self.assertEqual(_count("unknown"), 1)  # unknown.txt routed here
+        self.assertEqual(results['files_processed'], 7)  # 2+2+2 + 1 unknown
 
         # The two EXIF photos are renamed to their exact DateTimeOriginal values.
         self.assertTrue(os.path.isfile(
@@ -177,10 +179,13 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertTrue(os.path.isfile(
             os.path.join(self.backup_dir, "photos", "2024.02.20.10.11.12.jpeg")))
 
-        # Sidecars deleted from export; the unknown file is left untouched.
+        # Sidecars deleted from export; the unknown file is routed to
+        # backup/unknown/ under its original name and no longer sits in export.
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "sidecar1.aae")))
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "sidecar2.aae")))
-        self.assertTrue(os.path.exists(os.path.join(self.export_dir, "unknown.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.export_dir, "unknown.txt")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.backup_dir, "unknown", "unknown.txt")))
 
     def test_sidecar_file_deletion_dry_run(self):
         """Test that sidecar files are identified for deletion in dry run"""
@@ -245,14 +250,13 @@ class TestWorkflowIntegration(unittest.TestCase):
         )
 
     def test_duplicate_timestamp_across_categories(self):
-        """A photo and a screenshot sharing a timestamp resolve across categories.
+        """A photo and a screenshot sharing a timestamp both keep it (#21).
 
-        ``used_timestamps`` is global to the processor, so a screenshot colliding
-        with an already-placed photo is bumped by one second even though it lands
-        in a different directory (the cross-category behavior pinned by #21).
-        Photos are processed before screenshots, so the photo keeps ``.45`` and
-        the screenshot is pushed to ``.46``. The identity mutation of
-        ``handle_duplicate_timestamp`` leaves the screenshot at ``.45`` and fails.
+        Collision tracking is scoped per target directory, so a screenshot that
+        resolves to the same second as an already-placed photo is NOT bumped:
+        the two land in different directories and can never collide on disk.
+        Both keep their true ``.45`` timestamp. Before the #21 fix the shared
+        global set spuriously pushed the screenshot to ``.46``.
         """
         self.create_test_image_with_exif("IMG_9999.jpg", "2024:01:15 14:30:45")
         # The screenshot carries no EXIF; its filename yields the same 14:30:45.
@@ -267,8 +271,14 @@ class TestWorkflowIntegration(unittest.TestCase):
         )
         self.assertTrue(
             os.path.isfile(os.path.join(
+                self.backup_dir, "screenshots", "2024.01.15.14.30.45.png")),
+            "screenshot must keep its true .45 timestamp (different directory)",
+        )
+        # And the spurious cross-category bump is gone entirely.
+        self.assertFalse(
+            os.path.exists(os.path.join(
                 self.backup_dir, "screenshots", "2024.01.15.14.30.46.png")),
-            "screenshot should be bumped to .46 by the global used-timestamp set",
+            "screenshot must not be bumped by a photo in another directory",
         )
 
     def test_error_handling_workflow(self):
@@ -378,11 +388,17 @@ class TestWorkflowIntegration(unittest.TestCase):
             os.path.join(self.backup_dir, "photos"),
             os.path.join(self.backup_dir, "videos"),
             os.path.join(self.backup_dir, "screenshots"),
-            os.path.join(self.backup_dir, "unknown")
         ]
 
         for expected_dir in expected_dirs:
             self.assertTrue(os.path.exists(expected_dir), f"Directory not created: {expected_dir}")
+
+        # backup/unknown/ must NOT be created when no unrecognized file exists:
+        # it is no longer an empty phantom that implies handling (issue #29).
+        self.assertFalse(
+            os.path.exists(os.path.join(self.backup_dir, "unknown")),
+            "backup/unknown/ was created empty with no unknown files present",
+        )
 
         # The directories are not merely created -- the files land inside them.
         self.assertTrue(os.path.isfile(os.path.join(
@@ -466,7 +482,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         # Every container is empty after the clear.
         self.assertEqual(self.processor.processed_files, [])
-        self.assertEqual(self.processor.used_timestamps, set())
+        self.assertEqual(self.processor.used_timestamps, {})
         self.assertEqual(self.processor.failed_files, [])
         self.assertEqual(self.processor.conversion_log, [])
         self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])

@@ -17,6 +17,42 @@ except ImportError:
     from .cli_interface import CLIInterface, setup_logging
 
 
+# Exit code taxonomy. Each code carries exactly one meaning so a caller can act
+# on the result of a run (documented in ``docs/cli-usage.md``, issue #31).
+EXIT_SUCCESS = 0            # every discovered file was processed; no failures
+EXIT_PARTIAL_FAILURE = 1    # processing ran but one or more files failed
+EXIT_PRECONDITION = 2       # cannot run: bad/overlapping dirs, unexpected error
+EXIT_CANCELLED = 130        # user declined the prompt or sent SIGINT (128 + 2)
+
+
+def determine_exit_code(results: dict) -> int:
+    """
+    Map a processing-results dict to a process exit code.
+
+    The result is classified before its failure count is consulted so a
+    cancelled run is never reported as a success:
+
+    * ``status == "cancelled"`` -> :data:`EXIT_CANCELLED`.
+    * any recorded per-file failure -> :data:`EXIT_PARTIAL_FAILURE`.
+    * otherwise (including an empty or dry run) -> :data:`EXIT_SUCCESS`.
+
+    Precondition failures (missing/overlapping directories, unexpected
+    exceptions) are decided by the caller before or around processing and map to
+    :data:`EXIT_PRECONDITION`; they never reach this function.
+
+    Args:
+        results: The dict returned by ``CLIInterface.process_with_progress``.
+
+    Returns:
+        One of the module-level ``EXIT_*`` codes.
+    """
+    if results.get('status') == 'cancelled':
+        return EXIT_CANCELLED
+    if results.get('files_failed', 0) > 0:
+        return EXIT_PARTIAL_FAILURE
+    return EXIT_SUCCESS
+
+
 @click.command()
 @click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
@@ -44,38 +80,52 @@ def main(dry_run, verbose, export_dir, backup_dir):
     # Display welcome banner
     cli.display_welcome()
 
-    # Check directories and prerequisites
+    # Check directories and prerequisites. A directory problem (missing export
+    # dir, unwritable backup dir, or the #52 overlap rejection) is a
+    # precondition failure -- nothing was attempted -- so it exits distinctly
+    # from a partial processing failure.
     if not cli.check_directories():
         cli.console.print("[red]Cannot proceed due to directory issues.[/red]")
-        sys.exit(1)
+        sys.exit(EXIT_PRECONDITION)
 
     try:
         # Process files with beautiful progress indicators
         results = cli.process_with_progress(dry_run=dry_run)
 
+        exit_code = determine_exit_code(results)
+
+        if results.get('status') == 'cancelled':
+            # process_with_progress already printed the cancellation notice;
+            # exit with the POSIX cancel code without rendering a results table.
+            sys.exit(exit_code)
+
         # Display results
         cli.display_results(results, dry_run=dry_run)
 
-        # Exit with appropriate code
-        if results.get('files_failed', 0) > 0:
+        # Report and exit with the code the taxonomy chose.
+        if exit_code == EXIT_PARTIAL_FAILURE:
             cli.console.print(f"\n[yellow]Completed with {results['files_failed']} failures.[/yellow]")
-            sys.exit(1)
-        else:
-            if not dry_run and results.get('files_processed', 0) > 0:
-                cli.console.print("\n[bold green]All files processed successfully![/bold green]")
-            elif dry_run:
-                cli.console.print("\n[blue]Dry run completed. Use without --dry-run to process files.[/blue]")
-            sys.exit(0)
+        elif not dry_run and results.get('files_processed', 0) > 0:
+            cli.console.print("\n[bold green]All files processed successfully![/bold green]")
+        elif dry_run:
+            cli.console.print("\n[blue]Dry run completed. Use without --dry-run to process files.[/blue]")
 
+        sys.exit(exit_code)
+
+    except ValueError as e:
+        # Raised by process_all_files when export/backup overlap (#52): a
+        # pre-flight misconfiguration, so nothing was processed.
+        cli.console.print(f"\n[red]Configuration error: {e}[/red]")
+        sys.exit(EXIT_PRECONDITION)
     except KeyboardInterrupt:
         cli.console.print("\n[yellow]Processing interrupted by user.[/yellow]")
-        sys.exit(1)
+        sys.exit(EXIT_CANCELLED)
     except Exception as e:
         cli.console.print(f"\n[red]Unexpected error: {e}[/red]")
         if verbose:
             import traceback
             cli.console.print(traceback.format_exc())
-        sys.exit(1)
+        sys.exit(EXIT_PRECONDITION)
 
 
 if __name__ == '__main__':
