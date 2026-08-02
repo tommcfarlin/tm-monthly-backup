@@ -64,7 +64,7 @@ class HeicConverter:
         output_path = None
         try:
             if not self.is_heic_file(heic_path):
-                logger.warning(f"File is not HEIC format: {heic_path}")
+                logger.warning("File is not HEIC format: %s", heic_path)
                 return None
 
             # Determine the target directory for the converted JPEG.
@@ -112,12 +112,12 @@ class HeicConverter:
 
                 image.save(output_path, **save_kwargs)
 
-            logger.info(f"Successfully converted HEIC to JPEG: {heic_path} -> {output_path}")
+            logger.info("Successfully converted HEIC to JPEG: %s -> %s", heic_path, output_path)
             self.converted_files.append((heic_path, str(output_path)))
             return str(output_path)
 
         except Exception as e:
-            logger.error(f"Failed to convert HEIC file {heic_path}: {e}")
+            logger.error("Failed to convert HEIC file %s: %s", heic_path, e)
             self.failed_conversions.append((heic_path, str(e)))
             # Remove the reserved-but-unwritten temp file so a 0-byte artifact is
             # not left behind in export to be re-ingested on a later run.
@@ -178,18 +178,18 @@ class HeicConverter:
 
             # Check size preservation
             if heic_size != jpeg_size:
-                logger.warning(f"Size mismatch in conversion: {heic_size} vs {jpeg_size}")
+                logger.warning("Size mismatch in conversion: %s vs %s", heic_size, jpeg_size)
                 return False
 
             # Check EXIF preservation (at least some data should be preserved)
             if heic_exif and not jpeg_exif:
-                logger.warning(f"EXIF data lost in conversion: {original_heic}")
+                logger.warning("EXIF data lost in conversion: %s", original_heic)
                 return False
 
             return True
 
         except Exception as e:
-            logger.error(f"Error verifying conversion: {e}")
+            logger.error("Error verifying conversion: %s", e)
             return False
 
     def cleanup_original_heic(
@@ -233,15 +233,15 @@ class HeicConverter:
                     )
                     return False
                 if not self.verify_conversion(heic_path, converted_jpeg):
-                    logger.error(f"Conversion verification failed, keeping original: {heic_path}")
+                    logger.error("Conversion verification failed, keeping original: %s", heic_path)
                     return False
 
             heic_file.unlink()
-            logger.info(f"Deleted original HEIC file: {heic_path}")
+            logger.info("Deleted original HEIC file: %s", heic_path)
             return True
 
         except Exception as e:
-            logger.error(f"Failed to delete HEIC file {heic_path}: {e}")
+            logger.error("Failed to delete HEIC file %s: %s", heic_path, e)
             return False
 
     def get_conversion_stats(self) -> dict:

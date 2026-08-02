@@ -7,6 +7,12 @@ This directory contains comprehensive tests for the tm-monthly-backup applicatio
 ### Unit Tests
 - **`test_exif_handler.py`** - Tests for EXIF timestamp extraction functionality
 - **`test_file_categorizer.py`** - Tests for file categorization logic
+- **`test_interruption.py`** - Interruption and partial-failure resilience: a
+  `KeyboardInterrupt` mid-batch propagates out of `_process_category` (its
+  `except Exception` must not swallow a `BaseException`) with files-before
+  landed and files-after untouched; a full disk (`ENOSPC`) keeps trying every
+  remaining file instead of aborting; and a file deleted between scan and
+  processing is absorbed without crashing
 
 ### Integration Tests
 - **`test_integration.py`** - End-to-end workflow tests and component integration

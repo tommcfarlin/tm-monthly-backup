@@ -279,7 +279,7 @@ class ExifHandler:
                 exif_data = image.getexif()
 
                 if not exif_data:
-                    logger.warning(f"No EXIF data found in {file_path}")
+                    logger.warning("No EXIF data found in %s", file_path)
                     self.missing_exif_files.append(file_path)
                     return None
 
@@ -303,12 +303,12 @@ class ExifHandler:
                             self.missing_exif_files.remove(file_path)
                         return parsed
 
-                logger.warning(f"No timestamp tags found in EXIF data for {file_path}")
+                logger.warning("No timestamp tags found in EXIF data for %s", file_path)
                 self.missing_exif_files.append(file_path)
                 return None
 
         except Exception as e:
-            logger.error(f"Error reading EXIF data from {file_path}: {e}")
+            logger.error("Error reading EXIF data from %s: %s", file_path, e)
             self.missing_exif_files.append(file_path)
             return None
 
@@ -342,7 +342,7 @@ class ExifHandler:
         try:
             sub_ifd = exif.get_ifd(self.EXIF_IFD)
         except (AttributeError, KeyError, OSError, ValueError) as exc:
-            logger.debug(f"No Exif sub-IFD in {file_path}: {exc}")
+            logger.debug("No Exif sub-IFD in %s: %s", file_path, exc)
             sub_ifd = {}
 
         for tag_id, value in sub_ifd.items():
@@ -399,7 +399,7 @@ class ExifHandler:
         try:
             moov = self._read_moov_bytes(file_path)
         except OSError as exc:
-            logger.debug(f"Could not read video boxes from {file_path}: {exc}")
+            logger.debug("Could not read video boxes from %s: %s", file_path, exc)
             return None
         if moov is None:
             return None
@@ -460,7 +460,7 @@ class ExifHandler:
                         return handle.read(payload_len)
                     payload = handle.read(_MAX_MOOV_BYTES + 1)
                     if len(payload) > _MAX_MOOV_BYTES:
-                        logger.debug(f"moov atom too large in {file_path}")
+                        logger.debug("moov atom too large in %s", file_path)
                         return None
                     return payload
 
@@ -486,21 +486,21 @@ class ExifHandler:
             datetime object if found, None if missing/invalid
         """
         if not HACHOIR_AVAILABLE:
-            logger.warning(f"Hachoir not available for video metadata extraction: {file_path}")
+            logger.warning("Hachoir not available for video metadata extraction: %s", file_path)
             self.missing_exif_files.append(file_path)
             return None
 
         try:
             parser = createParser(file_path)
             if not parser:
-                logger.warning(f"Could not create parser for video file: {file_path}")
+                logger.warning("Could not create parser for video file: %s", file_path)
                 self.missing_exif_files.append(file_path)
                 return None
 
             with parser:
                 metadata = extractMetadata(parser)
                 if not metadata:
-                    logger.warning(f"No metadata found in video file: {file_path}")
+                    logger.warning("No metadata found in video file: %s", file_path)
                     self.missing_exif_files.append(file_path)
                     return None
 
@@ -534,15 +534,15 @@ class ExifHandler:
                                 continue
 
                 if creation_date:
-                    logger.info(f"Extracted video creation date: {file_path} -> {creation_date}")
+                    logger.info("Extracted video creation date: %s -> %s", file_path, creation_date)
                     return creation_date
                 else:
-                    logger.warning(f"No creation date found in video metadata: {file_path}")
+                    logger.warning("No creation date found in video metadata: %s", file_path)
                     self.missing_exif_files.append(file_path)
                     return None
 
         except Exception as e:
-            logger.error(f"Error extracting video metadata from {file_path}: {e}")
+            logger.error("Error extracting video metadata from %s: %s", file_path, e)
             self.missing_exif_files.append(file_path)
             return None
 
@@ -561,7 +561,7 @@ class ExifHandler:
             # EXIF datetime format: "YYYY:MM:DD HH:MM:SS"
             return datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
         except ValueError as e:
-            logger.error(f"Invalid EXIF datetime format in {file_path}: {datetime_str} - {e}")
+            logger.error("Invalid EXIF datetime format in %s: %s - %s", file_path, datetime_str, e)
             self.missing_exif_files.append(file_path)
             return None
 
@@ -578,7 +578,7 @@ class ExifHandler:
         # Try to extract date from filename first
         filename_timestamp = self._extract_timestamp_from_filename(file_path)
         if filename_timestamp:
-            logger.info(f"Extracted timestamp from filename: {file_path} -> {filename_timestamp}")
+            logger.info("Extracted timestamp from filename: %s -> %s", file_path, filename_timestamp)
             return filename_timestamp
 
         try:
@@ -594,7 +594,7 @@ class ExifHandler:
 
             return datetime.fromtimestamp(timestamp)
         except OSError as e:
-            logger.error(f"Error getting file timestamp for {file_path}: {e}")
+            logger.error("Error getting file timestamp for %s: %s", file_path, e)
             # Ultimate fallback: current time
             return datetime.now()
 
@@ -682,12 +682,12 @@ class ExifHandler:
 
             formatted = self.format_timestamp_filename(adjusted)
             if formatted not in existing_files:
-                logger.info(f"Resolved timestamp conflict: {base_format} -> {formatted}")
+                logger.info("Resolved timestamp conflict: %s -> %s", base_format, formatted)
                 return adjusted
 
             attempts += 1
 
-        logger.error(f"Could not resolve timestamp conflict after {max_attempts} attempts")
+        logger.error("Could not resolve timestamp conflict after %s attempts", max_attempts)
         return adjusted
 
     def get_missing_exif_files(self) -> list:
