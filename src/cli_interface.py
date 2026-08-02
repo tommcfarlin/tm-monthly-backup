@@ -255,16 +255,23 @@ class CLIInterface:
         # Success/failure summary
         success_count = results.get('files_processed', 0)
         failure_count = results.get('files_failed', 0)
+        quarantine_count = results.get('files_quarantined', 0)
 
         if dry_run:
             title = "Dry Run Results"
             title_style = "bold blue"
-        elif failure_count == 0:
-            title = "Processing Complete - Success!"
-            title_style = "bold green"
-        else:
+        elif failure_count > 0:
             title = "Processing Complete - With Errors"
             title_style = "bold yellow"
+        elif quarantine_count > 0:
+            # No file errored, but undecodable files were quarantined rather than
+            # archived. That is not an unqualified success -- the user has files
+            # in backup/corrupt/ to review -- so the banner says so (issue #58).
+            title = "Processing Complete - Files Quarantined"
+            title_style = "bold yellow"
+        else:
+            title = "Processing Complete - Success!"
+            title_style = "bold green"
 
         # Create results table
         table = Table(title=title, show_header=True, header_style="bold magenta")
@@ -274,6 +281,11 @@ class CLIInterface:
         table.add_row("Files Processed", str(success_count))
         table.add_row("HEIC Conversions", str(results.get('heic_conversions', 0)))
         table.add_row("Missing EXIF Files", str(results.get('missing_exif_files', 0)))
+
+        if quarantine_count > 0:
+            table.add_row(
+                "Quarantined (undecodable)", str(quarantine_count), style="yellow"
+            )
 
         if failure_count > 0:
             table.add_row("Failed Files", str(failure_count), style="red")
@@ -301,6 +313,11 @@ class CLIInterface:
 
             if stats.get('unknown', 0) > 0:
                 breakdown_table.add_row("Unknown", str(stats['unknown']), "backup/unknown/", style="yellow")
+
+            if quarantine_count > 0:
+                breakdown_table.add_row(
+                    "Quarantined", str(quarantine_count), "backup/corrupt/", style="yellow"
+                )
 
             self.console.print(breakdown_table)
 

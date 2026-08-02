@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 
+from PIL import Image, UnidentifiedImageError
+
 from .exif_handler import ExifHandler
 from .heic_converter import HeicConverter
 from .file_categorizer import FileCategorizer, FileCategory
@@ -18,6 +20,28 @@ logger = logging.getLogger(__name__)
 
 class FileProcessor:
     """Main file processing coordinator"""
+
+    # Categories whose files are trusted to be images purely on the strength of
+    # their extension. Before one of these is renamed to a fabricated timestamp
+    # and filed as a photograph, its bytes must be proven to decode (issue #58).
+    IMAGE_CATEGORIES = frozenset({
+        FileCategory.PHOTO,
+        FileCategory.SCREENSHOT,
+        FileCategory.GENERATED,
+    })
+
+    # Extensions whose bytes Pillow can reliably decode end to end, so a file
+    # among them that fails to decode is genuinely corrupt or mislabeled rather
+    # than merely a format Pillow lacks a codec for. RAW formats
+    # (``.dng``/``.cr2``/``.nef``/...) are deliberately excluded: Pillow cannot
+    # decode them, so a perfectly good RAW would fail the decode check and be
+    # falsely quarantined. HEIC/HEIF are excluded too -- their decodability is
+    # already established by the conversion-verification path (issue #7), which
+    # keeps the original and records a failure on a bad decode -- so the decode
+    # gate here concerns only NON-HEIC raster images.
+    DECODABLE_IMAGE_EXTENSIONS = frozenset({
+        '.jpg', '.jpeg', '.png', '.gif', '.tiff', '.tif', '.bmp', '.webp',
+    })
 
     def __init__(self, export_dir: str = "export", backup_dir: str = "backup"):
         """
@@ -51,6 +75,12 @@ class FileProcessor:
         self.used_timestamps: Dict[str, Set[str]] = {}
         self.failed_files = []
         self.conversion_log = []
+        # Files carrying an image extension whose bytes did not decode as an
+        # image (truncated, zero-byte, or a non-image mislabeled ``.jpg``/
+        # ``.png``). They are moved to ``backup/corrupt/`` under their original
+        # name rather than archived as photographs, and reported as a distinct
+        # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
+        self.quarantined_files: List[Dict[str, any]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -236,6 +266,25 @@ class FileProcessor:
         # empty phantom (issue #29).
         if category is FileCategory.UNKNOWN:
             self._process_unknown_file(file_path, target_dir, dry_run)
+            return
+
+        # Before trusting a photo/screenshot/generated extension, confirm the
+        # bytes actually decode as an image. A truncated download, a zero-byte
+        # stub, or a text file mislabeled ``.jpg``/``.png`` would otherwise be
+        # renamed to a fabricated timestamp and filed into ``backup/photos/`` as
+        # a genuine photograph -- and the rename is the damage: it destroys the
+        # original filename, the one clue to what the file really was (issue
+        # #58). Undecodable files are quarantined instead. The gate is limited to
+        # extensions Pillow can decode (``DECODABLE_IMAGE_EXTENSIONS``) so a
+        # valid RAW -- which Pillow cannot decode at all -- is never falsely
+        # quarantined, and so HEIC (verified separately in issue #7) is left to
+        # its own path.
+        if (
+            category in self.IMAGE_CATEGORIES
+            and Path(file_path).suffix.lower() in self.DECODABLE_IMAGE_EXTENSIONS
+            and not self._is_decodable_image(file_path)
+        ):
+            self._quarantine_file(file_path, dry_run)
             return
 
         original_path = file_path
@@ -425,6 +474,139 @@ class FileProcessor:
                 f"Failed to move unrecognized file {file_path} to {target_path}: {e}"
             )
             self.failed_files.append(('move_file', file_path, str(e)))
+
+    def get_quarantine_directory(self) -> str:
+        """
+        Return the directory undecodable image-typed files are quarantined into.
+
+        Kept as a single accessor so the ``backup/corrupt/`` location is defined
+        in exactly one place. The directory is created lazily, only when a file
+        actually lands in it (see :meth:`_quarantine_file`), so it is never an
+        empty phantom implying corruption that did not occur.
+
+        Returns:
+            The ``backup/corrupt/`` path.
+        """
+        return os.path.join(self.backup_dir, "corrupt")
+
+    def _is_decodable_image(self, file_path: str) -> bool:
+        """
+        Report whether ``file_path`` genuinely decodes as an image.
+
+        Trusting the extension is exactly the bug (issue #58): a truncated
+        JPEG opens fine at the header and only fails deep in the pixel stream,
+        and a text file renamed ``.png`` is not an image at all. So the check
+        forces a full decode with :meth:`PIL.Image.Image.load` rather than the
+        lazier :meth:`PIL.Image.Image.verify` -- ``verify`` validates structure
+        but does NOT read the pixel data, so it passes a JPEG truncated to half
+        its bytes, the realistic interrupted-download case. A zero-byte file is
+        rejected up front without an open. Exactly one decode is performed here;
+        the downstream timestamp read only touches EXIF (a lazy header read, no
+        pixel decode), so a file is never fully decoded twice.
+
+        Args:
+            file_path: Path to the candidate image file.
+
+        Returns:
+            True if the file is non-empty and its bytes fully decode as an
+            image; False if it is empty, truncated, or not a decodable image.
+        """
+        try:
+            if os.path.getsize(file_path) == 0:
+                logger.warning(
+                    "Zero-byte file, not archiving as media: %s", file_path
+                )
+                return False
+        except OSError as error:
+            logger.warning(
+                "Cannot stat %s, treating as undecodable: %s", file_path, error
+            )
+            return False
+
+        try:
+            with Image.open(file_path) as image:
+                # load() forces the full pixel decode; a truncated or corrupt
+                # stream raises here where verify()/open() alone would not.
+                image.load()
+        except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as error:
+            logger.warning(
+                "Not a decodable image (%s), quarantining: %s",
+                type(error).__name__,
+                file_path,
+            )
+            return False
+        return True
+
+    def _quarantine_file(self, file_path: str, dry_run: bool) -> None:
+        """
+        Move an undecodable image-typed file to ``backup/corrupt/`` by its name.
+
+        A corrupt file has no reliable capture timestamp, so -- like an unknown
+        file (issue #29) -- it keeps its ORIGINAL filename, the only detail that
+        lets the user identify and recover it. ``backup/corrupt/`` is created
+        lazily here so it is never an empty phantom, and a name a prior run (or
+        an earlier file in this batch) already filed there is disambiguated as
+        ``name (1).ext`` rather than overwriting it, reusing the same atomic
+        reservation the unknown/timestamped paths use. The original is never
+        deleted from ``export/`` until it has safely landed here. On success the
+        move is recorded in ``quarantined_files``; on failure it is recorded in
+        ``failed_files`` so a botched quarantine cannot masquerade as a clean run.
+
+        In a dry run nothing is moved, but the decision is still recorded and
+        logged so ``--dry-run`` surfaces exactly which files a real run would
+        quarantine (issue #58 acceptance criterion).
+
+        Args:
+            file_path: Source path of the undecodable file.
+            dry_run: If True, only log/record the decision; touch nothing.
+        """
+        original_name = os.path.basename(file_path)
+        target_dir = self.get_quarantine_directory()
+
+        if dry_run:
+            target_path = self._resolve_named_destination_dry_run(
+                target_dir, original_name
+            )
+            logger.warning(
+                "[DRY RUN] Would quarantine undecodable file: %s -> %s",
+                file_path,
+                target_path,
+            )
+            self.quarantined_files.append({
+                'original_path': file_path,
+                'final_path': target_path,
+                'reason': 'undecodable',
+            })
+            return
+
+        target_path = None
+        try:
+            # Create backup/corrupt/ only now that a file is actually landing in
+            # it -- this is what keeps the directory from being an empty phantom.
+            os.makedirs(target_dir, exist_ok=True)
+
+            target_path = self._reserve_named_destination(target_dir, original_name)
+            try:
+                shutil.move(file_path, target_path)
+            except Exception:
+                # The move failed after the name was reserved; drop the empty
+                # placeholder so a 0-byte stub is not left behind in backup/.
+                self._discard_reservation(target_path)
+                raise
+            logger.warning(
+                "Quarantined undecodable file: %s -> %s", file_path, target_path
+            )
+
+            self.quarantined_files.append({
+                'original_path': file_path,
+                'final_path': target_path,
+                'reason': 'undecodable',
+            })
+        except Exception as error:
+            logger.error(
+                "Failed to quarantine %s to %s: %s", file_path, target_path, error
+            )
+            self.failed_files.append(('quarantine', file_path, str(error)))
 
     def _reserve_named_destination(self, target_dir: str, filename: str) -> str:
         """
@@ -627,12 +809,18 @@ class FileProcessor:
         return {
             'files_processed': len(self.processed_files),
             'files_failed': len(self.failed_files),
+            # Undecodable image-typed files quarantined to backup/corrupt/. A
+            # distinct outcome from processed (they were NOT filed as photos)
+            # and from failed (nothing errored; they were handled deliberately
+            # and safely), so the count is honest either way (issue #58).
+            'files_quarantined': len(self.quarantined_files),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
             'missing_exif_files': len(missing_exif_files),
             'processed_files': self.processed_files.copy(),
             'failed_files': self.failed_files.copy(),
+            'quarantined_files': self.quarantined_files.copy(),
             'conversion_log': self.conversion_log.copy(),
             'missing_exif_list': missing_exif_files
         }
@@ -683,6 +871,7 @@ class FileProcessor:
         self.processed_files.clear()
         self.used_timestamps.clear()
         self.failed_files.clear()
+        self.quarantined_files.clear()
         self.conversion_log.clear()
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()
