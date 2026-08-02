@@ -264,13 +264,29 @@ keep_heic_originals: false
 
 ## Exit Codes
 
-The CLI uses standard exit codes for integration with scripts:
+The CLI uses distinct exit codes so scripts can act on the result of a run.
+Each code carries exactly one meaning:
 
 | Code | Meaning | Description |
 |------|---------|-------------|
-| `0` | Success | All files processed successfully |
-| `1` | Partial Success | Some files failed but processing completed |
-| `1` | Error | Critical error preventing processing |
+| `0` | Success | Every discovered file was processed; zero failures (also returned for a dry run and for an empty export directory) |
+| `1` | Partial failure | Processing ran but one or more files failed; the failures are listed in the summary |
+| `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, or an unexpected error. Nothing was processed |
+| `130` | Cancelled | The user declined the confirmation prompt or interrupted the run with `SIGINT` (Ctrl-C); follows the POSIX `128 + signal` convention |
+
+A `0` means the run is done and no file was left behind, so a script can safely
+act on it:
+
+```bash
+tm-monthly-backup
+if [ $? -eq 0 ]; then
+    echo "All files organized into backup/."
+fi
+```
+
+Any non-zero code means at least one file was not processed (`1`), the run never
+started (`2`), or it was cancelled (`130`) -- none of which should be treated as
+a completed, safe run.
 
 ## Performance Notes
 

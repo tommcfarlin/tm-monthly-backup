@@ -274,7 +274,15 @@ class FileProcessor:
                     # been moved into backup/ -- see Step 3.
                     heic_original_to_delete = file_path
                 else:
+                    # Conversion returned no path: the file was not processed.
+                    # Record it so it lands in ``failed_files`` and increments
+                    # ``files_failed`` instead of being silently dropped, which
+                    # would let the summary report success and the exit code
+                    # read 0 for a run that left this file behind (issue #31).
                     logger.error(f"HEIC conversion failed for {file_path}")
+                    self.failed_files.append(
+                        ('convert_heic', file_path, 'HEIC conversion failed')
+                    )
                     return
 
         # Step 2: Extract timestamp

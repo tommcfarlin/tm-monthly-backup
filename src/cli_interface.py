@@ -173,7 +173,12 @@ class CLIInterface:
 
         if not files:
             self.console.print("[yellow]No files found to process[/yellow]")
-            return {}
+            # Return a tagged (not empty) result so the caller can tell "nothing
+            # to do" apart from "cancelled" and "done" instead of inferring the
+            # outcome from a falsy dict (issue #31).
+            summary = self.processor._generate_summary()
+            summary['status'] = 'no_files'
+            return summary
 
         self.display_file_scan_results(files)
 
@@ -184,7 +189,10 @@ class CLIInterface:
         if not dry_run:
             if not Confirm.ask(f"\nProceed with processing {len(files)} files?"):
                 self.console.print("[yellow]Processing cancelled[/yellow]")
-                return {}
+                # Signal cancellation explicitly rather than with an empty dict
+                # so the caller can exit with the POSIX cancel code (130) and
+                # never confuse a declined run with a clean success (issue #31).
+                return {'status': 'cancelled'}
 
         # Process with progress tracking
         with Progress(
@@ -225,8 +233,11 @@ class CLIInterface:
             progress.update(convert_task, completed=progress.tasks[convert_task].total or 1)
             progress.update(organize_task, completed=progress.tasks[organize_task].total or 1)
 
-        # Generate and return summary
-        return self.processor._generate_summary()
+        # Generate and return summary, tagged so the caller can distinguish a
+        # completed run from a cancelled or empty one (issue #31).
+        summary = self.processor._generate_summary()
+        summary['status'] = 'completed'
+        return summary
 
     def display_results(self, results: Dict, dry_run: bool = False):
         """
@@ -236,7 +247,9 @@ class CLIInterface:
             results: Processing results dictionary
             dry_run: Whether this was a dry run
         """
-        if not results:
+        # Nothing to render for an empty, cancelled, or no-work result: the
+        # relevant notice was already printed by ``process_with_progress``.
+        if not results or results.get('status') in ('cancelled', 'no_files'):
             return
 
         # Success/failure summary
