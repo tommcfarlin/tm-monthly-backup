@@ -416,7 +416,10 @@ class FileProcessor:
                     # The destination was reserved with O_CREAT | O_EXCL, so it is
                     # an empty placeholder we own -- never a pre-existing photo.
                     # Overwriting it here therefore cannot destroy user data.
-                    shutil.move(current_path, target_path)
+                    # ``_place_source_content`` moves a regular file but COPIES a
+                    # symlink's target bytes and removes only the link, so the
+                    # archive holds the real photo rather than a pointer (#63).
+                    self._place_source_content(current_path, target_path)
                 except Exception:
                     # The move failed after the name was reserved; drop the empty
                     # placeholder so a 0-byte stub is not left behind in backup/.
@@ -486,7 +489,7 @@ class FileProcessor:
 
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
-                shutil.move(file_path, target_path)
+                self._place_source_content(file_path, target_path)
             except Exception:
                 # The move failed after the name was reserved; drop the empty
                 # placeholder so a 0-byte stub is not left behind in backup/.
@@ -619,7 +622,7 @@ class FileProcessor:
 
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
-                shutil.move(file_path, target_path)
+                self._place_source_content(file_path, target_path)
             except Exception:
                 # The move failed after the name was reserved; drop the empty
                 # placeholder so a 0-byte stub is not left behind in backup/.
@@ -826,6 +829,48 @@ class FileProcessor:
             os.remove(target_path)
         except OSError:
             pass
+
+    def _place_source_content(self, source: str, destination: str) -> None:
+        """
+        Place the real content of ``source`` onto the reserved ``destination``.
+
+        ``destination`` is an empty placeholder previously claimed with
+        ``O_CREAT | O_EXCL`` (issue #6), so overwriting it here can never destroy
+        existing user data. The two source shapes are handled differently:
+
+        * A **regular file** is moved with :func:`shutil.move`, which stays a
+          single cheap ``os.rename`` on the common same-filesystem case and
+          fully drains it from ``export/``.
+
+        * A **symlink** is the whole of issue #63. ``shutil.move`` falls through
+          to ``os.rename`` on a same-filesystem move, which relocates the *link
+          itself* -- the archive would then hold a pointer back into the source
+          tree instead of the photo, and the "backup" turns into a dead link the
+          moment the user tidies the original away. The link's target may also
+          live entirely outside ``export/``, and the tool must never move,
+          delete, or modify that target. So the target's real bytes are COPIED
+          onto the destination (:func:`shutil.copy2` of the fully resolved real
+          path, which also mirrors the target's mtime), and then only the *link*
+          is removed from ``export/`` -- :func:`os.remove` on a symlink unlinks
+          the link, never the file it points at. The target is left exactly
+          where it was. Issue #54 already guaranteed a symlink reaching here
+          points at a regular file (broken links and links to FIFOs/sockets were
+          filtered at the scan boundary), so the resolved path is a real file.
+
+        The link is unlinked only *after* the copy succeeds: if the copy raises,
+        the exception propagates (the caller discards the reserved placeholder)
+        and the symlink is left untouched in ``export/`` so nothing is lost.
+
+        Args:
+            source: The scanned source path -- a regular file, or a symlink to
+                a regular file whose target content should be archived.
+            destination: The reserved placeholder path to fill with real bytes.
+        """
+        if os.path.islink(source):
+            shutil.copy2(os.path.realpath(source), destination)
+            os.remove(source)
+        else:
+            shutil.move(source, destination)
 
     def _generate_summary(self) -> Dict[str, any]:
         """
