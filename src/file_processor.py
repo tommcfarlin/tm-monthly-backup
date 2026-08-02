@@ -195,6 +195,18 @@ class FileProcessor:
 
         files = []
         for root, dirs, filenames in os.walk(self.export_dir):
+            # Prune hidden directories in place so os.walk never descends into
+            # them (issue #56). macOS export volumes are littered with system
+            # dot-directories -- .Trashes, .Spotlight-V100, .fseventsd,
+            # .DocumentRevisions-V100 -- and a repo drop-off adds .git. These are
+            # never intended photo input: descending would archive files out of
+            # .Trashes/ and .git/ under fabricated timestamps and delete .aae
+            # sidecars found inside them. Mutating ``dirs`` in place is the
+            # documented os.walk mechanism for skipping subtrees, and it applies
+            # at every depth, so a hidden directory nested arbitrarily deep is
+            # pruned too. The leaf-level hidden-file skip below is retained.
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+
             for filename in filenames:
                 # Skip hidden files
                 if not filename.startswith('.'):
