@@ -3,9 +3,11 @@ File categorization module for organizing files by type
 """
 
 import os
+import re
+import uuid
 import logging
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,45 @@ class FileCategorizer:
     SIDECAR_EXTENSIONS = {
         '.aae'  # Apple's sidecar files
     }
+
+    # Pointer tag to the Exif sub-IFD. DateTimeOriginal (0x9003) and
+    # DateTimeDigitized (0x9004) live behind this pointer, not in IFD0, and are
+    # invisible to Image.getexif() at the top level (issue #25).
+    EXIF_IFD = 0x8769
+
+    # PNG text-chunk KEYS whose mere presence is itself provenance. C2PA writes
+    # its manifest under a 'c2pa' key; Stable Diffusion / AUTOMATIC1111 write the
+    # full generation settings under a 'parameters' key. Neither key appears in
+    # an ordinary photograph, so matching the key -- rather than scanning free
+    # description text -- is both precise and immune to caption bleed (issue #8).
+    GENERATED_TEXT_KEYS = frozenset({'c2pa', 'parameters'})
+
+    # High-signal AI tool/format tokens, matched at WORD BOUNDARIES against text
+    # values (never as bare substrings). The former bare 'ai' token is dropped
+    # entirely: as a substring it matched inside chair, trail, portrait, detail,
+    # rain and Spain, routing ordinary photos into backup/generated/ (issue #8).
+    # Each token below names a specific product, model, or provenance format:
+    #   chatgpt / openai / gpt-4 / gpt-4o -- OpenAI image generation signatures
+    #   dall-e / dall·e                   -- OpenAI DALL-E (hyphen or middle dot)
+    #   midjourney                        -- Midjourney
+    #   stable diffusion                  -- Stable Diffusion
+    #   firefly                           -- Adobe Firefly
+    #   c2pa                              -- Coalition for Content Provenance
+    # gpt-4o precedes gpt-4 so the trailing 'o' is consumed rather than left to
+    # break the word boundary. Word boundaries keep these from matching inside
+    # longer words; the one common English collision (firefly the insect) is a
+    # whole-word, low-frequency risk, unlike the substring bleed 'ai' caused.
+    AI_MARKER_PATTERN = re.compile(
+        r'\b(?:chatgpt|openai|gpt-4o|gpt-4|dall[-·]?e|midjourney|'
+        r'stable diffusion|firefly|c2pa)\b',
+        re.IGNORECASE,
+    )
+
+    # Editing-software signatures in the EXIF Software tag. Presence alone is not
+    # enough to flag content as generated; see _exif_shows_synthetic_edit.
+    EDITING_SOFTWARE = (
+        'snapseed', 'photoshop', 'lightroom', 'gimp', 'canva',
+    )
 
     def __init__(self):
         self.categorized_files = {
@@ -136,6 +177,12 @@ class FileCategorizer:
         """
         Detect AI-generated or heavily edited content using pure Python.
 
+        Detection is deliberately precise rather than broad (issue #8): PNG
+        provenance is matched against identifiable text-chunk keys and
+        word-boundary tool markers, EXIF editing software is only treated as
+        generated when a genuine capture timestamp is absent, and UUID-style
+        stems are validated by parsing rather than by counting characters.
+
         Args:
             file_path: Path to file
 
@@ -146,44 +193,19 @@ class FileCategorizer:
             from PIL import Image
 
             with Image.open(file_path) as img:
-                # Check for C2PA/AI metadata in PNG files
+                # Check for C2PA/AI provenance in PNG text chunks.
                 if file_path.lower().endswith('.png'):
-                    # Look for C2PA markers in PNG text chunks
-                    if hasattr(img, 'text') and img.text:
-                        for key, value in img.text.items():
-                            if any(ai_marker in str(value).lower() for ai_marker in
-                                   ['gpt', 'chatgpt', 'openai', 'c2pa', 'ai', 'generated']):
-                                logger.info(f"Detected AI-generated content: {file_path}")
-                                return True
-
-                # Check EXIF data for editing software + missing original timestamps
-                exif = img.getexif()
-                if exif:
-                    from PIL.ExifTags import TAGS
-
-                    has_editing_software = False
-                    has_original_timestamp = False
-
-                    for tag_id, value in exif.items():
-                        tag = TAGS.get(tag_id, str(tag_id))
-
-                        # Check for editing software
-                        if tag == 'Software' and any(editor in str(value).lower() for editor in
-                                                    ['snapseed', 'photoshop', 'lightroom', 'gimp', 'canva']):
-                            has_editing_software = True
-
-                        # Check for original timestamp tags
-                        if tag in ['DateTimeOriginal', 'DateTimeDigitized']:
-                            has_original_timestamp = True
-
-                    # If edited but no original timestamp, likely heavily processed
-                    if has_editing_software and not has_original_timestamp:
-                        logger.info(f"Detected heavily edited content: {file_path}")
+                    if self._png_text_has_ai_provenance(img):
+                        logger.info(f"Detected AI-generated content: {file_path}")
                         return True
 
-                # Check for UUID-style filenames (often generated content)
-                filename = Path(file_path).stem
-                if len(filename) == 36 and filename.count('-') == 4:  # UUID format
+                # Editing software present with no genuine capture timestamp.
+                if self._exif_shows_synthetic_edit(img):
+                    logger.info(f"Detected heavily edited content: {file_path}")
+                    return True
+
+                # UUID-style stems are a common convention for generated output.
+                if self._has_uuid_stem(file_path):
                     logger.info(f"Detected UUID filename (likely generated): {file_path}")
                     return True
 
@@ -191,6 +213,126 @@ class FileCategorizer:
             logger.debug(f"Error checking generated content for {file_path}: {e}")
 
         return False
+
+    def _png_text_has_ai_provenance(self, img) -> bool:
+        """
+        Report whether a PNG's text chunks carry genuine AI/C2PA provenance.
+
+        A chunk is provenance if its KEY is a known generator key
+        (:attr:`GENERATED_TEXT_KEYS`) or if its VALUE contains a high-signal
+        tool marker at a word boundary (:attr:`AI_MARKER_PATTERN`). Matching the
+        key first is the reliable path -- C2PA and generation tools write to
+        identifiable keys -- while the value match is confined to whole-word
+        product names so ordinary caption text can no longer trip it (issue #8).
+
+        Args:
+            img: An open :class:`PIL.Image.Image`.
+
+        Returns:
+            True if any text chunk indicates AI-generated provenance.
+        """
+        text_chunks = getattr(img, 'text', None)
+        if not text_chunks:
+            return False
+
+        for key, value in text_chunks.items():
+            if str(key).lower() in self.GENERATED_TEXT_KEYS:
+                return True
+            if self.AI_MARKER_PATTERN.search(str(value)):
+                return True
+
+        return False
+
+    def _exif_shows_synthetic_edit(self, img) -> bool:
+        """
+        Report whether EXIF signals a synthetic edit (software, no capture time).
+
+        Editing software alone does not condemn an image: a real photo retouched
+        in Lightroom keeps its ``DateTimeOriginal``. The signal is editing
+        software *combined with* the absence of any genuine capture timestamp,
+        which fits a graphic composed in software rather than captured. Since
+        issue #25, ``DateTimeOriginal`` / ``DateTimeDigitized`` are read from the
+        Exif sub-IFD as well as IFD0; reading only IFD0 (as this branch used to)
+        never found them, so the AND condition silently collapsed into "any
+        edited image", misfiling genuinely edited photos. Reading the sub-IFD
+        here restores the intended behavior.
+
+        Args:
+            img: An open :class:`PIL.Image.Image`.
+
+        Returns:
+            True if editing software is present and no capture timestamp exists.
+        """
+        exif = img.getexif()
+        if not exif:
+            return False
+
+        from PIL.ExifTags import TAGS
+
+        has_editing_software = any(
+            TAGS.get(tag_id, str(tag_id)) == 'Software'
+            and any(editor in str(value).lower() for editor in self.EDITING_SOFTWARE)
+            for tag_id, value in exif.items()
+        )
+        if not has_editing_software:
+            return False
+
+        return not self._has_original_timestamp(exif)
+
+    def _has_original_timestamp(self, exif) -> bool:
+        """
+        Report whether a genuine capture timestamp exists in IFD0 or the sub-IFD.
+
+        ``DateTimeOriginal`` (0x9003) and ``DateTimeDigitized`` (0x9004) live in
+        the Exif sub-IFD behind pointer tag ``0x8769``, which ``Image.getexif()``
+        does not expose at the top level (issue #25). Both directories are
+        checked so a real photo's capture time is actually found.
+
+        Args:
+            exif: The :class:`PIL.Image.Exif` object from ``Image.getexif()``.
+
+        Returns:
+            True if an original/digitized capture timestamp is present.
+        """
+        from PIL.ExifTags import TAGS
+
+        capture_tags = {'DateTimeOriginal', 'DateTimeDigitized'}
+
+        if any(TAGS.get(tag_id, str(tag_id)) in capture_tags for tag_id in exif):
+            return True
+
+        # get_ifd returns {} when the sub-IFD is absent; the guard also covers
+        # exif doubles lacking the API and malformed pointers that raise.
+        try:
+            sub_ifd = exif.get_ifd(self.EXIF_IFD)
+        except (AttributeError, KeyError, OSError, ValueError):
+            sub_ifd = {}
+
+        return any(TAGS.get(tag_id, str(tag_id)) in capture_tags for tag_id in sub_ifd)
+
+    @staticmethod
+    def _has_uuid_stem(file_path: str) -> bool:
+        """
+        Report whether a file's stem is a valid UUID (a common generator name).
+
+        The stem is parsed with :class:`uuid.UUID`; a :class:`ValueError` means
+        it is not a UUID. This replaces the previous shape-only heuristic
+        (``len == 36 and four hyphens``), which accepted any 36-character string
+        with four hyphens -- validating neither the hex digits nor the segment
+        lengths (issue #8).
+
+        Args:
+            file_path: Path whose stem is tested.
+
+        Returns:
+            True if the stem parses as a UUID.
+        """
+        stem = Path(file_path).stem
+        try:
+            uuid.UUID(stem)
+        except ValueError:
+            return False
+        return True
 
     def batch_categorize(self, file_paths: List[str]) -> Dict[FileCategory, List[str]]:
         """

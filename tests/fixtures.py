@@ -191,6 +191,51 @@ def make_no_exif_jpeg(
     return path
 
 
+def make_png_with_text(
+    path: str,
+    text_chunks: dict,
+    *,
+    color: str = "green",
+    size: Tuple[int, int] = (16, 16),
+) -> str:
+    """
+    Write a real PNG carrying the given ``tEXt`` chunks.
+
+    Used to exercise AI/C2PA provenance detection (issue #8) with genuine PNG
+    bytes rather than a mock. Each ``key -> value`` pair is written as a text
+    chunk via :class:`PIL.PngImagePlugin.PngInfo`. After writing, the file is
+    reopened and every chunk is asserted to have round-tripped into
+    ``Image.text`` exactly as given; a mismatch raises :class:`FixtureError` so a
+    provenance test can never pass against a fixture whose metadata never landed.
+
+    Args:
+        path: Destination path for the PNG.
+        text_chunks: Mapping of text-chunk key -> value to embed.
+        color: Fill color for the generated image.
+        size: (width, height) of the generated image in pixels.
+
+    Returns:
+        The path that was written.
+    """
+    from PIL.PngImagePlugin import PngInfo
+
+    image = Image.new("RGB", size, color=color)
+    metadata = PngInfo()
+    for key, value in text_chunks.items():
+        metadata.add_text(key, value)
+    image.save(path, format="PNG", pnginfo=metadata)
+
+    with Image.open(path) as reopened:
+        landed = dict(getattr(reopened, "text", {}) or {})
+    for key, value in text_chunks.items():
+        _require(
+            landed.get(key) == value,
+            f"PNG text chunk {key!r} round-tripped as {landed.get(key)!r}, "
+            f"expected {value!r} for {path}",
+        )
+    return path
+
+
 def make_corrupt_jpeg(path: str, *, content: bytes = b"this is not a JPEG") -> str:
     """
     Write a file with a ``.jpg`` name but a body Pillow cannot decode.
