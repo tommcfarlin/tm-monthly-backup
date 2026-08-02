@@ -142,7 +142,7 @@ class FileCategorizer:
             return FileCategory.VIDEO
 
         # Unknown file type
-        logger.warning(f"Unknown file type: {file_path}")
+        logger.warning("Unknown file type: %s", file_path)
         return FileCategory.UNKNOWN
 
     def _is_likely_screenshot(self, filename: str) -> bool:
@@ -196,21 +196,21 @@ class FileCategorizer:
                 # Check for C2PA/AI provenance in PNG text chunks.
                 if file_path.lower().endswith('.png'):
                     if self._png_text_has_ai_provenance(img):
-                        logger.info(f"Detected AI-generated content: {file_path}")
+                        logger.info("Detected AI-generated content: %s", file_path)
                         return True
 
                 # Editing software present with no genuine capture timestamp.
                 if self._exif_shows_synthetic_edit(img):
-                    logger.info(f"Detected heavily edited content: {file_path}")
+                    logger.info("Detected heavily edited content: %s", file_path)
                     return True
 
                 # UUID-style stems are a common convention for generated output.
                 if self._has_uuid_stem(file_path):
-                    logger.info(f"Detected UUID filename (likely generated): {file_path}")
+                    logger.info("Detected UUID filename (likely generated): %s", file_path)
                     return True
 
         except Exception as e:
-            logger.debug(f"Error checking generated content for {file_path}: {e}")
+            logger.debug("Error checking generated content for %s: %s", file_path, e)
 
         return False
 
@@ -350,7 +350,7 @@ class FileCategorizer:
 
         for file_path in file_paths:
             if not os.path.exists(file_path):
-                logger.warning(f"File not found: {file_path}")
+                logger.warning("File not found: %s", file_path)
                 continue
 
             category = self.categorize_file(file_path)

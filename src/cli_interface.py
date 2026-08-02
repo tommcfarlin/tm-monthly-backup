@@ -3,6 +3,7 @@ Rich CLI interface with progress bars and beautiful output
 """
 
 import os
+import re
 import sys
 import logging
 from typing import Dict, List
@@ -14,6 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+from rich.markup import escape
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
@@ -22,6 +24,83 @@ from .file_categorizer import FileCategory
 
 # Initialize rich console
 console = Console()
+
+# Filenames reach this tool untrusted -- from iCloud, AirDrop, downloads, and
+# manual renames -- and flow into ``rich`` render paths and log records. Two
+# hostile shapes must be neutralized before any value is displayed:
+#
+# * ``rich`` markup: square-bracket tags such as ``[bold]`` or ``[/]`` are
+#   parsed in ``Console.print`` and ``Table.add_row``. An unmatched tag raises
+#   ``MarkupError`` (aborting the run); a valid tag is silently swallowed.
+# * ANSI / control sequences: raw escape codes reach the terminal unfiltered and
+#   can reposition the cursor or rewrite already-printed output.
+#
+# ``escape`` (from ``rich.markup``) handles the first, but leaves control bytes
+# untouched, so a dedicated sanitizer strips the second.
+
+# A full ANSI escape sequence: ESC, an optional intermediate, a final byte.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+# C0/C1 control characters, excluding the ordinary whitespace (tab, newline,
+# carriage return) that legitimately appears in the tool's own rendered text.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def sanitize_for_display(value: object) -> str:
+    """
+    Strip ANSI escape and control sequences from a value for safe display.
+
+    Removes anything a hostile filename could use to drive the terminal (color
+    codes, cursor movement, screen rewrites) while leaving ordinary printable
+    text -- brackets included -- intact. Markup neutralization is a separate
+    concern handled by :func:`safe_markup`; this function alone is correct for
+    ``rich`` contexts that do not parse markup (e.g. ``Text.append``).
+
+    Args:
+        value: Any value; coerced to ``str`` before sanitizing.
+
+    Returns:
+        The value with ANSI/control sequences removed.
+    """
+    text = str(value)
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    return text
+
+
+def safe_markup(value: object) -> str:
+    """
+    Make an untrusted value safe to interpolate into a markup-parsed context.
+
+    Strips ANSI/control sequences (via :func:`sanitize_for_display`) and then
+    escapes ``rich`` markup so square-bracket tags render literally instead of
+    being parsed. Use this for every untrusted value entering ``Console.print``
+    f-strings and ``Table.add_row`` cells.
+
+    Args:
+        value: Any value; coerced to ``str`` before sanitizing.
+
+    Returns:
+        A string safe to render where ``rich`` parses markup.
+    """
+    return escape(sanitize_for_display(value))
+
+
+class _SanitizingLogFilter(logging.Filter):
+    """
+    Strip ANSI/control sequences from fully rendered log messages.
+
+    Attached to the ``RichHandler``, this collapses each record to its final
+    text (applying any lazy ``%s`` arguments) and removes control sequences, so
+    an untrusted filename in a log message cannot drive the terminal. Combined
+    with ``markup=False`` on the handler, it makes the entire logging path safe
+    at a single boundary regardless of how individual call sites format.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = sanitize_for_display(record.getMessage())
+        record.args = ()
+        return True
 
 
 def setup_logging(verbose: bool = False):
@@ -33,13 +112,21 @@ def setup_logging(verbose: bool = False):
     """
     log_level = logging.DEBUG if verbose else logging.INFO
 
-    # Configure rich logging handler
+    # Configure rich logging handler. ``markup=False`` is deliberate: log
+    # messages carry untrusted filenames, and parsing markup in them lets a
+    # crafted name either abort the run (unmatched tag -> MarkupError) or vanish
+    # from the log (valid tag -> swallowed). The tool never emits intentional
+    # markup through the logger -- styled output goes through the console
+    # directly -- so disabling it costs nothing and closes the hole (issue #9).
     rich_handler = RichHandler(
         console=console,
         show_time=True,
         show_path=verbose,
-        markup=True
+        markup=False
     )
+    # Neutralize any ANSI/control sequences carried by untrusted values before
+    # they reach the terminal, at one boundary for every log record.
+    rich_handler.addFilter(_SanitizingLogFilter())
 
     logging.basicConfig(
         level=log_level,
@@ -97,28 +184,29 @@ class CLIInterface:
             self.processor.export_dir, self.processor.backup_dir
         )
         if overlap_error:
-            self.console.print(f"[red]Error: {overlap_error}[/red]")
+            self.console.print(f"[red]Error: {safe_markup(overlap_error)}[/red]")
             return False
 
         # Check export directory
+        safe_export = safe_markup(export_path)
         if not export_path.exists():
-            self.console.print(f"[red]Error: Export directory does not exist: {export_path}[/red]")
+            self.console.print(f"[red]Error: Export directory does not exist: {safe_export}[/red]")
             self.console.print(f"[yellow]Please create the directory and place your exported photos there:[/yellow]")
-            self.console.print(f"[dim]  mkdir {export_path}[/dim]")
-            self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {export_path}/[/dim]")
+            self.console.print(f"[dim]  mkdir {safe_export}[/dim]")
+            self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {safe_export}/[/dim]")
             return False
 
         if not any(export_path.iterdir()):
-            self.console.print(f"[yellow]Warning: Export directory is empty: {export_path}[/yellow]")
+            self.console.print(f"[yellow]Warning: Export directory is empty: {safe_export}[/yellow]")
             if not Confirm.ask("Continue anyway?"):
                 return False
 
         # Create backup directory if needed
         try:
             backup_path.mkdir(parents=True, exist_ok=True)
-            self.console.print(f"[green]✓[/green] Backup directory ready: {backup_path}")
+            self.console.print(f"[green]✓[/green] Backup directory ready: {safe_markup(backup_path)}")
         except Exception as e:
-            self.console.print(f"[red]Error: Cannot create backup directory {backup_path}: {e}[/red]")
+            self.console.print(f"[red]Error: Cannot create backup directory {safe_markup(backup_path)}: {safe_markup(e)}[/red]")
             return False
 
         return True
@@ -348,7 +436,14 @@ class CLIInterface:
         failure_table.add_column("Error", style="yellow")
 
         for operation, file_path, error in failed_files:
-            failure_table.add_row(operation, file_path, error)
+            # ``Table`` parses markup in string cells, so every untrusted value
+            # (the path, and errors that embed a path) must be escaped and
+            # stripped of control sequences before it becomes a row.
+            failure_table.add_row(
+                safe_markup(operation),
+                safe_markup(file_path),
+                safe_markup(error),
+            )
 
         self.console.print(failure_table)
 
@@ -364,7 +459,9 @@ class CLIInterface:
         warning_text.append("\nConsider manually reviewing these files:", style="dim")
 
         for file_path in missing_files[:5]:  # Show first 5
-            warning_text.append(f"\n  • {file_path}", style="yellow")
+            # ``Text.append`` renders its argument literally (no markup parsing),
+            # so escaping would corrupt the name; only strip control sequences.
+            warning_text.append(f"\n  • {sanitize_for_display(file_path)}", style="yellow")
 
         if len(missing_files) > 5:
             warning_text.append(f"\n  ... and {len(missing_files) - 5} more", style="dim")

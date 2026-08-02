@@ -142,7 +142,7 @@ class FileProcessor:
                 directory, or one nested inside the other), which would let a
                 run destroy its own inputs.
         """
-        logger.info(f"Starting file processing (dry_run={dry_run})")
+        logger.info("Starting file processing (dry_run=%s)", dry_run)
 
         # Refuse to run when the export and backup roots overlap: the export
         # tree is consumed in place, so an overlapping destination lets a run
@@ -155,10 +155,10 @@ class FileProcessor:
         # Scan export directory
         all_files = self._scan_export_directory()
         if not all_files:
-            logger.warning(f"No files found in {self.export_dir}")
+            logger.warning("No files found in %s", self.export_dir)
             return self._generate_summary()
 
-        logger.info(f"Found {len(all_files)} files to process")
+        logger.info("Found %s files to process", len(all_files))
 
         # Categorize files
         categorized = self.categorizer.batch_categorize(all_files)
@@ -190,7 +190,7 @@ class FileProcessor:
             List of file paths
         """
         if not os.path.exists(self.export_dir):
-            logger.error(f"Export directory does not exist: {self.export_dir}")
+            logger.error("Export directory does not exist: %s", self.export_dir)
             return []
 
         files = []
@@ -227,7 +227,7 @@ class FileProcessor:
                 # is therefore kept (its target is resolved/named in issue #63);
                 # FIFOs, sockets, devices, and broken symlinks are skipped.
                 if not os.path.isfile(path):
-                    logger.warning(f"Skipping non-regular file: {path}")
+                    logger.warning("Skipping non-regular file: %s", path)
                     continue
 
                 files.append(path)
@@ -245,17 +245,17 @@ class FileProcessor:
         if not sidecar_files:
             return
 
-        logger.info(f"Processing {len(sidecar_files)} sidecar files for deletion")
+        logger.info("Processing %s sidecar files for deletion", len(sidecar_files))
 
         for file_path in sidecar_files:
             if dry_run:
-                logger.info(f"[DRY RUN] Would delete sidecar file: {file_path}")
+                logger.info("[DRY RUN] Would delete sidecar file: %s", file_path)
             else:
                 try:
                     os.remove(file_path)
-                    logger.info(f"Deleted sidecar file: {file_path}")
+                    logger.info("Deleted sidecar file: %s", file_path)
                 except Exception as e:
-                    logger.error(f"Failed to delete sidecar file {file_path}: {e}")
+                    logger.error("Failed to delete sidecar file %s: %s", file_path, e)
                     self.failed_files.append(('delete_sidecar', file_path, str(e)))
 
     def _process_category(self, category: FileCategory, files: List[str], dry_run: bool):
@@ -267,7 +267,7 @@ class FileProcessor:
             files: List of file paths
             dry_run: If True, only show what would be done
         """
-        logger.info(f"Processing {len(files)} {category.value} files")
+        logger.info("Processing %s %s files", len(files), category.value)
 
         target_dir = self.categorizer.get_target_directory(category, self.backup_dir)
 
@@ -275,7 +275,7 @@ class FileProcessor:
             try:
                 self._process_single_file(file_path, category, target_dir, dry_run)
             except Exception as e:
-                logger.error(f"Failed to process file {file_path}: {e}")
+                logger.error("Failed to process file %s: %s", file_path, e)
                 self.failed_files.append(('process_file', file_path, str(e)))
 
     def _process_single_file(self, file_path: str, category: FileCategory, target_dir: str, dry_run: bool):
@@ -331,7 +331,7 @@ class FileProcessor:
         # Step 1: Convert HEIC to JPEG if needed
         if self.heic_converter.is_heic_file(file_path):
             if dry_run:
-                logger.info(f"[DRY RUN] Would convert HEIC to JPEG: {file_path}")
+                logger.info("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
                 # For dry run, simulate the converted filename
                 converted_path = str(Path(file_path).with_suffix('.jpg'))
             else:
@@ -372,7 +372,7 @@ class FileProcessor:
                     # ``files_failed`` instead of being silently dropped, which
                     # would let the summary report success and the exit code
                     # read 0 for a run that left this file behind (issue #31).
-                    logger.error(f"HEIC conversion failed for {file_path}")
+                    logger.error("HEIC conversion failed for %s", file_path)
                     self.failed_files.append(
                         ('convert_heic', file_path, 'HEIC conversion failed')
                     )
@@ -383,7 +383,7 @@ class FileProcessor:
         if timestamp is None:
             # Use fallback timestamp
             timestamp = self.exif_handler.get_fallback_timestamp(current_path)
-            logger.warning(f"Using fallback timestamp for {current_path}")
+            logger.warning("Using fallback timestamp for %s", current_path)
 
         file_extension = Path(current_path).suffix
 
@@ -401,7 +401,7 @@ class FileProcessor:
             adjusted_timestamp, target_path = self._resolve_destination_dry_run(
                 target_dir, timestamp, file_extension
             )
-            logger.info(f"[DRY RUN] Would move: {current_path} -> {target_path}")
+            logger.info("[DRY RUN] Would move: %s -> %s", current_path, target_path)
         else:
             try:
                 # Ensure target directory exists before reserving within it.
@@ -425,7 +425,7 @@ class FileProcessor:
                     # placeholder so a 0-byte stub is not left behind in backup/.
                     self._discard_reservation(target_path)
                     raise
-                logger.info(f"Moved: {current_path} -> {target_path}")
+                logger.info("Moved: %s -> %s", current_path, target_path)
 
                 # The verified-good JPEG is now safely filed in backup/, so it is
                 # finally safe to delete the original HEIC. Route through the
@@ -446,7 +446,7 @@ class FileProcessor:
                 })
 
             except Exception as e:
-                logger.error(f"Failed to move file {current_path} to {target_path}: {e}")
+                logger.error("Failed to move file %s to %s: %s", current_path, target_path, e)
                 self.failed_files.append(('move_file', current_path, str(e)))
 
     def _process_unknown_file(
@@ -495,7 +495,7 @@ class FileProcessor:
                 # placeholder so a 0-byte stub is not left behind in backup/.
                 self._discard_reservation(target_path)
                 raise
-            logger.info(f"Moved unrecognized file: {file_path} -> {target_path}")
+            logger.info("Moved unrecognized file: %s -> %s", file_path, target_path)
 
             self.processed_files.append({
                 'original_path': file_path,
@@ -932,14 +932,14 @@ class FileProcessor:
                 target_path = os.path.join(missing_dir, filename)
 
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would move to missing EXIF dir: {file_path} -> {target_path}")
+                    logger.info("[DRY RUN] Would move to missing EXIF dir: %s -> %s", file_path, target_path)
                 else:
                     try:
                         shutil.move(file_path, target_path)
                         moved_files.append(target_path)
-                        logger.info(f"Moved to missing EXIF directory: {file_path} -> {target_path}")
+                        logger.info("Moved to missing EXIF directory: %s -> %s", file_path, target_path)
                     except Exception as e:
-                        logger.error(f"Failed to move missing EXIF file {file_path}: {e}")
+                        logger.error("Failed to move missing EXIF file %s: %s", file_path, e)
 
         return moved_files
 
