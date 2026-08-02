@@ -246,7 +246,12 @@ class TestFileCategorizer(unittest.TestCase):
         self.assertIsNot(result, self.categorizer.categorized_files[FileCategory.SIDECAR])
 
     def test_get_processable_files(self):
-        """Test retrieving processable files (excludes sidecar and unknown)"""
+        """Every category except sidecar is processable -- including unknown.
+
+        Unknown files must be returned here so they are actually routed to
+        backup/unknown/ instead of being silently left in export/ (issue #29).
+        Only sidecar (which is deleted, not filed) is excluded.
+        """
         # Setup test data
         self.categorizer.categorized_files[FileCategory.PHOTO] = ["photo.jpg"]
         self.categorizer.categorized_files[FileCategory.VIDEO] = ["video.mov"]
@@ -256,18 +261,19 @@ class TestFileCategorizer(unittest.TestCase):
 
         result = self.categorizer.get_processable_files()
 
-        # Should include photos, videos, screenshots, and generated
+        # Every category except SIDECAR, derived from the enum so adding a new
+        # category can never silently drop it (issue #29).
         expected_categories = {
-            FileCategory.PHOTO,
-            FileCategory.VIDEO,
-            FileCategory.SCREENSHOT,
-            FileCategory.GENERATED
+            category for category in FileCategory
+            if category is not FileCategory.SIDECAR
         }
         self.assertEqual(set(result.keys()), expected_categories)
+        self.assertNotIn(FileCategory.SIDECAR, result)
 
         self.assertEqual(result[FileCategory.PHOTO], ["photo.jpg"])
         self.assertEqual(result[FileCategory.VIDEO], ["video.mov"])
         self.assertEqual(result[FileCategory.SCREENSHOT], ["screenshot.png"])
+        self.assertEqual(result[FileCategory.UNKNOWN], ["unknown.txt"])
 
     def test_get_target_directory(self):
         """Test getting target directory paths for categories"""
@@ -296,7 +302,12 @@ class TestFileCategorizer(unittest.TestCase):
 
     @patch('os.makedirs')
     def test_ensure_target_directories(self, mock_makedirs):
-        """Test creating target directories"""
+        """Eager directory creation covers every recognized category but unknown.
+
+        backup/unknown/ is deliberately NOT pre-created here: it must exist only
+        once an unrecognized file is actually routed into it, never as an empty
+        phantom (issue #29). It is created lazily during processing instead.
+        """
         base_dir = "/test/backup"
 
         result = self.categorizer.ensure_target_directories(base_dir)
@@ -306,13 +317,13 @@ class TestFileCategorizer(unittest.TestCase):
             "/test/backup/videos",
             "/test/backup/screenshots",
             "/test/backup/generated",
-            "/test/backup/unknown"
         ]
 
         self.assertEqual(result, expected_dirs)
+        self.assertNotIn("/test/backup/unknown", result)
 
         # Check that makedirs was called for each directory
-        self.assertEqual(mock_makedirs.call_count, 5)
+        self.assertEqual(mock_makedirs.call_count, 4)
         for expected_dir in expected_dirs:
             mock_makedirs.assert_any_call(expected_dir, exist_ok=True)
 

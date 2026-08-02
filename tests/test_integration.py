@@ -132,11 +132,12 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(record['category'], 'photos')
 
     def test_mixed_file_types_processing(self):
-        """Every file type lands in its own backup dir; sidecars go, unknown stays.
+        """Every file type lands in its own backup dir; sidecars go, unknown routed.
 
         A real run must actually route each processable file into its category
-        directory, delete sidecars, and leave unknown files in place -- not
-        merely tally categorization counts.
+        directory, delete sidecars, and file unknown files into backup/unknown/
+        under their original name (issue #29) -- not merely tally categorization
+        counts.
         """
         self.create_test_image_with_exif("photo1.jpg", "2024:01:15 14:30:45")
         self.create_test_image_with_exif("photo2.jpeg", "2024:02:20 10:11:12")
@@ -169,7 +170,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(_count("photos"), 2)
         self.assertEqual(_count("videos"), 2)
         self.assertEqual(_count("screenshots"), 2)
-        self.assertEqual(results['files_processed'], 6)  # 2+2+2 processable
+        self.assertEqual(_count("unknown"), 1)  # unknown.txt routed here
+        self.assertEqual(results['files_processed'], 7)  # 2+2+2 + 1 unknown
 
         # The two EXIF photos are renamed to their exact DateTimeOriginal values.
         self.assertTrue(os.path.isfile(
@@ -177,10 +179,13 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertTrue(os.path.isfile(
             os.path.join(self.backup_dir, "photos", "2024.02.20.10.11.12.jpeg")))
 
-        # Sidecars deleted from export; the unknown file is left untouched.
+        # Sidecars deleted from export; the unknown file is routed to
+        # backup/unknown/ under its original name and no longer sits in export.
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "sidecar1.aae")))
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "sidecar2.aae")))
-        self.assertTrue(os.path.exists(os.path.join(self.export_dir, "unknown.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.export_dir, "unknown.txt")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.backup_dir, "unknown", "unknown.txt")))
 
     def test_sidecar_file_deletion_dry_run(self):
         """Test that sidecar files are identified for deletion in dry run"""
@@ -383,11 +388,17 @@ class TestWorkflowIntegration(unittest.TestCase):
             os.path.join(self.backup_dir, "photos"),
             os.path.join(self.backup_dir, "videos"),
             os.path.join(self.backup_dir, "screenshots"),
-            os.path.join(self.backup_dir, "unknown")
         ]
 
         for expected_dir in expected_dirs:
             self.assertTrue(os.path.exists(expected_dir), f"Directory not created: {expected_dir}")
+
+        # backup/unknown/ must NOT be created when no unrecognized file exists:
+        # it is no longer an empty phantom that implies handling (issue #29).
+        self.assertFalse(
+            os.path.exists(os.path.join(self.backup_dir, "unknown")),
+            "backup/unknown/ was created empty with no unknown files present",
+        )
 
         # The directories are not merely created -- the files land inside them.
         self.assertTrue(os.path.isfile(os.path.join(

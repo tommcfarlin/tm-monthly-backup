@@ -155,11 +155,13 @@ PNG files are categorized as screenshots if they match these patterns:
 
 ### Filename Convention
 
-All processed files are renamed using EXIF timestamp data:
+Recognized files (photos, videos, screenshots, generated) are renamed using EXIF timestamp data:
 
 - **Format**: `YYYY.MM.DD.HH.MM.SS.extension`
 - **Example**: `2024.01.15.14.30.45.jpg`
 - **Duplicates**: Timestamp conflicts resolved by incrementing seconds
+
+Unknown files have no metadata to derive a timestamp from, so they keep their **original filename** when moved to `unknown/`. A name already present there is preserved by disambiguating the incoming file as `name (1).ext`, `name (2).ext`, and so on — an unknown file never overwrites one already filed.
 
 ### HEIC Conversion
 

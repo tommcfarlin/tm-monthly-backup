@@ -226,6 +226,18 @@ class FileProcessor:
             target_dir: Target directory path
             dry_run: If True, only show what would be done
         """
+        # Unrecognized files carry no photo/video metadata to derive a
+        # timestamp from, so renaming them to a fabricated timestamp would erase
+        # the one identifying detail the user has -- their original filename.
+        # They are filed under that original name into ``backup/unknown/`` for
+        # manual review instead. Crucially they ARE moved: ``export/`` is fully
+        # drained, so the summary can honestly count them as processed and the
+        # documented ``backup/unknown/`` destination becomes real rather than an
+        # empty phantom (issue #29).
+        if category is FileCategory.UNKNOWN:
+            self._process_unknown_file(file_path, target_dir, dry_run)
+            return
+
         original_path = file_path
         current_path = file_path
 
@@ -352,6 +364,131 @@ class FileProcessor:
             except Exception as e:
                 logger.error(f"Failed to move file {current_path} to {target_path}: {e}")
                 self.failed_files.append(('move_file', current_path, str(e)))
+
+    def _process_unknown_file(
+        self, file_path: str, target_dir: str, dry_run: bool
+    ) -> None:
+        """
+        File an unrecognized file into ``backup/unknown/`` under its own name.
+
+        Unlike a photo or video, an unknown file has no metadata to timestamp
+        it by, so it keeps its original filename. ``backup/unknown/`` is created
+        here, lazily, so the directory exists only because a file is landing in
+        it -- never as an empty phantom (issue #29). A collision with a name a
+        prior run (or an earlier file in this batch) already filed here is
+        resolved without overwriting, by disambiguating the name. On success the
+        move is recorded so ``files_processed`` reflects it and the export tree
+        is genuinely drained; on failure it is recorded in ``failed_files`` so
+        the run is not reported as a clean success (issue #31).
+
+        Args:
+            file_path: Source path of the unrecognized file.
+            target_dir: The ``backup/unknown/`` directory to file it into.
+            dry_run: If True, only log what would happen; touch nothing.
+        """
+        original_name = os.path.basename(file_path)
+
+        if dry_run:
+            target_path = self._resolve_named_destination_dry_run(
+                target_dir, original_name
+            )
+            logger.info(
+                f"[DRY RUN] Would move unrecognized file: {file_path} -> {target_path}"
+            )
+            return
+
+        target_path = None
+        try:
+            # Create backup/unknown/ only now that a file is actually landing in
+            # it -- this is what keeps the directory from being an empty phantom.
+            os.makedirs(target_dir, exist_ok=True)
+
+            target_path = self._reserve_named_destination(target_dir, original_name)
+            try:
+                shutil.move(file_path, target_path)
+            except Exception:
+                # The move failed after the name was reserved; drop the empty
+                # placeholder so a 0-byte stub is not left behind in backup/.
+                self._discard_reservation(target_path)
+                raise
+            logger.info(f"Moved unrecognized file: {file_path} -> {target_path}")
+
+            self.processed_files.append({
+                'original_path': file_path,
+                'final_path': target_path,
+                'category': FileCategory.UNKNOWN.value,
+                'timestamp': None,  # no metadata timestamp; name is preserved
+                'converted_from_heic': False,
+            })
+        except Exception as e:
+            logger.error(
+                f"Failed to move unrecognized file {file_path} to {target_path}: {e}"
+            )
+            self.failed_files.append(('move_file', file_path, str(e)))
+
+    def _reserve_named_destination(self, target_dir: str, filename: str) -> str:
+        """
+        Atomically reserve a collision-free path that preserves ``filename``.
+
+        Unknown files keep their original name, so two that share a name -- or a
+        name a previous run already filed here -- must not clobber each other.
+        The path is claimed with ``os.open(..., O_CREAT | O_EXCL)``, the same
+        atomic reservation the timestamped path uses (issue #6): the exclusive
+        create closes the check-then-move TOCTOU window, because an existing file
+        makes the create fail rather than opening it. On collision the name is
+        disambiguated as ``stem (1).ext``, ``stem (2).ext``, ... until an unused
+        path is successfully claimed.
+
+        Args:
+            target_dir: Directory to reserve the destination within.
+            filename: The original filename to preserve.
+
+        Returns:
+            The reserved path, which exists on disk as an empty placeholder the
+            caller is expected to move the real file onto.
+        """
+        stem = Path(filename).stem
+        ext = Path(filename).suffix
+        candidate = filename
+        counter = 1
+        while True:
+            target_path = os.path.join(target_dir, candidate)
+            try:
+                fd = os.open(
+                    target_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
+                )
+                os.close(fd)
+                return target_path
+            except FileExistsError:
+                candidate = f"{stem} ({counter}){ext}"
+                counter += 1
+
+    def _resolve_named_destination_dry_run(
+        self, target_dir: str, filename: str
+    ) -> str:
+        """
+        Resolve the name-preserving path an unknown file *would* take.
+
+        The dry-run analogue of :meth:`_reserve_named_destination`: it writes
+        nothing, so a dry run stays side-effect free, but still reports the
+        disambiguated name a real run would use when the original is already
+        occupied on disk.
+
+        Args:
+            target_dir: Directory the file would be filed into.
+            filename: The original filename to preserve.
+
+        Returns:
+            The would-be destination path.
+        """
+        stem = Path(filename).stem
+        ext = Path(filename).suffix
+        candidate = filename
+        counter = 1
+        while os.path.exists(os.path.join(target_dir, candidate)):
+            candidate = f"{stem} ({counter}){ext}"
+            counter += 1
+        return os.path.join(target_dir, candidate)
 
     def _taken_names(self, target_dir: str) -> Set[str]:
         """

@@ -239,16 +239,24 @@ class FileCategorizer:
 
     def get_processable_files(self) -> Dict[FileCategory, List[str]]:
         """
-        Get files that should be processed (excludes sidecar and unknown).
+        Get files that should be processed (every category except sidecar).
+
+        Sidecar files are deleted rather than filed, so they are the only
+        category excluded here. Building the mapping by iterating
+        :class:`FileCategory` -- rather than listing categories by hand --
+        means a newly added category is processed automatically and can never
+        be silently dropped the way ``UNKNOWN`` was: it was categorized,
+        counted, and rendered against ``backup/unknown/`` yet omitted from this
+        hand-maintained list, so unrecognized files were left in ``export/``
+        while the destination sat empty (issue #29).
 
         Returns:
-            Dictionary of processable files by category
+            Dictionary of processable files by category.
         """
         return {
-            FileCategory.PHOTO: self.get_files_by_category(FileCategory.PHOTO),
-            FileCategory.VIDEO: self.get_files_by_category(FileCategory.VIDEO),
-            FileCategory.SCREENSHOT: self.get_files_by_category(FileCategory.SCREENSHOT),
-            FileCategory.GENERATED: self.get_files_by_category(FileCategory.GENERATED)
+            category: self.get_files_by_category(category)
+            for category in FileCategory
+            if category is not FileCategory.SIDECAR
         }
 
     def get_target_directory(self, category: FileCategory, base_backup_dir: str) -> str:
@@ -277,7 +285,13 @@ class FileCategorizer:
 
     def ensure_target_directories(self, base_backup_dir: str) -> List[str]:
         """
-        Create target directories if they don't exist.
+        Create target directories for the recognized categories.
+
+        ``UNKNOWN`` is deliberately excluded: ``backup/unknown/`` must exist
+        only once an unrecognized file is actually routed into it, never as an
+        empty phantom that implies handling which did not occur (issue #29). It
+        is created lazily, at the moment a file lands there, by
+        :meth:`FileProcessor._process_unknown_file`.
 
         Args:
             base_backup_dir: Base backup directory path
@@ -286,7 +300,7 @@ class FileCategorizer:
             List of created directory paths
         """
         directories = []
-        for category in [FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT, FileCategory.GENERATED, FileCategory.UNKNOWN]:
+        for category in [FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT, FileCategory.GENERATED]:
             target_dir = self.get_target_directory(category, base_backup_dir)
             os.makedirs(target_dir, exist_ok=True)
             directories.append(target_dir)
