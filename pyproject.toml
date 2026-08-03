@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tm-monthly-backup"
+version = "1.0.0"
+description = "CLI utility for organizing Apple Photos exports by type and EXIF timestamp"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Tom McFarlin", email = "tom@tommcfarlin.com" },
+]
+keywords = ["photos", "backup", "exif", "heic", "cli", "apple-photos"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Utilities",
+]
+
+# Upper bounds guard against a future major release silently breaking the tool.
+# Each ceiling is the next major above the range known to work today:
+#   click        - CLI/option API can be reworked across majors; pin under 9.
+#   pillow       - EXIF APIs have changed across Pillow majors before (see #15);
+#                  10.x and 11.x share the current API, so allow both, exclude 12.
+#   pillow-heif  - still pre-1.0; 0.x minors can break, cap at the first major.
+#   python-dateutil - long stable on 2.x; guard against a hypothetical 3.0.
+#   rich         - 13.x and 14.x are API-compatible for our usage; cap under 15.
+#   hachoir      - on 3.x; cap under the next major.
+dependencies = [
+    "click>=8.0.0,<9",
+    "pillow>=10.0.0,<12",
+    "pillow-heif>=0.10.0,<1",
+    "python-dateutil>=2.8.0,<3",
+    "rich>=13.0.0,<15",
+    "hachoir>=3.1.0,<4",
+]
+
+[project.urls]
+Homepage = "https://github.com/tommcfarlin/tm-monthly-backup"
+Changelog = "https://github.com/tommcfarlin/tm-monthly-backup/blob/main/CHANGELOG.md"
+
+[project.scripts]
+tm-monthly-backup = "src.main:main"
+
+# Install the existing `src` package as-is. Renaming it to `tm_monthly_backup`
+# is intentionally out of scope (it would touch every import in src/ and tests/).
+# An explicit package list is used instead of automatic src-layout discovery,
+# which would otherwise treat `src/` as a layout root and drop the package name.
+[tool.setuptools]
+packages = ["src"]
