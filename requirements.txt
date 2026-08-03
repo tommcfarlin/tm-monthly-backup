@@ -1,6 +1,14 @@
-click>=8.0.0
-pillow>=10.0.0
-pillow-heif>=0.10.0
-python-dateutil>=2.8.0
-rich>=13.0.0
-hachoir>=3.1.0
+# Dependencies are now declared in pyproject.toml (the single source of truth,
+# including version upper bounds). This file is kept as a convenience pointer so
+# existing `pip install -r requirements.txt` workflows keep working.
+#
+# Preferred install:
+#     pip install -e .
+#
+# The pins below mirror the [project.dependencies] table in pyproject.toml.
+click>=8.0.0,<9
+pillow>=10.0.0,<12
+pillow-heif>=0.10.0,<1
+python-dateutil>=2.8.0,<3
+rich>=13.0.0,<15
+hachoir>=3.1.0,<4

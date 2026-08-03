@@ -8,6 +8,7 @@ paths, ``KeyboardInterrupt`` handling, the unexpected-exception handler, and
 ``--version``.
 """
 
+import importlib
 import os
 import shutil
 import tempfile
@@ -85,6 +86,22 @@ class TestMainCli(unittest.TestCase):
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertIn("tm-monthly-backup", result.output)
         self.assertIn("1.0.0", result.output)
+
+    def test_console_entry_point_target_resolves(self):
+        """The ``src.main:main`` console entry point (pyproject.toml) resolves.
+
+        Guards the string the installed ``tm-monthly-backup`` command dispatches
+        to: the module must import and expose a callable ``main``. The
+        throwaway-venv ``pip install -e .`` is the end-to-end proof; this pins
+        the target without requiring an install so a rename can't break it
+        silently.
+        """
+        module_path, _, attr = "src.main:main".partition(":")
+        module = importlib.import_module(module_path)
+        entry = getattr(module, attr)
+
+        self.assertTrue(callable(entry))
+        self.assertIs(entry, main)
 
     def test_missing_export_dir_is_precondition_failure(self):
         """A nonexistent export directory exits with the precondition code."""

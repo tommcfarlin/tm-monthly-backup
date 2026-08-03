@@ -35,18 +35,31 @@ python3 -m venv tm-backup-env
 source tm-backup-env/bin/activate  # On Windows: tm-backup-env\Scripts\activate
 ```
 
-3. Install dependencies:
+3. Install the package (editable install, recommended):
+```bash
+pip install -e .
+```
+
+This installs the dependencies from `pyproject.toml` and registers a
+`tm-monthly-backup` console command, so the tool can be run from anywhere:
+```bash
+tm-monthly-backup --help
+```
+
+Alternatively, install just the dependencies without the console command:
 ```bash
 pip install -r requirements.txt
 ```
+`requirements.txt` mirrors the dependency list in `pyproject.toml`, which is the
+single source of truth.
 
 ### Dependencies
-- `click>=8.0.0` - CLI interface framework
-- `pillow>=10.0.0` - Image processing and EXIF data extraction
-- `pillow-heif>=0.10.0` - HEIC file format support
-- `python-dateutil>=2.8.0` - Advanced date/time parsing
-- `rich>=13.0.0` - Beautiful CLI progress bars and formatting
-- `hachoir>=3.1.0` - Video metadata extraction
+- `click>=8.0.0,<9` - CLI interface framework
+- `pillow>=10.0.0,<12` - Image processing and EXIF data extraction
+- `pillow-heif>=0.10.0,<1` - HEIC file format support
+- `python-dateutil>=2.8.0,<3` - Advanced date/time parsing
+- `rich>=13.0.0,<15` - Beautiful CLI progress bars and formatting
+- `hachoir>=3.1.0,<4` - Video metadata extraction
 
 ## Usage
 
@@ -65,6 +78,14 @@ python -m src.main --verbose
 
 # View help and options
 python -m src.main --help
+```
+
+After `pip install -e .`, the same commands are available through the
+`tm-monthly-backup` console entry point from any directory:
+
+```bash
+tm-monthly-backup --dry-run
+tm-monthly-backup --help
 ```
 
 ## Directory Structure
@@ -104,7 +125,7 @@ Identifies iOS and macOS screenshots:
 
 ## File Processing
 
-- **HEIC files**: Converted to JPEG (lossless) with EXIF preservation
+- **HEIC files**: Converted to high quality JPEG (q95, lossy) with EXIF preservation; the original HEIC is not retained
 - **Apple sidecar files (.aae)**: Deleted automatically
 - **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS)
 - **Video metadata**: Extracts creation timestamps from video file headers

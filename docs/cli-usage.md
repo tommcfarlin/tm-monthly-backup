@@ -2,17 +2,42 @@
 
 Complete reference for using the tm-monthly-backup command-line interface.
 
+## How to Invoke the Tool
+
+There are two supported ways to run tm-monthly-backup:
+
+- **Installed console command (recommended).** After `pip install -e .` (see the
+  README's Installation section), a `tm-monthly-backup` command is on your PATH
+  and runs from any directory:
+
+  ```bash
+  tm-monthly-backup --help
+  ```
+
+- **No-install module form.** From the repository root, with the dependencies
+  installed (`pip install -r requirements.txt`), run the tool as a module:
+
+  ```bash
+  python -m src.main --help
+  ```
+
+Both invocations accept the identical options and are interchangeable. Running
+`python src/main.py` directly does **not** work — the package uses absolute
+`src.…` imports, so the script cannot resolve its own package that way. The
+examples below use `tm-monthly-backup`; substitute `python -m src.main` for the
+same effect without installing.
+
 ## Quick Start
 
 ```bash
 # Basic usage - process files in export/ directory
-python src/main.py
+tm-monthly-backup
 
 # Dry run to preview what would be done
-python src/main.py --dry-run
+tm-monthly-backup --dry-run
 
 # Verbose output for debugging
-python src/main.py --verbose
+tm-monthly-backup --verbose
 ```
 
 ## Command Options
@@ -23,7 +48,7 @@ python src/main.py --verbose
 |--------|-------|-------------|---------|
 | `--dry-run` | | Preview operations without making changes | `False` |
 | `--verbose` | `-v` | Enable detailed logging output | `False` |
-| `--help` | `-h` | Show help message and exit | |
+| `--help` | | Show help message and exit | |
 | `--version` | | Show version information | |
 
 ### Directory Configuration
@@ -39,7 +64,7 @@ python src/main.py --verbose
 
 ```bash
 # Process files with default settings
-python src/main.py
+tm-monthly-backup
 
 # Output example:
 # tm-monthly-backup
@@ -48,22 +73,26 @@ python src/main.py
 # ✓ Backup directory ready: backup
 #
 # File Discovery Summary
-# ┌─────────────┬───────┬─────────────────────────────┐
-# │ Category    │ Count │ Description                 │
-# ├─────────────┼───────┼─────────────────────────────┤
-# │ Photos      │    45 │ JPEG, PNG, HEIC, etc.     │
-# │ Videos      │    12 │ MOV, MP4, M4V, etc.       │
-# │ Screenshots │     8 │ PNG files with patterns    │
-# │ Sidecar     │    23 │ Apple .aae files (deleted) │
-# │ Total       │    88 │ Files to process           │
-# └─────────────┴───────┴─────────────────────────────┘
+# ┌───────────────┬───────┬─────────────────────────────────────┐
+# │ Category      │ Count │ Description                         │
+# ├───────────────┼───────┼─────────────────────────────────────┤
+# │ Photos        │    45 │ JPEG, PNG, HEIC, etc.               │
+# │ Videos        │    12 │ MOV, MP4, M4V, etc.                 │
+# │ Screenshots   │     8 │ PNG files with screenshot patterns  │
+# │ Sidecar Files │    23 │ Apple .aae files (will be deleted)  │
+# │ Unknown       │     2 │ Unrecognized file types             │
+# │ Total         │    90 │ Files to process                    │
+# └───────────────┴───────┴─────────────────────────────────────┘
 ```
+
+The **Unknown** row is shown only when at least one unrecognized file was
+found.
 
 ### Dry Run Mode
 
 ```bash
 # Preview operations without making changes
-python src/main.py --dry-run
+tm-monthly-backup --dry-run
 
 # Shows exactly what would be processed:
 # [DRY RUN] Would delete sidecar file: export/IMG_1234.aae
@@ -71,21 +100,31 @@ python src/main.py --dry-run
 # [DRY RUN] Would move: export/photo.jpg -> backup/photos/2024.01.15.14.30.45.jpg
 ```
 
+A dry run predicts the exact plan a real run would execute — the same
+destination path (including the `.jpg` extension a HEIC lands as), the same
+timestamp-collision bumps, the same quarantine and unknown-file decisions —
+without moving, converting, or deleting anything.
+
 ### Custom Directories
 
 ```bash
 # Use custom export and backup directories
-python src/main.py --export-dir /path/to/icloud/export --backup-dir /path/to/organized
+tm-monthly-backup --export-dir /path/to/icloud/export --backup-dir /path/to/organized
 
 # Relative paths work too
-python src/main.py --export-dir ../downloads --backup-dir ./monthly-backup
+tm-monthly-backup --export-dir ../downloads --backup-dir ./monthly-backup
 ```
+
+The export and backup directories may not overlap. If `--backup-dir` is the same
+as `--export-dir`, or one is nested inside the other, the tool refuses to run and
+exits with a precondition error (code `2`) before touching anything — an
+overlapping destination would let a run re-ingest and destroy its own inputs.
 
 ### Verbose Logging
 
 ```bash
 # Enable detailed logging for troubleshooting
-python src/main.py --verbose
+tm-monthly-backup --verbose
 
 # Shows detailed processing information:
 # [14:30:45] INFO     Starting file processing (dry_run=False)
@@ -128,9 +167,18 @@ backup/
 ├── screenshots/
 │   ├── 2024.01.15.09.15.42.png
 │   └── 2024.01.15.11.33.21.png
-└── unknown/              # Files with unrecognized extensions
-    └── document.txt
+├── generated/           # AI-generated and heavily edited content
+│   └── 2024.01.15.18.05.10.png
+├── unknown/             # Unrecognized extensions (original names kept)
+│   └── document.txt
+└── corrupt/             # Undecodable image-typed files (quarantined)
+    └── truncated.jpg
 ```
+
+The `photos/`, `videos/`, `screenshots/`, and `generated/` directories are
+created up front. `unknown/` and `corrupt/` are created lazily — only when a
+file is actually routed into them — so they are never empty directories implying
+handling that did not occur.
 
 ## File Processing Details
 
@@ -138,11 +186,22 @@ backup/
 
 | Category | Extensions | Notes |
 |----------|------------|-------|
-| **Photos** | `.jpg`, `.jpeg`, `.png`, `.gif`, `.heic`, `.heif`, `.tiff`, `.dng`, `.raw` | HEIC files converted to JPEG |
-| **Videos** | `.mov`, `.mp4`, `.m4v`, `.avi`, `.mkv`, `.wmv` | Moved without conversion |
+| **Photos** | `.jpg`, `.jpeg`, `.png`, `.gif`, `.heic`, `.heif`, `.tiff`, `.tif`, `.bmp`, `.webp`, `.dng`, `.raw`, `.cr2`, `.nef`, `.arw`, `.orf`, `.rw2` | HEIC files converted to JPEG; raw formats pass through unchanged (see note below) |
+| **Videos** | `.mov`, `.mp4`, `.m4v`, `.avi`, `.mkv`, `.wmv`, `.flv`, `.webm`, `.3gp`, `.mpg`, `.mpeg` | Moved without conversion |
 | **Screenshots** | `.png` with screenshot patterns | Detected by filename patterns |
+| **Generated** | AI-detected or heavily-edited `.png`/photo files | Routed to `generated/` (see below) |
 | **Sidecar** | `.aae` | Apple sidecar files (deleted) |
-| **Unknown** | All others | Moved to `unknown/` directory |
+| **Unknown** | All others | Moved to `unknown/` under original name |
+
+The authoritative extension lists are `FileCategorizer.PHOTO_EXTENSIONS` and
+`FileCategorizer.VIDEO_EXTENSIONS` in `src/file_categorizer.py`.
+
+**Raw formats are not decode-verified or converted.** Pillow cannot decode raw
+formats (`.dng`, `.raw`, `.cr2`, `.nef`, `.arw`, `.orf`, `.rw2`), so they are
+passed through and filed by timestamp as-is — they are never quarantined by the
+corrupt-file gate (which only applies to formats Pillow can decode). HEIC/HEIF
+are also excluded from that gate; their integrity is established separately by
+the conversion-verification step.
 
 ### Screenshot Detection
 
@@ -167,9 +226,86 @@ Unknown files have no metadata to derive a timestamp from, so they keep their **
 
 HEIC files are automatically converted to high-quality JPEG:
 
-- **Quality**: 95% (lossless visual quality)
+- **Quality**: high quality (JPEG q95 with `optimize=True`). This is visually
+  excellent but **lossy** — it is not a lossless format. The original HEIC is
+  **not retained** after conversion, so no lossless copy remains once the run
+  completes.
 - **EXIF Preservation**: All metadata preserved
-- **Original Cleanup**: HEIC files deleted after successful conversion
+- **Verify Before Delete**: The original `.heic` is deleted only after the
+  converted JPEG is verified on disk (it exists, decodes, matches the source
+  dimensions, and preserves EXIF) and has landed in `backup/photos/`. If
+  verification fails, the original is left in `export/` and the run records a
+  failure.
+
+### Generated / AI-Detected Content
+
+Files identified as AI-generated or heavily edited are routed to
+`backup/generated/` instead of `photos/`, so a manual photo cleanup never
+sweeps them up unnoticed. Like photos, they are renamed by timestamp. Detection
+(in `FileCategorizer._is_generated_content`) is deliberately **precise** rather
+than a broad substring match — an earlier bare-substring approach misfiled
+ordinary photos (`ai` matched inside "chair", "trail", "portrait"). A file is
+treated as generated when any of these hold:
+
+- **PNG provenance keys**: a PNG text chunk whose *key* is a known generator key
+  — `c2pa` (Content Provenance manifest) or `parameters` (Stable Diffusion /
+  AUTOMATIC1111 generation settings).
+- **Word-boundary tool markers**: a PNG text *value* containing a high-signal
+  product marker matched at word boundaries — `chatgpt`, `openai`, `gpt-4` /
+  `gpt-4o`, `dall-e` / `dall·e`, `midjourney`, `stable diffusion`, `firefly`, or
+  `c2pa`. Word boundaries keep these from matching inside longer words.
+- **Editing software with no capture time**: EXIF `Software` names an editor
+  (Snapseed, Photoshop, Lightroom, GIMP, Canva) **and** the image carries no
+  genuine `DateTimeOriginal` / `DateTimeDigitized` capture timestamp (read from
+  both IFD0 and the Exif sub-IFD). A real photo retouched in Lightroom keeps its
+  capture time and stays a photo.
+- **UUID filename**: the filename stem parses as a valid UUID (a common
+  convention for generated output), validated by actually parsing it — not by
+  counting characters.
+
+### Video Metadata / Local Capture Time
+
+Videos are renamed from their true **local wall-clock** capture time. Apple
+records this — with its UTC offset — in the `com.apple.quicktime.creationdate`
+metadata key (e.g. `2024-06-15T21:33:03-0400`), and the tool reads it directly
+from the QuickTime/MP4 box structure. The local reading is kept as-is
+(`21:33:03` stays `21:33:03`, not converted to UTC), so a video and a photo
+captured at the same instant share the same `YYYY.MM.DD.HH.MM.SS` stem.
+
+When that key is absent, the tool falls back to hachoir's `mvhd` creation time,
+which QuickTime defines as **UTC**. That fallback can therefore be off by the
+local UTC offset for containers that lack the Apple key — a known limitation of
+metadata that simply does not carry the local time.
+
+### Corrupt-File Quarantine
+
+Before an image-typed file (`.jpg`/`.jpeg`/`.png`/`.gif`/`.tiff`/`.tif`/`.bmp`/
+`.webp`) is renamed and filed as a photo, its bytes are decode-verified with a
+full pixel decode. A truncated download, a zero-byte stub, or a non-image file
+mislabeled `.jpg`/`.png` fails this check and is **quarantined** to
+`backup/corrupt/` under its **original filename** (a corrupt file has no reliable
+capture time, and the rename would destroy the one clue to what it was). It never
+overwrites a name already there (`name (1).ext`, `name (2).ext`, … disambiguation).
+
+Quarantined files are reported as a distinct outcome — a `files_quarantined`
+count, neither a clean "processed" nor a tool "failure" — and the results banner
+reads "Files Quarantined" rather than "Success!" so you know there are files in
+`backup/corrupt/` to review. Raw and HEIC/HEIF files are excluded from this gate
+(see the file-types note above).
+
+### Skipped Entries
+
+Some entries in `export/` are intentionally skipped during the scan:
+
+- **Hidden directories** (`.Trashes`, `.Spotlight-V100`, `.fseventsd`, `.git`,
+  etc.) are pruned at every depth and never descended into — their contents are
+  never categorized, archived, or discovered for sidecar deletion. Hidden files
+  at the leaf level are likewise skipped.
+- **Non-regular files** (FIFOs/named pipes, sockets, device nodes, broken
+  symlinks) are skipped and logged; opening one could block the run forever.
+- **Symlinks** pointing at a real image are processed, but the tool copies the
+  **resolved target's bytes** into the backup and removes only the link from
+  `export/` — the target itself is never moved, modified, or deleted.
 
 ## Progress Display
 
@@ -188,13 +324,13 @@ Organizing files...       ━━━━━━━━━━━━━━━━━━
 
 ```
 Processing Complete - Success!
-┌─────────────────────┬───────┐
-│ Metric              │ Count │
-├─────────────────────┼───────┤
-│ Files Processed     │    65 │
-│ HEIC Conversions    │    12 │
-│ Missing EXIF Files  │     3 │
-└─────────────────────┴───────┘
+┌───────────────────────────┬───────┐
+│ Metric                    │ Count │
+├───────────────────────────┼───────┤
+│ Files Processed           │    68 │
+│ HEIC Conversions          │    12 │
+│ Missing EXIF Files        │     3 │
+└───────────────────────────┴───────┘
 
 File Organization
 ┌─────────────┬───────┬──────────────────────┐
@@ -203,6 +339,36 @@ File Organization
 │ Photos      │    45 │ backup/photos/       │
 │ Videos      │    12 │ backup/videos/       │
 │ Screenshots │     8 │ backup/screenshots/  │
+│ Generated   │     3 │ backup/generated/    │
+└─────────────┴───────┴──────────────────────┘
+```
+
+The **Generated** row appears only when at least one file was routed there;
+likewise an **Unknown** row (`backup/unknown/`) appears when unrecognized files
+were filed. When undecodable files were quarantined, the banner changes to
+"Processing Complete - Files Quarantined", a "Quarantined (undecodable)" metric
+row is added, and a **Quarantined** row pointing at `backup/corrupt/` is included:
+
+```
+Processing Complete - Files Quarantined
+┌───────────────────────────┬───────┐
+│ Metric                    │ Count │
+├───────────────────────────┼───────┤
+│ Files Processed           │    66 │
+│ HEIC Conversions          │    12 │
+│ Missing EXIF Files        │     3 │
+│ Quarantined (undecodable) │     2 │
+└───────────────────────────┴───────┘
+
+File Organization
+┌─────────────┬───────┬──────────────────────┐
+│ Category    │ Files │ Location             │
+├─────────────┼───────┼──────────────────────┤
+│ Photos      │    45 │ backup/photos/       │
+│ Videos      │    12 │ backup/videos/       │
+│ Screenshots │     8 │ backup/screenshots/  │
+│ Generated   │     3 │ backup/generated/    │
+│ Quarantined │     2 │ backup/corrupt/      │
 └─────────────┴───────┴──────────────────────┘
 ```
 

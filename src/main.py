@@ -5,16 +5,8 @@ tm-monthly-backup: CLI utility for organizing Apple Photos exports
 
 import sys
 import click
-from pathlib import Path
 
-# Add src directory to Python path for direct execution
-if __name__ == '__main__':
-    sys.path.insert(0, str(Path(__file__).parent))
-
-try:
-    from cli_interface import CLIInterface, setup_logging
-except ImportError:
-    from .cli_interface import CLIInterface, setup_logging
+from src.cli_interface import CLIInterface, setup_logging
 
 
 # Exit code taxonomy. Each code carries exactly one meaning so a caller can act
