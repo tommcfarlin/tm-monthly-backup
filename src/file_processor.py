@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 from PIL import Image, UnidentifiedImageError
 
@@ -16,6 +18,60 @@ from .heic_converter import HeicConverter
 from .file_categorizer import FileCategorizer, FileCategory
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_heic_worker(
+    heic_path: str, jpeg_quality: int, optimize: bool
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Convert a single HEIC file to JPEG inside a worker process.
+
+    This is the picklable unit of work mapped across the process pool by the
+    parallel conversion phase (issue #42). It is deliberately a module-level
+    function taking only picklable scalars and returning only a picklable
+    tuple: no ``self``, no Pillow objects, and no shared mutable state cross the
+    process boundary. Each spawned worker re-imports this module, which imports
+    :mod:`src.heic_converter` and therefore calls
+    ``pillow_heif.register_heif_opener()`` at import time, so the HEIF opener is
+    registered in every worker (macOS uses the ``spawn`` start method).
+
+    The work performed is exactly the decode + encode + write of the sequential
+    path: it constructs a throwaway :class:`HeicConverter` with the same
+    ``jpeg_quality``/``optimize`` the main process uses and calls
+    :meth:`HeicConverter.convert_heic_to_jpeg` with no ``output_dir``, so the
+    transient ``mkstemp`` ``.jpg`` (issue #26) lands beside the source HEIC in
+    ``export/`` just as it does sequentially. Verification (#7), timestamping,
+    moving, and deleting the original are NOT done here -- those stay in the
+    sequential place phase so collision resolution and landing order are
+    byte-for-byte identical to a sequential run.
+
+    A decode/encode failure never raises across the boundary: it is captured
+    and returned so a single corrupt HEIC fails exactly one file instead of
+    poisoning the pool.
+
+    Args:
+        heic_path: Absolute path to the HEIC file to convert.
+        jpeg_quality: JPEG quality (1-100) for the encode.
+        optimize: Whether to run libjpeg's extra optimization pass (issue #40).
+
+    Returns:
+        A ``(heic_path, output_path, error)`` tuple. On success ``output_path``
+        is the transient JPEG path and ``error`` is ``None``; on failure
+        ``output_path`` is ``None`` and ``error`` carries a short message.
+    """
+    converter = HeicConverter(jpeg_quality=jpeg_quality, optimize=optimize)
+    try:
+        output_path = converter.convert_heic_to_jpeg(heic_path)
+    except Exception as exc:  # pragma: no cover - defensive across the boundary
+        return (heic_path, None, str(exc))
+    if output_path is None:
+        error = (
+            converter.failed_conversions[-1][1]
+            if converter.failed_conversions
+            else 'HEIC conversion failed'
+        )
+        return (heic_path, None, error)
+    return (heic_path, output_path, None)
 
 
 class FileProcessor:
@@ -42,6 +98,21 @@ class FileProcessor:
     DECODABLE_IMAGE_EXTENSIONS = frozenset({
         '.jpg', '.jpeg', '.png', '.gif', '.tiff', '.tif', '.bmp', '.webp',
     })
+
+    # Upper bound on the HEIC conversion process pool (issue #42). The
+    # performance audit measured returns flattening at 4-6 workers and going
+    # *backwards* at 8: libheif is already internally threaded (a sequential run
+    # already uses ~207% CPU), so oversubscribing regresses. Memory also scales
+    # at ~0.5 GB per worker, so the cap bounds RSS too. The pool is sized at
+    # ``min(MAX_HEIC_WORKERS, os.cpu_count())`` -- deliberately NOT
+    # ``os.cpu_count()`` on a host with more cores than this.
+    MAX_HEIC_WORKERS = 6
+
+    # Minimum number of HEIC files before the process pool is worth spawning.
+    # Each spawned worker re-imports Pillow + pillow-heif (~65 ms one-time), so
+    # for a handful of files the spawn overhead is not amortized and the
+    # sequential inline path is faster. Below this threshold no pool is created.
+    HEIC_PARALLEL_THRESHOLD = 8
 
     def __init__(self, export_dir: str = "export", backup_dir: str = "backup"):
         """
@@ -75,6 +146,13 @@ class FileProcessor:
         self.used_timestamps: Dict[str, Set[str]] = {}
         self.failed_files = []
         self.conversion_log = []
+        # Pre-computed HEIC conversions from the parallel convert phase (issue
+        # #42): maps a source ``.heic`` path to ``(output_path, error)``. It is
+        # populated once, up front, only when a run has enough HEIC files to
+        # amortize the pool (see ``_prepare_heic_conversions``); the sequential
+        # place phase consults it per file. Empty means "convert inline",
+        # preserving the exact sequential behaviour for small/dry-run batches.
+        self._converted_heic: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
         # Files carrying an image extension whose bytes did not decode as an
         # image (truncated, zero-byte, or a non-image mislabeled ``.jpg``/
         # ``.png``). They are moved to ``backup/corrupt/`` under their original
@@ -174,7 +252,18 @@ class FileProcessor:
         if not dry_run:
             self.categorizer.ensure_target_directories(self.backup_dir)
 
-        # Process each category
+        # Phase A (parallel): convert HEIC files up front in a bounded process
+        # pool (issue #42). This is a pure per-file map -- decode/encode/write,
+        # no shared state -- whose results feed the sequential place phase
+        # below. A dry run converts nothing, so it never enters here and never
+        # spawns a pool (#10 parity preserved).
+        if not dry_run:
+            self._prepare_heic_conversions(processable_files)
+
+        # Phase B (sequential): timestamp, resolve collisions, move, and delete
+        # originals in the SAME deterministic order as a fully sequential run,
+        # so ``used_timestamps`` resolution and landing paths are byte-for-byte
+        # identical regardless of whether Phase A ran in a pool.
         for category, files in processable_files.items():
             if files:
                 self._process_category(category, files, dry_run)
@@ -278,6 +367,167 @@ class FileProcessor:
                 logger.error("Failed to process file %s: %s", file_path, e)
                 self.failed_files.append(('process_file', file_path, str(e)))
 
+    def _prepare_heic_conversions(self, processable_files: Dict[FileCategory, List[str]]) -> None:
+        """
+        Run the parallel HEIC convert phase, populating ``_converted_heic``.
+
+        Collects every HEIC file across all processable categories and, only
+        when there are enough of them to amortize pool startup
+        (``HEIC_PARALLEL_THRESHOLD``), converts them in a bounded process pool.
+        Below the threshold nothing is done: ``_converted_heic`` stays empty and
+        each HEIC is converted inline in the sequential place phase, exactly as
+        before issue #42. Non-HEIC files never enter here.
+
+        This method performs conversions only; it assigns no timestamps, moves
+        nothing, and deletes nothing. All of that stays in the sequential place
+        phase so ordering and collision resolution are unchanged.
+
+        Args:
+            processable_files: The per-category file lists about to be placed.
+        """
+        heic_files = [
+            path
+            for files in processable_files.values()
+            for path in files
+            if self.heic_converter.is_heic_file(path)
+        ]
+        if len(heic_files) < self.HEIC_PARALLEL_THRESHOLD:
+            # Not worth a pool: leave the map empty so the place phase converts
+            # these inline (sequentially), matching pre-#42 behaviour exactly.
+            return
+        self._converted_heic = self._convert_heic_files_parallel(heic_files)
+
+    def _heic_worker_count(self, num_files: int) -> int:
+        """
+        Return the bounded worker count for the HEIC conversion pool.
+
+        Capped at :data:`MAX_HEIC_WORKERS` and never ``os.cpu_count()`` when the
+        host has more cores than the cap (issue #42): oversubscription measurably
+        regressed against an already-threaded libheif. Also never more workers
+        than files, and always at least one.
+
+        Args:
+            num_files: Number of HEIC files to be converted.
+
+        Returns:
+            The number of worker processes to spawn.
+        """
+        cpu = os.cpu_count() or 1
+        capped = min(self.MAX_HEIC_WORKERS, cpu)
+        return max(1, min(capped, num_files))
+
+    def _convert_heic_files_parallel(
+        self, heic_files: List[str]
+    ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+        """
+        Convert HEIC files in a bounded process pool; return per-file results.
+
+        Maps :func:`_convert_heic_worker` across ``heic_files`` in a
+        :class:`concurrent.futures.ProcessPoolExecutor` sized by
+        :meth:`_heic_worker_count`. Results are consumed via
+        :func:`concurrent.futures.as_completed` so a future per-file progress
+        callback (issue #14) drops in without restructuring, and so a single
+        failing file is recorded rather than aborting the batch.
+
+        Robustness guarantees:
+
+        * A worker that returns a failure tuple is recorded as ``(None, error)``
+          -- the batch continues.
+        * If the pool itself dies (:class:`BrokenProcessPool`), every file
+          without a result is converted inline (sequentially) so no file is
+          silently lost.
+        * ``KeyboardInterrupt`` cancels outstanding work and shuts the pool down
+          without orphaning workers, then propagates to the top-level handler.
+
+        Args:
+            heic_files: Source ``.heic`` paths to convert.
+
+        Returns:
+            A dict mapping each source path to ``(output_path, error)``.
+        """
+        worker_count = self._heic_worker_count(len(heic_files))
+        quality = self.heic_converter.jpeg_quality
+        optimize = self.heic_converter.optimize
+        results: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+
+        logger.info(
+            "Converting %s HEIC files in a pool of %s workers",
+            len(heic_files),
+            worker_count,
+        )
+        try:
+            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(
+                        _convert_heic_worker, path, quality, optimize
+                    ): path
+                    for path in heic_files
+                }
+                try:
+                    for future in as_completed(futures):
+                        _src, output_path, error = future.result()
+                        results[futures[future]] = (output_path, error)
+                except KeyboardInterrupt:
+                    # Do not wait on in-flight work; cancel what has not started
+                    # and tear the pool down before re-raising so no worker is
+                    # orphaned. main.py catches the re-raised interrupt.
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+        except BrokenProcessPool as exc:
+            # A worker died unexpectedly (e.g. OOM-killed). Rather than lose the
+            # whole batch, fall back to sequential conversion for the remainder.
+            logger.error(
+                "HEIC conversion pool broke (%s); converting remaining files "
+                "sequentially",
+                exc,
+            )
+
+        # Backfill any file the pool did not resolve -- a broken pool, or a
+        # future cancelled on interrupt that we nonetheless reached here for --
+        # by converting it inline. Guarantees every input has a result.
+        for path in heic_files:
+            if path not in results:
+                _src, output_path, error = _convert_heic_worker(
+                    path, quality, optimize
+                )
+                results[path] = (output_path, error)
+
+        return results
+
+    def _convert_heic(self, file_path: str) -> Optional[str]:
+        """
+        Return the converted-JPEG path for a HEIC, or ``None`` on failure.
+
+        Bridges the parallel convert phase (issue #42) and the sequential place
+        phase. When ``file_path`` was pre-converted by the pool its cached
+        result is used and the converter's stats bookkeeping is mirrored so the
+        summary is identical to a sequential run; the worker performed the write
+        in a throwaway process, so the main-process converter never saw it.
+        When there is no cached result (batch below the pool threshold), it
+        converts inline via :meth:`HeicConverter.convert_heic_to_jpeg` -- the
+        exact pre-#42 sequential path.
+
+        Args:
+            file_path: Source ``.heic`` path.
+
+        Returns:
+            The transient JPEG path on success, or ``None`` on conversion
+            failure (the caller records the ``('convert_heic', ...)`` failure).
+        """
+        if file_path in self._converted_heic:
+            output_path, error = self._converted_heic[file_path]
+            if output_path is not None:
+                # Mirror the bookkeeping convert_heic_to_jpeg records in-process
+                # so conversion stats (heic_conversions) match sequential.
+                self.heic_converter.converted_files.append((file_path, output_path))
+                return output_path
+            self.heic_converter.failed_conversions.append(
+                (file_path, error or 'HEIC conversion failed')
+            )
+            return None
+        # No pooled result: convert inline, exactly as the pre-#42 code did.
+        return self.heic_converter.convert_heic_to_jpeg(file_path)
+
     def _process_single_file(self, file_path: str, category: FileCategory, target_dir: str, dry_run: bool):
         """
         Process a single file: convert if needed, rename with timestamp, move to target.
@@ -351,7 +601,7 @@ class FileProcessor:
                 # preserves EXIF), so the timestamp read below matches a real run
                 # without performing -- or writing -- any conversion.
             else:
-                converted_path = self.heic_converter.convert_heic_to_jpeg(file_path)
+                converted_path = self._convert_heic(file_path)
                 if converted_path:
                     # Verify the conversion is genuinely valid BEFORE the original
                     # -- the only copy of the photo -- becomes eligible for
@@ -930,6 +1180,7 @@ class FileProcessor:
         self.failed_files.clear()
         self.quarantined_files.clear()
         self.conversion_log.clear()
+        self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()
         self.categorizer.clear_categorization()

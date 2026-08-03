@@ -124,6 +124,74 @@ class TestConvertHeicToJpeg(unittest.TestCase):
         self.assertEqual(len(self.converter.failed_conversions), 1)
 
 
+class TestOptimizeFlag(unittest.TestCase):
+    """The JPEG encode must not pay for optimize=True by default (issue #40)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _path(self, name):
+        return os.path.join(self.temp_dir, name)
+
+    def test_default_converter_does_not_request_huffman_optimization(self):
+        """
+        The default converter passes optimize=False to Image.save, and the
+        JPEG it produces still verifies as a good, EXIF-preserving conversion.
+
+        The kwarg assertion is what pins the perf fix: the extra Huffman pass
+        (optimize=True) more than doubles the encode step for a ~2% size win,
+        so a default that turned it back on would silently reintroduce the cost
+        this issue removed. Pairing it with a real convert + verify_conversion
+        keeps the test honest -- it fails both if the flag regresses and if the
+        cheaper encode ever stopped producing a valid photo.
+        """
+        converter = HeicConverter()
+        heic = make_exif_heic(
+            self._path("photo.heic"),
+            date_time_original="2024:01:15 14:30:45",
+            size=(64, 64),
+        )
+
+        real_save = Image.Image.save
+        captured = {}
+
+        def capturing_save(self, fp, *args, **kwargs):
+            captured.update(kwargs)
+            return real_save(self, fp, *args, **kwargs)
+
+        with patch.object(Image.Image, "save", capturing_save):
+            result = converter.convert_heic_to_jpeg(heic, output_dir=self._path("out"))
+
+        self.assertIsNotNone(result)
+        # The load-bearing assertion: the encode never requests optimization.
+        self.assertIn("optimize", captured)
+        self.assertFalse(captured["optimize"])
+        self.assertNotEqual(captured["optimize"], True)
+        # And the cheaper encode still yields a valid, EXIF-preserving JPEG.
+        self.assertTrue(converter.verify_conversion(heic, result))
+
+    def test_optimize_can_be_re_enabled_via_constructor(self):
+        """optimize=True is still reachable for anyone who wants the smaller file."""
+        converter = HeicConverter(optimize=True)
+        heic = make_exif_heic(self._path("opt.heic"), size=(64, 64))
+
+        real_save = Image.Image.save
+        captured = {}
+
+        def capturing_save(self, fp, *args, **kwargs):
+            captured.update(kwargs)
+            return real_save(self, fp, *args, **kwargs)
+
+        with patch.object(Image.Image, "save", capturing_save):
+            result = converter.convert_heic_to_jpeg(heic, output_dir=self._path("out"))
+
+        self.assertIsNotNone(result)
+        self.assertTrue(captured.get("optimize"))
+
+
 class TestVerifyConversion(unittest.TestCase):
     """Every verify_conversion branch: missing, size, EXIF-loss, error, pass."""
 

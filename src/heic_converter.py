@@ -19,14 +19,22 @@ logger = logging.getLogger(__name__)
 class HeicConverter:
     """Handles HEIC to JPEG conversion with EXIF preservation"""
 
-    def __init__(self, jpeg_quality: int = 95):
+    def __init__(self, jpeg_quality: int = 95, optimize: bool = False):
         """
         Initialize HEIC converter.
 
         Args:
             jpeg_quality: JPEG quality (1-100, default 95 for high quality)
+            optimize: Whether to run libjpeg's extra Huffman-optimization pass
+                on encode. Defaults to False. At quality 95 that second pass
+                costs +152% on the encode step (+71.5 ms per real HEIC in the
+                performance audit, the dominant share of a HEIC-heavy run) and
+                buys only ~2.3% smaller JPEGs -- a trade an archive tool on a
+                Mac with terabytes of disk should not take by default. The whole
+                pipeline is ~1.31x faster with it off (issue #40).
         """
         self.jpeg_quality = jpeg_quality
+        self.optimize = optimize
         self.converted_files = []
         self.failed_conversions = []
 
@@ -99,11 +107,16 @@ class HeicConverter:
                 # Get EXIF data before conversion
                 exif_data = image.getexif()
 
-                # Save as JPEG with EXIF preservation
+                # Save as JPEG with EXIF preservation. ``optimize`` is off by
+                # default (issue #40): the extra Huffman-optimization pass does
+                # not change a single pixel -- output is numerically identical,
+                # only the entropy coding differs -- yet at quality 95 it more
+                # than doubles the encode time for a ~2.3% size saving, and
+                # encode is the dominant cost of a HEIC-heavy run.
                 save_kwargs = {
                     'format': 'JPEG',
                     'quality': self.jpeg_quality,
-                    'optimize': True
+                    'optimize': self.optimize
                 }
 
                 # Preserve EXIF data if present
