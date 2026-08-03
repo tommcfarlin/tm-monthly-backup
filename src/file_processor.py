@@ -74,6 +74,67 @@ def _convert_heic_worker(
     return (heic_path, output_path, None)
 
 
+class ProgressReporter:
+    """
+    Presentation seam for :meth:`FileProcessor.process_all_files` (issue #13).
+
+    ``process_all_files`` owns the whole run -- scan, categorize, delete
+    sidecars, process, summarize -- and reports to an optional
+    ``ProgressReporter`` at the meaningful points so a UI can render (and gate)
+    the run *without* reaching into private methods or re-driving the pipeline.
+    Passing ``progress=None`` runs the pipeline headless, exactly as before this
+    seam existed, so every non-interactive caller (and the test suite) is
+    unaffected.
+
+    Every hook has a no-op / permissive default, so a subclass overrides only
+    the hooks it needs. The contract is intentionally small and stable; issue
+    #14 subclasses it to drive real per-file progress bars.
+
+    Hook order for one run:
+
+    1. :meth:`on_no_files` -- the scan found nothing; the run ends here.
+    2. :meth:`on_categorized` -- fired once, right after the single
+       categorization pass, with the scanned-file total and the categorization
+       stats. Returning ``False`` aborts the run before any file is touched or
+       any sidecar is deleted (the confirmation seam); the default proceeds.
+    3. :meth:`on_file` -- fired once per processable file as it is handled
+       (moved / converted / quarantined / routed). Never fired for sidecar
+       files, which are deleted rather than processed.
+    """
+
+    def on_no_files(self) -> None:
+        """Called when the export scan yields no files. Default: no-op."""
+
+    def on_categorized(self, total: int, stats: Dict[str, int]) -> bool:
+        """
+        Called once after categorization, before any file is processed.
+
+        Args:
+            total: Number of files the scan discovered (sidecars included) --
+                the count a "process N files?" prompt should quote.
+            stats: The categorization breakdown from
+                :meth:`FileCategorizer.get_categorization_stats`.
+
+        Returns:
+            ``True`` to proceed with processing, ``False`` to abort the run
+            before any file is touched or any sidecar deleted. Default ``True``.
+        """
+        return True
+
+    def on_file(self, path: str, category: str, action: str) -> None:
+        """
+        Called once per processable file as it is handled.
+
+        Args:
+            path: The source path of the file just handled.
+            category: The file's category value (e.g. ``"photo"``).
+            action: A coarse label for what happened (currently ``"process"``);
+                reserved for issue #14 to refine into convert/move/quarantine.
+
+        Default: no-op.
+        """
+
+
 class FileProcessor:
     """Main file processing coordinator"""
 
@@ -205,15 +266,28 @@ class FileProcessor:
             )
         return None
 
-    def process_all_files(self, dry_run: bool = False) -> Dict[str, any]:
+    def process_all_files(
+        self,
+        dry_run: bool = False,
+        progress: Optional[ProgressReporter] = None,
+    ) -> Dict[str, any]:
         """
-        Process all files in export directory.
+        Run the whole pipeline and return the summary -- the single public API.
+
+        Scans the export directory, categorizes, deletes sidecars, converts and
+        files every processable file, and returns the summary. This is the ONE
+        entry point a presentation layer calls: scanning, categorization,
+        sidecar deletion, and summary generation each happen exactly once per
+        run, so no caller re-drives (or reaches into) the pipeline (issue #13).
 
         Args:
-            dry_run: If True, show what would be done without making changes
+            dry_run: If True, show what would be done without making changes.
+            progress: Optional :class:`ProgressReporter` the run reports to at
+                its meaningful points. ``None`` runs headless (no gating, no
+                per-file notifications), exactly as before the seam existed.
 
         Returns:
-            Dictionary with processing results and statistics
+            Dictionary with processing results and statistics.
 
         Raises:
             ValueError: If the export and backup directories overlap (same
@@ -234,6 +308,8 @@ class FileProcessor:
         all_files = self._scan_export_directory()
         if not all_files:
             logger.warning("No files found in %s", self.export_dir)
+            if progress is not None:
+                progress.on_no_files()
             return self._generate_summary()
 
         logger.info("Found %s files to process", len(all_files))
@@ -241,6 +317,17 @@ class FileProcessor:
         # Categorize files
         categorized = self.categorizer.batch_categorize(all_files)
         logger.info(f"Categorization complete:\n{self.categorizer.get_file_summary()}")
+
+        # Report the categorized total to the presentation layer and let it gate
+        # the run. This is the confirmation seam: a reporter that declines
+        # (returns False) aborts BEFORE any sidecar is deleted or any file is
+        # moved, so a cancelled run touches nothing (issue #13). ``None`` and the
+        # permissive default both proceed, preserving headless behaviour.
+        if progress is not None:
+            stats = self.categorizer.get_categorization_stats()
+            if not progress.on_categorized(len(all_files), stats):
+                logger.info("Processing aborted by progress reporter")
+                return self._generate_summary()
 
         # Delete sidecar files immediately
         self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
@@ -266,7 +353,7 @@ class FileProcessor:
         # identical regardless of whether Phase A ran in a pool.
         for category, files in processable_files.items():
             if files:
-                self._process_category(category, files, dry_run)
+                self._process_category(category, files, dry_run, progress)
 
         # Generate summary
         return self._generate_summary()
@@ -347,7 +434,13 @@ class FileProcessor:
                     logger.error("Failed to delete sidecar file %s: %s", file_path, e)
                     self.failed_files.append(('delete_sidecar', file_path, str(e)))
 
-    def _process_category(self, category: FileCategory, files: List[str], dry_run: bool):
+    def _process_category(
+        self,
+        category: FileCategory,
+        files: List[str],
+        dry_run: bool,
+        progress: Optional[ProgressReporter] = None,
+    ):
         """
         Process files for a specific category.
 
@@ -355,6 +448,8 @@ class FileProcessor:
             category: FileCategory to process
             files: List of file paths
             dry_run: If True, only show what would be done
+            progress: Optional reporter notified once per file after it is
+                handled (issue #13 seam for #14's per-file progress).
         """
         logger.info("Processing %s %s files", len(files), category.value)
 
@@ -366,6 +461,12 @@ class FileProcessor:
             except Exception as e:
                 logger.error("Failed to process file %s: %s", file_path, e)
                 self.failed_files.append(('process_file', file_path, str(e)))
+            # Notify after the file is handled -- whether it landed, was
+            # quarantined, or was recorded as failed. Placed after the
+            # ``except Exception`` (not in a ``finally``) so a propagating
+            # ``KeyboardInterrupt`` is not reported as a completed file.
+            if progress is not None:
+                progress.on_file(file_path, category.value, 'process')
 
     def _prepare_heic_conversions(self, processable_files: Dict[FileCategory, List[str]]) -> None:
         """
