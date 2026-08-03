@@ -4,9 +4,7 @@ Test suite for HEIC -> JPEG conversion, verification, and cleanup.
 These tests exercise the live HeicConverter paths that issue #7 made
 load-bearing: the conversion failure/exception branches, every
 ``verify_conversion`` rejection reason, the two ``cleanup_original_heic``
-modes, and the conversion-stats accounting. ``batch_convert`` is deliberately
-NOT tested here -- it has no caller in ``src/`` and is slated for removal in
-issue #12.
+modes, and the conversion-stats accounting.
 """
 
 import os
