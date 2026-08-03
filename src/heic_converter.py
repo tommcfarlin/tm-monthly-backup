@@ -6,7 +6,7 @@ import os
 import logging
 import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 from PIL import Image
 import pillow_heif
 
@@ -127,29 +127,6 @@ class HeicConverter:
                 except OSError:
                     pass
             return None
-
-    def batch_convert(self, heic_files: list, output_dir: str = None) -> Tuple[list, list]:
-        """
-        Convert multiple HEIC files to JPEG.
-
-        Args:
-            heic_files: List of HEIC file paths
-            output_dir: Output directory for converted files
-
-        Returns:
-            Tuple of (successful_conversions, failed_conversions)
-        """
-        successful = []
-        failed = []
-
-        for heic_file in heic_files:
-            jpeg_path = self.convert_heic_to_jpeg(heic_file, output_dir)
-            if jpeg_path:
-                successful.append((heic_file, jpeg_path))
-            else:
-                failed.append(heic_file)
-
-        return successful, failed
 
     def verify_conversion(self, original_heic: str, converted_jpeg: str) -> bool:
         """

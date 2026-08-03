@@ -3,7 +3,7 @@ Targeted coverage tests for FileProcessor branches not hit end-to-end.
 
 These exercise the move-failure recording, dry-run reporting for each category,
 quarantine and unknown-file edge paths, the reserve/collision loops, the
-overlap guard, ``handle_missing_exif_files``, and ``clear_processing_state``.
+overlap guard, and ``clear_processing_state``.
 All filesystem work happens under ``tempfile.mkdtemp`` -- no real export/backup
 trees are ever created.
 """
@@ -427,62 +427,6 @@ class TestReserveDestinationCollision(unittest.TestCase):
         self.processor._discard_reservation(
             os.path.join(self.temp_dir, "never.jpg")
         )
-
-
-class TestHandleMissingExifFiles(unittest.TestCase):
-    """handle_missing_exif_files: empty, dry-run, real move, and failure."""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.export = os.path.join(self.temp_dir, "export")
-        self.backup = os.path.join(self.temp_dir, "backup")
-        os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
-
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_no_missing_files_returns_empty(self):
-        """With nothing flagged missing, nothing is moved."""
-        self.assertEqual(self.processor.handle_missing_exif_files(), [])
-
-    def test_missing_directory_path(self):
-        """The missing-EXIF directory is under backup/."""
-        self.assertEqual(
-            self.processor.get_missing_exif_directory(),
-            os.path.join(self.backup, "missing_exif"),
-        )
-
-    def test_dry_run_reports_without_moving(self):
-        """A dry run reports the intended move but leaves the file in place."""
-        bare = make_no_exif_jpeg(os.path.join(self.export, "bare.jpg"))
-        self.processor.exif_handler.missing_exif_files.append(bare)
-
-        moved = self.processor.handle_missing_exif_files(dry_run=True)
-
-        self.assertEqual(moved, [])
-        self.assertTrue(os.path.exists(bare))
-
-    def test_real_move_relocates_file(self):
-        """A real run moves each missing-EXIF file into the missing dir."""
-        bare = make_no_exif_jpeg(os.path.join(self.export, "bare.jpg"))
-        self.processor.exif_handler.missing_exif_files.append(bare)
-
-        moved = self.processor.handle_missing_exif_files(dry_run=False)
-
-        self.assertEqual(len(moved), 1)
-        self.assertFalse(os.path.exists(bare))
-        self.assertTrue(os.path.exists(moved[0]))
-
-    def test_move_failure_is_logged_not_raised(self):
-        """A move failure is swallowed (logged) and yields no moved entry."""
-        bare = make_no_exif_jpeg(os.path.join(self.export, "bare.jpg"))
-        self.processor.exif_handler.missing_exif_files.append(bare)
-
-        with patch("shutil.move", side_effect=OSError("busy")):
-            moved = self.processor.handle_missing_exif_files(dry_run=False)
-
-        self.assertEqual(moved, [])
 
 
 class TestClearProcessingState(unittest.TestCase):

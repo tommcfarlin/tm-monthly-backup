@@ -923,47 +923,6 @@ class FileProcessor:
             'missing_exif_list': missing_exif_files
         }
 
-    def get_missing_exif_directory(self) -> str:
-        """Get directory path for files with missing EXIF data"""
-        return os.path.join(self.backup_dir, "missing_exif")
-
-    def handle_missing_exif_files(self, dry_run: bool = False) -> List[str]:
-        """
-        Move files with missing EXIF data to special directory.
-
-        Args:
-            dry_run: If True, only show what would be done
-
-        Returns:
-            List of files moved to missing EXIF directory
-        """
-        missing_files = self.exif_handler.get_missing_exif_files()
-        if not missing_files:
-            return []
-
-        missing_dir = self.get_missing_exif_directory()
-        moved_files = []
-
-        if not dry_run:
-            os.makedirs(missing_dir, exist_ok=True)
-
-        for file_path in missing_files:
-            if os.path.exists(file_path):
-                filename = os.path.basename(file_path)
-                target_path = os.path.join(missing_dir, filename)
-
-                if dry_run:
-                    logger.info("[DRY RUN] Would move to missing EXIF dir: %s -> %s", file_path, target_path)
-                else:
-                    try:
-                        shutil.move(file_path, target_path)
-                        moved_files.append(target_path)
-                        logger.info("Moved to missing EXIF directory: %s -> %s", file_path, target_path)
-                    except Exception as e:
-                        logger.error("Failed to move missing EXIF file %s: %s", file_path, e)
-
-        return moved_files
-
     def clear_processing_state(self):
         """Clear all processing state for a fresh run"""
         self.processed_files.clear()
