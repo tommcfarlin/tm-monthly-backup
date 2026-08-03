@@ -2,6 +2,12 @@
 
 Solutions for common issues when using tm-monthly-backup.
 
+> **Invocation:** examples below use the installed `tm-monthly-backup` console
+> command (available after `pip install -e .`). If you have not installed the
+> package, substitute `python -m src.main` — run from the repository root — for
+> every `tm-monthly-backup` below. Running `python src/main.py` directly does not
+> work; the package uses absolute `src.…` imports.
+
 ## Quick Diagnostics
 
 Run these commands to quickly identify common issues:
@@ -12,8 +18,8 @@ python --version
 python -c "import click, PIL, rich; print('Dependencies OK')"
 
 # Test basic functionality
-python src/main.py --version
-python src/main.py --help
+tm-monthly-backup --version
+tm-monthly-backup --help
 
 # Run diagnostic test
 python tests/run_tests.py --unit-only -q
@@ -96,7 +102,7 @@ Error: Export directory does not exist: export
 mkdir -p export
 
 # Or specify custom directory
-python src/main.py --export-dir /path/to/your/icloud/export
+tm-monthly-backup --export-dir /path/to/your/icloud/export
 
 # Check current directory
 pwd
@@ -126,7 +132,7 @@ chmod -R 755 export/
 chmod -R 755 backup/
 
 # Run with sudo if necessary (not recommended)
-sudo python src/main.py
+sudo tm-monthly-backup
 
 # Better: Change ownership
 sudo chown -R $USER:$USER export/ backup/
@@ -156,7 +162,7 @@ pwd
 ls -la export/.*
 
 # Use correct export directory
-python src/main.py --export-dir /correct/path/to/icloud/export
+tm-monthly-backup --export-dir /correct/path/to/icloud/export
 ```
 
 ---
@@ -191,14 +197,18 @@ print(f'Image size: {img.size}')
 "
 ```
 
-**If file is corrupted:**
+**If file is corrupted:** an unconvertible HEIC is left in place in `export/`
+and recorded as a failure (the run does not delete an original it could not
+convert). Undecodable non-HEIC image files (a truncated `.jpg`, a mislabeled
+`.png`) are quarantined automatically to `backup/corrupt/` under their original
+name — no manual move needed. To set a problem HEIC aside and continue:
 ```bash
-# Move corrupted files to separate directory
+# Move the problem HEIC out of the export set
 mkdir -p corrupted_files
 mv export/problem_file.heic corrupted_files/
 
 # Continue processing other files
-python src/main.py
+tm-monthly-backup
 ```
 
 ---
@@ -251,7 +261,7 @@ print(cat._is_likely_screenshot('your_filename.png'))
 mv backup/photos/screenshot_file.png backup/screenshots/
 
 # Update screenshot patterns if needed
-# Edit src/file_categorizer.py, line ~95
+# Edit the pattern list in FileCategorizer._is_likely_screenshot (src/file_categorizer.py)
 ```
 
 ---
@@ -288,14 +298,14 @@ ls backup/photos/ | sort | uniq -d
 **Solution:**
 ```bash
 # Profile processing time
-time python src/main.py --dry-run
+time tm-monthly-backup --dry-run
 
 # Process in smaller batches
 mkdir temp_export
 mv export/*.heic temp_export/
-python src/main.py  # Process non-HEIC files first
+tm-monthly-backup  # Process non-HEIC files first
 mv temp_export/* export/
-python src/main.py  # Process HEIC files separately
+tm-monthly-backup  # Process HEIC files separately
 
 # Check available system resources
 df -h  # Disk space
@@ -324,11 +334,11 @@ rm -rf backup/unknown/*  # Remove unknown files if not needed
 rm -rf corrupted_files/   # Remove corrupted files
 
 # Use different backup location
-python src/main.py --backup-dir /path/to/larger/drive/backup
+tm-monthly-backup --backup-dir /path/to/larger/drive/backup
 
 # Process in smaller batches
 mkdir temp_backup
-python src/main.py --backup-dir temp_backup
+tm-monthly-backup --backup-dir temp_backup
 # Move temp_backup contents to final location
 ```
 
@@ -342,10 +352,10 @@ Enable detailed logging for complex issues:
 
 ```bash
 # Maximum verbosity
-python src/main.py --verbose
+tm-monthly-backup --verbose
 
 # Capture logs to file
-python src/main.py --verbose 2>&1 | tee processing.log
+tm-monthly-backup --verbose 2>&1 | tee processing.log
 
 # Review log file
 grep -i error processing.log
@@ -397,9 +407,13 @@ python tests/run_tests.py --integration-only
 
 | Exit Code | Meaning | Solution |
 |-----------|---------|----------|
-| `0` | Success | No action needed |
-| `1` | Some files failed | Review error messages, check file permissions |
-| `1` | Critical error | Check dependencies, directory permissions, disk space |
+| `0` | Success — every discovered file processed (also a dry run or empty export) | No action needed |
+| `1` | Partial failure — one or more files failed | Review the failure table, check file permissions |
+| `2` | Precondition failure — missing/unwritable directory, export/backup overlap, or unexpected error; nothing was processed | Check the directory paths, permissions, and disk space |
+| `130` | Cancelled — declined the confirmation prompt or interrupted with Ctrl-C (`SIGINT`) | Re-run when ready |
+
+See the [CLI Usage Guide](cli-usage.md#exit-codes) for the authoritative
+exit-code reference.
 
 ## Environment-Specific Issues
 
@@ -408,7 +422,7 @@ python tests/run_tests.py --integration-only
 **Issue: "Operation not permitted" on system directories**
 ```bash
 # Avoid processing system directories
-python src/main.py --export-dir ~/Downloads/icloud-export
+tm-monthly-backup --export-dir ~/Downloads/icloud-export
 
 # Grant full disk access in System Preferences if needed
 # System Preferences > Security & Privacy > Privacy > Full Disk Access
@@ -419,7 +433,7 @@ python src/main.py --export-dir ~/Downloads/icloud-export
 **Issue: Path length limitations**
 ```bash
 # Use shorter paths
-python src/main.py --export-dir C:\Export --backup-dir C:\Backup
+tm-monthly-backup --export-dir C:\Export --backup-dir C:\Backup
 
 # Enable long path support (Windows 10+)
 # Group Policy: Computer Configuration > Administrative Templates > System > Filesystem
@@ -449,8 +463,8 @@ uname -a  # Linux/macOS
 systeminfo | findstr /B /C:"OS Name" /C:"OS Version"  # Windows
 
 # Application information
-python src/main.py --version
-python src/main.py --help
+tm-monthly-backup --version
+tm-monthly-backup --help
 
 # Test results
 python tests/run_tests.py -q
@@ -462,7 +476,7 @@ Create detailed logs for issue reports:
 
 ```bash
 # Run with full logging
-python src/main.py --verbose --dry-run 2>&1 | tee debug.log
+tm-monthly-backup --verbose --dry-run 2>&1 | tee debug.log
 
 # Sanitize log file (remove personal paths)
 sed 's|/Users/[^/]*/|/Users/USER/|g' debug.log > sanitized_debug.log
@@ -478,7 +492,7 @@ Look for these patterns in logs:
 | `PermissionError` | Access denied | Check file permissions |
 | `OSError: [Errno 28]` | Disk full | Free up space |
 | `ImportError` | Missing dependency | Install required packages |
-| `PIL.UnidentifiedImageError` | Corrupted image | Skip or fix file |
+| `Not a decodable image` | Undecodable image-typed file | Auto-quarantined to `backup/corrupt/`; review or replace the source file |
 
 ## Prevention
 
@@ -486,7 +500,7 @@ Look for these patterns in logs:
 
 1. **Always run dry-run first**
    ```bash
-   python src/main.py --dry-run
+   tm-monthly-backup --dry-run
    ```
 
 2. **Keep backups of original exports**
@@ -499,7 +513,7 @@ Look for these patterns in logs:
    # Process a few files first
    mkdir test_export
    cp export/*.jpg test_export/  # Copy just JPG files
-   python src/main.py --export-dir test_export --backup-dir test_backup
+   tm-monthly-backup --export-dir test_export --backup-dir test_backup
    ```
 
 4. **Monitor disk space**

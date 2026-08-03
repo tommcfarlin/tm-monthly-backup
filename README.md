@@ -125,7 +125,7 @@ Identifies iOS and macOS screenshots:
 
 ## File Processing
 
-- **HEIC files**: Converted to JPEG (lossless) with EXIF preservation
+- **HEIC files**: Converted to high quality JPEG (q95, lossy) with EXIF preservation; the original HEIC is not retained
 - **Apple sidecar files (.aae)**: Deleted automatically
 - **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS)
 - **Video metadata**: Extracts creation timestamps from video file headers
