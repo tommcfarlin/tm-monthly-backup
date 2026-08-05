@@ -263,8 +263,8 @@ class TestKeepHeicVerifyStillRuns(unittest.TestCase):
         # bad conversion into a quiet success.
         self.assertGreaterEqual(summary["files_failed"], 1)
         self.assertTrue(
-            any(entry[1] == heic for entry in processor.failed_files),
-            f"failure for {heic} not recorded in {processor.failed_files}",
+            any(entry[1] == heic for entry in processor._failed_files),
+            f"failure for {heic} not recorded in {processor._failed_files}",
         )
         # Nothing landed in backup/photos.
         photos_dir = os.path.join(self.backup_dir, "photos")
