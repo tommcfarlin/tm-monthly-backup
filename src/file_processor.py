@@ -1034,8 +1034,19 @@ class FileProcessor:
                 })
         else:
             try:
-                # Ensure target directory exists before reserving within it.
-                os.makedirs(target_dir, exist_ok=True)
+                # No os.makedirs here (issue #23): target_dir is always one of
+                # the four directories process_all_files already created via
+                # ensure_target_directories(self.backup_dir) before this loop
+                # started -- every category reaching this branch is PHOTO,
+                # VIDEO, SCREENSHOT, or GENERATED (UNKNOWN returned above, at
+                # the top of this method). A per-file exist_ok=True call here
+                # was therefore always a no-op syscall repeated once per file
+                # instead of once per run. This is NOT the same situation as
+                # backup/unknown/ or backup/corrupt/ (_process_unknown_file,
+                # _quarantine_file), which are deliberately excluded from
+                # ensure_target_directories and created lazily on first use so
+                # they are never an empty phantom implying handling that never
+                # happened (issues #29, #58) -- those per-file calls stay.
 
                 # Atomically claim a free destination path, then move onto it.
                 adjusted_timestamp, target_path = self._reserve_destination(
