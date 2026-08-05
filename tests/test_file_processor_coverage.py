@@ -429,6 +429,55 @@ class TestReserveDestinationCollision(unittest.TestCase):
         )
 
 
+class TestGenerateSummaryIndependence(unittest.TestCase):
+    """``_generate_summary``'s returned lists are independent snapshots (#37).
+
+    Pins acceptance criterion 3 of issue #37: a caller that mutates
+    ``processed_files`` / ``failed_files`` / ``conversion_log`` from a summary
+    dict must not affect the processor's own tracked state, nor should a
+    later mutation of the processor's internal lists reach back into an
+    already-returned summary.
+    """
+
+    def test_returned_lists_do_not_alias_internal_state(self):
+        processor = FileProcessor("export", "backup")
+        processor.processed_files.append({"path": "a.jpg"})
+        processor.failed_files.append(("move_file", "b.jpg", "boom"))
+        processor.conversion_log.append(("c.heic", "c.jpg"))
+
+        summary = processor._generate_summary()
+
+        self.assertIsNot(summary['processed_files'], processor.processed_files)
+        self.assertIsNot(summary['failed_files'], processor.failed_files)
+        self.assertIsNot(summary['conversion_log'], processor.conversion_log)
+
+        # Caller mutates what it received back.
+        summary['processed_files'].clear()
+        summary['failed_files'].append(("extra", "x.jpg", "not real"))
+        summary['conversion_log'].clear()
+
+        # The processor's own tracked state must be untouched.
+        self.assertEqual(processor.processed_files, [{"path": "a.jpg"}])
+        self.assertEqual(processor.failed_files, [("move_file", "b.jpg", "boom")])
+        self.assertEqual(processor.conversion_log, [("c.heic", "c.jpg")])
+
+    def test_later_internal_mutation_does_not_reach_earlier_summary(self):
+        processor = FileProcessor("export", "backup")
+        processor.processed_files.append({"path": "a.jpg"})
+
+        first_summary = processor._generate_summary()
+
+        # Simulate a later run appending more processed files on the SAME
+        # processor instance (no full clear_processing_state in between).
+        processor.processed_files.append({"path": "b.jpg"})
+
+        self.assertEqual(
+            first_summary['processed_files'], [{"path": "a.jpg"}],
+            "a later mutation of processor.processed_files leaked into an "
+            "already-returned summary",
+        )
+
+
 class TestClearProcessingState(unittest.TestCase):
     """clear_processing_state resets every tracked collection."""
 

@@ -221,6 +221,74 @@ class TestFileCategorizer(unittest.TestCase):
         self.assertEqual(len(result[FileCategory.PHOTO]), 1)
         self.assertIn("existing_photo.jpg", result[FileCategory.PHOTO])
 
+    def test_batch_categorize_result_survives_second_call(self):
+        """A dict returned by batch_categorize is unaffected by a later call (#37).
+
+        ``batch_categorize`` used to return ``self.categorized_files.copy()``:
+        a shallow copy whose *values* were still the exact list objects the
+        categorizer mutates in place. The very next call cleared those same
+        lists via ``list.clear()``, so a caller's supposedly-independent
+        snapshot silently emptied itself. Capturing the photo/video lists,
+        running a second, unrelated ``batch_categorize`` on the same instance,
+        and then re-checking the first result pins the fix: the first result
+        must still show its original files.
+        """
+        photo = self.create_test_file("photo.jpg")
+        video = self.create_test_file("video.mov")
+
+        first = self.categorizer.batch_categorize([photo, video])
+        self.assertEqual(first[FileCategory.PHOTO], [photo])
+        self.assertEqual(first[FileCategory.VIDEO], [video])
+
+        # A second, unrelated categorization on the SAME categorizer instance.
+        other = self.create_test_file("other_photo.jpg")
+        self.categorizer.batch_categorize([other])
+
+        # The first caller's dict -- and its per-category lists -- must be
+        # completely unaffected by the second call.
+        self.assertEqual(
+            first[FileCategory.PHOTO], [photo],
+            "the first result's PHOTO list was mutated by a later batch_categorize call",
+        )
+        self.assertEqual(
+            first[FileCategory.VIDEO], [video],
+            "the first result's VIDEO list was silently emptied by a later call",
+        )
+
+    def test_batch_categorize_caller_mutation_does_not_affect_categorizer(self):
+        """Mutating the returned dict/lists must not corrupt internal state (#37).
+
+        The inverse direction of the aliasing bug: a caller that appends to or
+        clears a list it received back from ``batch_categorize`` must not
+        change what the categorizer itself reports afterward via
+        ``get_categorization_stats`` / ``get_file_summary``.
+        """
+        photo = self.create_test_file("photo.jpg")
+        video = self.create_test_file("video.mov")
+
+        result = self.categorizer.batch_categorize([photo, video])
+
+        # Caller mutates its own copy: clears one list, appends to another.
+        result[FileCategory.VIDEO].clear()
+        result[FileCategory.PHOTO].append("/not/a/real/file.jpg")
+
+        stats = self.categorizer.get_categorization_stats()
+        self.assertEqual(stats['photos'], 1, "caller mutation leaked into categorization stats")
+        self.assertEqual(stats['videos'], 1, "caller mutation leaked into categorization stats")
+
+    def test_batch_categorize_lists_are_not_internal_state(self):
+        """No per-category list in the returned dict is the internal list object."""
+        photo = self.create_test_file("photo.jpg")
+
+        result = self.categorizer.batch_categorize([photo])
+
+        for category in FileCategory:
+            self.assertIsNot(
+                result[category],
+                self.categorizer.categorized_files[category],
+                f"{category} list in the returned dict aliases internal state",
+            )
+
     def test_get_files_by_category(self):
         """Test retrieving files by specific category"""
         # Add some test files to categories
@@ -381,6 +449,33 @@ class TestFileCategorizer(unittest.TestCase):
         # All categories should be empty
         for category in FileCategory:
             self.assertEqual(len(self.categorizer.categorized_files[category]), 0)
+
+    def test_categorization_results_order_independent(self):
+        """Stats/summary are consistent no matter the order accessors run in (#37).
+
+        ``get_categorization_stats`` and ``get_file_summary`` both read
+        ``self.categorized_files`` fresh each call, and ``batch_categorize`` no
+        longer hands out an aliased snapshot for a caller to accidentally
+        corrupt in between. Interleaving the three calls in different orders
+        must produce identical, correct results either way.
+        """
+        photo = self.create_test_file("photo.jpg")
+        video = self.create_test_file("video.mov")
+
+        # Order A: categorize, then stats, then summary.
+        self.categorizer.batch_categorize([photo, video])
+        stats_a = self.categorizer.get_categorization_stats()
+        summary_a = self.categorizer.get_file_summary()
+
+        # Order B: categorize (again, same instance), then summary, then stats.
+        self.categorizer.batch_categorize([photo, video])
+        summary_b = self.categorizer.get_file_summary()
+        stats_b = self.categorizer.get_categorization_stats()
+
+        self.assertEqual(stats_a, stats_b)
+        self.assertEqual(summary_a, summary_b)
+        self.assertEqual(stats_a['photos'], 1)
+        self.assertEqual(stats_a['videos'], 1)
 
     def test_extension_case_insensitivity(self):
         """Test that file extension matching is case insensitive"""

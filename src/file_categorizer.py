@@ -367,7 +367,14 @@ class FileCategorizer:
             file_paths: List of file paths to categorize
 
         Returns:
-            Dictionary mapping categories to lists of file paths
+            A dictionary mapping categories to lists of file paths. This is an
+            independent snapshot: neither the returned dict nor any of its
+            list values alias ``self.categorized_files``, so a subsequent call
+            to ``batch_categorize`` (which clears and refills the internal
+            lists) or a caller mutating the returned lists cannot affect the
+            other (issue #37). ``dict.copy()`` alone is insufficient here --
+            it is shallow, so its values would still be the same list objects
+            this method clears on its next invocation.
         """
         # Clear previous categorization
         for category in self.categorized_files:
@@ -381,7 +388,10 @@ class FileCategorizer:
             category = self.categorize_file(file_path)
             self.categorized_files[category].append(file_path)
 
-        return self.categorized_files.copy()
+        return {
+            category: files.copy()
+            for category, files in self.categorized_files.items()
+        }
 
     def get_files_by_category(self, category: FileCategory) -> List[str]:
         """
