@@ -47,6 +47,7 @@ tm-monthly-backup --verbose
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--dry-run` | | Preview operations without making changes | `False` |
+| `--yes` | `-y` | Assume yes for all prompts (required for non-interactive use) | `False` |
 | `--verbose` | `-v` | Enable detailed logging output | `False` |
 | `--help` | | Show help message and exit | |
 | `--version` | | Show version information | |
@@ -104,6 +105,50 @@ A dry run predicts the exact plan a real run would execute — the same
 destination path (including the `.jpg` extension a HEIC lands as), the same
 timestamp-collision bumps, the same quarantine and unknown-file decisions —
 without moving, converting, or deleting anything.
+
+### Non-Interactive / Automated Use
+
+Two confirmation prompts require a terminal: "Continue anyway?" (empty
+`export/`) and "Proceed with processing N files?" (every real run). Without a
+terminal — cron, CI, `nohup`, a piped invocation — reading either prompt raises
+an immediate, unhelpful `EOFError`. Pass `--yes` to skip both prompts and
+proceed as though they were accepted:
+
+```bash
+# Run unattended -- no prompts, ever
+tm-monthly-backup --yes
+
+# A monthly automated backup on the 1st of each month at 2 AM (crontab)
+0 2 1 * * /path/to/venv/bin/tm-monthly-backup --export-dir /path/to/export --backup-dir /path/to/backup --yes >> /var/log/tm-monthly-backup.log 2>&1
+```
+
+`--dry-run` never prompts either way, with or without `--yes` — it makes no
+change that needs confirming, so it is always safe to run unattended
+(`tm-monthly-backup --dry-run` alone is enough for a scheduled preview run).
+
+Running without a terminal and without `--yes` or `--dry-run` fails fast with
+an actionable message instead of the raw `EOFError`:
+
+```
+Error: No terminal available for confirmation. Re-run with --yes or --dry-run.
+```
+
+This check runs before anything is scanned, so it cannot know in advance
+whether a prompt would actually have been reached — it requires `--yes` (or
+`--dry-run`) for *any* non-interactive invocation, unconditionally. **This is
+a behavior change worth knowing about if you already have a cron job
+running**: previously, a run over an `export/` directory that was not
+technically empty (e.g. it contained only a stray subdirectory, with no files
+anywhere inside it) never hit either prompt at all — the empty-directory check
+only looks at the top level, and the scan finding zero files further down
+short-circuits to a clean, silent success. That invocation exited `0` with no
+prompt before this flag existed; without `--yes` it now exits `2` with the
+message above, since the tool cannot tell the two cases apart without a
+terminal to ask from. Adding `--yes` to an existing scheduled job (as shown
+above) restores the old behavior for that case and every other one.
+
+This exits with the precondition code (`2`, see Exit Codes below) before
+anything is scanned, categorized, or touched.
 
 ### Custom Directories
 
@@ -439,7 +484,7 @@ Each code carries exactly one meaning:
 |------|---------|-------------|
 | `0` | Success | Every discovered file was processed; zero failures (also returned for a dry run and for an empty export directory) |
 | `1` | Partial failure | Processing ran but one or more files failed; the failures are listed in the summary |
-| `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, or an unexpected error. Nothing was processed |
+| `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, no terminal available for confirmation without `--yes`/`--dry-run`, or an unexpected error. Nothing was processed |
 | `130` | Cancelled | The user declined the confirmation prompt or interrupted the run with `SIGINT` (Ctrl-C); follows the POSIX `128 + signal` convention |
 
 A `0` means the run is done and no file was left behind, so a script can safely

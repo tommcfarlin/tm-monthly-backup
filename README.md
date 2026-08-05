@@ -14,6 +14,7 @@ A robust Python CLI utility for automating monthly photo organization from Apple
 - **Duplicate Handling**: Intelligently resolves timestamp conflicts
 - **Rich CLI Experience**: Beautiful progress bars, colored output, and detailed summaries
 - **Dry-Run Mode**: Safe testing without file modifications
+- **Non-Interactive Mode**: `--yes` skips confirmation prompts for cron/CI/automated use
 - **Comprehensive Logging**: Detailed error handling and processing reports
 
 ## Requirements
@@ -72,6 +73,9 @@ python -m src.main --dry-run
 
 # Process files with progress display
 python -m src.main
+
+# Non-interactive (cron/CI/automated) -- skips confirmation prompts
+python -m src.main --yes
 
 # Verbose output for debugging
 python -m src.main --verbose

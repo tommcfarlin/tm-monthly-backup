@@ -409,7 +409,7 @@ python tests/run_tests.py --integration-only
 |-----------|---------|----------|
 | `0` | Success — every discovered file processed (also a dry run or empty export) | No action needed |
 | `1` | Partial failure — one or more files failed | Review the failure table, check file permissions |
-| `2` | Precondition failure — missing/unwritable directory, export/backup overlap, or unexpected error; nothing was processed | Check the directory paths, permissions, and disk space |
+| `2` | Precondition failure — missing/unwritable directory, export/backup overlap, no terminal available for confirmation without `--yes`/`--dry-run`, or unexpected error; nothing was processed | Check the directory paths, permissions, and disk space; add `--yes` for non-interactive/cron use |
 | `130` | Cancelled — declined the confirmation prompt or interrupted with Ctrl-C (`SIGINT`) | Re-run when ready |
 
 See the [CLI Usage Guide](cli-usage.md#exit-codes) for the authoritative
