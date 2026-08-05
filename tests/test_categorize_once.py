@@ -56,7 +56,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 from src.cli_interface import CLIInterface
-from tests.fixtures import make_exif_jpeg, make_png_with_text
+from tests.fixtures import make_exif_jpeg, make_png_with_text, write_quicktime_mov
 
 
 def _recording_cli(export_dir, backup_dir):
@@ -178,8 +178,16 @@ class TestCategorizeFileCalledOncePerScannedFile(unittest.TestCase):
             os.path.join(self.export, "photo.jpg"),
             date_time_original="2024:01:15 14:30:45",
         )
-        video = os.path.join(self.export, "clip.mov")
-        open(video, "wb").close()
+        # A zero-byte .mov makes hachoir's createParser raise inside
+        # ExifHandler._extract_video_timestamp_hachoir, and the file handle it
+        # opened leaks on that path (a genuine pre-existing defect, tracked
+        # separately -- not this issue's to fix). A real minimal QuickTime
+        # fixture avoids exercising that leak here so this test's output
+        # stays pristine.
+        video = write_quicktime_mov(
+            os.path.join(self.export, "clip.mov"),
+            "2024-03-17T09:00:00-0400",
+        )
         screenshot = os.path.join(self.export, "Screenshot 2024.png")
         open(screenshot, "wb").close()
         unknown = os.path.join(self.export, "notes.xyz")
