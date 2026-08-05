@@ -7,8 +7,10 @@ import re
 import uuid
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
+
+from .exif_handler import ifd0_tag_names, merge_exif_ifds
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,32 @@ class FileCategory(Enum):
     GENERATED = "generated"  # AI-generated or heavily edited content
     UNKNOWN = "unknown"
     SIDECAR = "sidecar"
+
+
+class ImageMetadata(NamedTuple):
+    """
+    Per-file image metadata, read once via a single ``Image.open`` (issue #24).
+
+    ``FileCategorizer._is_generated_content`` and
+    ``ExifHandler.extract_timestamp`` used to each open the same file
+    independently within a single processing pass -- doubling Pillow's open
+    cost per image (worst for HEIC, where every open is a full libheif
+    decode). This record is built once, while :meth:`FileCategorizer.
+    categorize_file` decides the file's category, cached on the categorizer
+    for the rest of the run, and handed forward to ``extract_timestamp`` so
+    neither has to reopen the file.
+
+    Attributes:
+        exif: IFD0 and the Exif sub-IFD merged into one tag-name -> value
+            mapping (see ``exif_handler.merge_exif_ifds``).
+        png_info: The ``Image.info`` dict captured at open time -- the PNG
+            text/provenance chunks written before IDAT (issue #44), among
+            whatever other ancillary chunks Pillow parses before pixel data.
+        category: The :class:`FileCategory` this file resolved to.
+    """
+    exif: Dict[str, Any]
+    png_info: Dict[str, Any]
+    category: FileCategory
 
 
 class FileCategorizer:
@@ -45,11 +73,6 @@ class FileCategorizer:
     SIDECAR_EXTENSIONS = {
         '.aae'  # Apple's sidecar files
     }
-
-    # Pointer tag to the Exif sub-IFD. DateTimeOriginal (0x9003) and
-    # DateTimeDigitized (0x9004) live behind this pointer, not in IFD0, and are
-    # invisible to Image.getexif() at the top level (issue #25).
-    EXIF_IFD = 0x8769
 
     # PNG text-chunk KEYS whose mere presence is itself provenance. C2PA writes
     # its manifest under a 'c2pa' key; Stable Diffusion / AUTOMATIC1111 write the
@@ -101,6 +124,15 @@ class FileCategorizer:
         self.screenshot_exts = {ext.lower() for ext in self.SCREENSHOT_EXTENSIONS}
         self.sidecar_exts = {ext.lower() for ext in self.SIDECAR_EXTENSIONS}
 
+        # Per-file EXIF + PNG-text metadata, read once per photo/screenshot-
+        # extension file inside categorize_file and handed forward to
+        # ExifHandler.extract_timestamp (issue #24) so the same file is not
+        # opened by Pillow a second time just to read its header. Lifetime is
+        # exactly one categorization pass: cleared at the top of every
+        # batch_categorize call and by clear_categorization, so it never
+        # outlives -- or is silently reused across -- a run.
+        self.image_metadata: Dict[str, ImageMetadata] = {}
+
     def categorize_file(self, file_path: str) -> FileCategory:
         """
         Categorize a single file based on extension and filename patterns.
@@ -124,18 +156,13 @@ class FileCategorizer:
             # Additional heuristics for screenshot detection
             if self._is_likely_screenshot(filename):
                 return FileCategory.SCREENSHOT
-            # Check if it's AI-generated or heavily edited content
-            if self._is_generated_content(file_path):
-                return FileCategory.GENERATED
-            # If PNG but not clearly a screenshot, treat as photo
-            return FileCategory.PHOTO
+            # If PNG but not clearly a screenshot, treat as photo unless it's
+            # AI-generated or heavily edited content.
+            return self._categorize_image_or_generated(file_path)
 
         # Check for photos
         if ext in self.photo_exts:
-            # Check if it's AI-generated or heavily edited content
-            if self._is_generated_content(file_path):
-                return FileCategory.GENERATED
-            return FileCategory.PHOTO
+            return self._categorize_image_or_generated(file_path)
 
         # Check for videos
         if ext in self.video_exts:
@@ -144,6 +171,121 @@ class FileCategorizer:
         # Unknown file type
         logger.warning("Unknown file type: %s", file_path)
         return FileCategory.UNKNOWN
+
+    def _categorize_image_or_generated(self, file_path: str) -> FileCategory:
+        """
+        Resolve a photo/screenshot-extension file to PHOTO or GENERATED.
+
+        Reads the file's EXIF + PNG-text metadata exactly once via
+        :meth:`_read_image_metadata` (issue #24), hands it to
+        :meth:`_is_generated_content` (which performs no I/O of its own), and
+        caches the result on :attr:`image_metadata` so
+        ``ExifHandler.extract_timestamp`` can reuse it later in the same run
+        instead of reopening the file.
+
+        Args:
+            file_path: Path to the candidate photo/screenshot file.
+
+        Returns:
+            FileCategory.GENERATED or FileCategory.PHOTO.
+        """
+        metadata = self._read_image_metadata(file_path)
+        if metadata is None:
+            # Unreadable as an image (corrupt, zero-byte, or a format Pillow
+            # has no codec for, e.g. RAW) -- nothing to cache, and nothing to
+            # flag as generated. Mirrors _is_generated_content's previous
+            # try/except-swallows-and-returns-False behavior.
+            return FileCategory.PHOTO
+
+        exif, ifd0, png_info = metadata
+        category = (
+            FileCategory.GENERATED
+            if self._is_generated_content(file_path, exif, ifd0, png_info)
+            else FileCategory.PHOTO
+        )
+        self.image_metadata[file_path] = ImageMetadata(
+            exif=exif, png_info=png_info, category=category
+        )
+        return category
+
+    def _read_image_metadata(
+        self, file_path: str
+    ) -> Optional[Tuple[dict, dict, dict]]:
+        """
+        Open ``file_path`` once and capture its EXIF + PNG-text metadata.
+
+        This is the single ``Image.open`` for the whole categorize-then-
+        timestamp pass (issue #24): it reads only what Pillow already parses
+        while opening the file -- ``image.getexif()`` and ``image.info`` --
+        and never calls ``load()``, so it forces no pixel decode. The
+        separate, deliberate full-decode gate FileProcessor runs before
+        trusting an undecodable-image-typed file (issue #58) is untouched by
+        this change and still performs its own decode later, exactly once.
+
+        Returns BOTH an IFD0-only view and the merged (IFD0 + Exif sub-IFD)
+        view of the same already-read ``Image.Exif`` object -- no extra I/O,
+        since it is the identical in-memory object read twice with different
+        tag-name resolution. This is fix-round-1 finding 1 (issue #24 review):
+        the merged view must never feed the ``Software`` editing-detection
+        heuristic (see :func:`exif_handler.merge_exif_ifds`'s docstring), only
+        the capture-timestamp checks issue #25 actually intends to span both
+        IFDs.
+
+        ``png_info`` is captured only for ``.png`` files (the only extension
+        :meth:`_is_generated_content` ever consults it for) and filtered to
+        ``str``-valued entries -- the only entries
+        :meth:`_png_info_has_ai_provenance` ever examines -- to avoid
+        retaining large binary ancillary chunks (``icc_profile``, raw
+        ``exif`` bytes, etc.) that are never read (fix-round-1 finding 5).
+
+        Args:
+            file_path: Path to the candidate image file.
+
+        Returns:
+            ``(exif, ifd0, png_info)`` on success, or ``None`` if the file
+            cannot be opened as an image at all (corrupt, zero-byte, or a
+            format Pillow has no codec for -- e.g. RAW).
+        """
+        from PIL import Image
+
+        try:
+            with Image.open(file_path) as img:
+                if file_path.lower().endswith('.png'):
+                    png_info = {
+                        key: value
+                        for key, value in (getattr(img, 'info', None) or {}).items()
+                        if isinstance(value, str)
+                    }
+                else:
+                    png_info = {}
+                raw_exif = img.getexif()
+                ifd0 = ifd0_tag_names(raw_exif)
+                exif = merge_exif_ifds(raw_exif, file_path)
+        except Exception as e:
+            logger.debug("Error reading image metadata for %s: %s", file_path, e)
+            return None
+
+        return exif, ifd0, png_info
+
+    def get_image_metadata(self, file_path: str) -> Optional[ImageMetadata]:
+        """
+        Return the cached :class:`ImageMetadata` for ``file_path``, if any.
+
+        Populated by :meth:`categorize_file` for every photo/screenshot-
+        extension file it successfully opened during the current
+        categorization pass (issue #24). ``FileProcessor`` uses this to hand
+        ``ExifHandler.extract_timestamp`` the already-read EXIF instead of
+        reopening the file. Returns ``None`` for any file ``categorize_file``
+        never opened (video, unknown, sidecar) or could not open
+        (corrupt/undecodable-by-Pillow).
+
+        Args:
+            file_path: The path passed to categorize_file.
+
+        Returns:
+            The cached ImageMetadata, or None if there isn't one.
+        """
+        return self.image_metadata.get(file_path)
 
     def _is_likely_screenshot(self, filename: str) -> bool:
         """
@@ -173,44 +315,60 @@ class FileCategorizer:
 
         return any(pattern in filename for pattern in screenshot_patterns)
 
-    def _is_generated_content(self, file_path: str) -> bool:
+    def _is_generated_content(
+        self,
+        file_path: str,
+        exif: Dict[str, Any],
+        ifd0: Dict[str, Any],
+        png_info: Dict[str, Any],
+    ) -> bool:
         """
-        Detect AI-generated or heavily edited content using pure Python.
+        Detect AI-generated or heavily edited content from pre-read metadata.
+
+        Performs no I/O of its own (issue #24): ``exif``, ``ifd0``, and
+        ``png_info`` are read once by the caller (:meth:`_read_image_metadata`)
+        rather than this method opening ``file_path`` itself, which --
+        combined with ``ExifHandler.extract_timestamp``'s own open later in
+        the same pass -- used to open every candidate image file twice just
+        for metadata.
 
         Detection is deliberately precise rather than broad (issue #8): PNG
         provenance is matched against identifiable text-chunk keys and
         word-boundary tool markers, EXIF editing software is only treated as
-        generated when a genuine capture timestamp is absent, and UUID-style
-        stems are validated by parsing rather than by counting characters.
+        generated when a genuine capture timestamp is absent (and that
+        software check is scoped to IFD0 only -- fix-round-1 finding 1, see
+        ``_exif_shows_synthetic_edit``), and UUID-style stems are validated
+        by parsing rather than by counting characters.
 
         Args:
-            file_path: Path to file
+            file_path: Path to file (used only for its suffix and stem --
+                neither touches the filesystem).
+            exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
+                :func:`exif_handler.merge_exif_ifds`), used only for the
+                capture-timestamp check.
+            ifd0: IFD0-only tag-name -> value mapping (see
+                :func:`exif_handler.ifd0_tag_names`), used only for the
+                ``Software`` check.
+            png_info: The PNG's ``Image.info`` dict (irrelevant for non-PNG).
 
         Returns:
             True if file appears to be AI-generated or heavily edited
         """
-        try:
-            from PIL import Image
+        # Check for C2PA/AI provenance in PNG text chunks.
+        if file_path.lower().endswith('.png'):
+            if self._png_info_has_ai_provenance(png_info):
+                logger.info("Detected AI-generated content: %s", file_path)
+                return True
 
-            with Image.open(file_path) as img:
-                # Check for C2PA/AI provenance in PNG text chunks.
-                if file_path.lower().endswith('.png'):
-                    if self._png_text_has_ai_provenance(img):
-                        logger.info("Detected AI-generated content: %s", file_path)
-                        return True
+        # Editing software present with no genuine capture timestamp.
+        if self._exif_shows_synthetic_edit(exif, ifd0):
+            logger.info("Detected heavily edited content: %s", file_path)
+            return True
 
-                # Editing software present with no genuine capture timestamp.
-                if self._exif_shows_synthetic_edit(img):
-                    logger.info("Detected heavily edited content: %s", file_path)
-                    return True
-
-                # UUID-style stems are a common convention for generated output.
-                if self._has_uuid_stem(file_path):
-                    logger.info("Detected UUID filename (likely generated): %s", file_path)
-                    return True
-
-        except Exception as e:
-            logger.debug("Error checking generated content for %s: %s", file_path, e)
+        # UUID-style stems are a common convention for generated output.
+        if self._has_uuid_stem(file_path):
+            logger.info("Detected UUID filename (likely generated): %s", file_path)
+            return True
 
         return False
 
@@ -257,6 +415,25 @@ class FileCategorizer:
             True if any text chunk indicates AI-generated provenance.
         """
         png_info = getattr(img, 'info', None)
+        return self._png_info_has_ai_provenance(png_info)
+
+    def _png_info_has_ai_provenance(self, png_info: Optional[Dict[str, Any]]) -> bool:
+        """
+        Report whether a PNG-info-shaped mapping carries AI/C2PA provenance.
+
+        The no-I/O core of :meth:`_png_text_has_ai_provenance` (issue #24):
+        operates directly on an already-read ``img.info``-shaped mapping so
+        :meth:`_is_generated_content` can call it with
+        :class:`FileCategorizer`'s once-per-file cached ``png_info`` instead
+        of a live ``Image``. See that method's docstring for why ``img.info``
+        (rather than ``img.text``) is the right thing to read (issue #44).
+
+        Args:
+            png_info: A mapping shaped like PIL's ``Image.info`` (or falsy).
+
+        Returns:
+            True if any entry indicates AI-generated provenance.
+        """
         if not png_info:
             return False
 
@@ -268,72 +445,68 @@ class FileCategorizer:
 
         return False
 
-    def _exif_shows_synthetic_edit(self, img) -> bool:
+    def _exif_shows_synthetic_edit(
+        self, exif: Dict[str, Any], ifd0: Dict[str, Any]
+    ) -> bool:
         """
         Report whether EXIF signals a synthetic edit (software, no capture time).
 
         Editing software alone does not condemn an image: a real photo retouched
         in Lightroom keeps its ``DateTimeOriginal``. The signal is editing
         software *combined with* the absence of any genuine capture timestamp,
-        which fits a graphic composed in software rather than captured. Since
-        issue #25, ``DateTimeOriginal`` / ``DateTimeDigitized`` are read from the
-        Exif sub-IFD as well as IFD0; reading only IFD0 (as this branch used to)
-        never found them, so the AND condition silently collapsed into "any
-        edited image", misfiling genuinely edited photos. Reading the sub-IFD
-        here restores the intended behavior.
+        which fits a graphic composed in software rather than captured.
+
+        The ``Software`` check below reads ``ifd0`` -- the IFD0-only view --
+        NOT the merged ``exif`` view, and this is deliberate (fix-round-1,
+        issue #24 review, finding 1 -- CRITICAL). Before this fix,
+        ``exif.get('Software')`` read the merged IFD0 + Exif sub-IFD view, so
+        a ``Software`` tag written ONLY in the sub-IFD (which some EXIF
+        writers do) flipped an ordinary, unedited photo to ``GENERATED`` --
+        strictly widening issue #8's detection surface beyond anything the
+        pre-#24 code (which read only ``img.getexif()``, i.e. IFD0) ever
+        matched. The capture-timestamp check on the next line is the one
+        part of this method issue #25 *does* intend to span both IFDs
+        (``DateTimeOriginal``/``DateTimeDigitized`` live in the sub-IFD), so
+        it still takes the merged ``exif`` view.
 
         Args:
-            img: An open :class:`PIL.Image.Image`.
+            exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
+                :func:`exif_handler.merge_exif_ifds`) -- used only for the
+                capture-timestamp check.
+            ifd0: IFD0-only tag-name -> value mapping (see
+                :func:`exif_handler.ifd0_tag_names`) -- used only for the
+                ``Software`` check.
 
         Returns:
             True if editing software is present and no capture timestamp exists.
         """
-        exif = img.getexif()
-        if not exif:
+        if not ifd0:
             return False
 
-        from PIL.ExifTags import TAGS
-
-        has_editing_software = any(
-            TAGS.get(tag_id, str(tag_id)) == 'Software'
-            and any(editor in str(value).lower() for editor in self.EDITING_SOFTWARE)
-            for tag_id, value in exif.items()
-        )
+        software = str(ifd0.get('Software', '')).lower()
+        has_editing_software = any(editor in software for editor in self.EDITING_SOFTWARE)
         if not has_editing_software:
             return False
 
         return not self._has_original_timestamp(exif)
 
-    def _has_original_timestamp(self, exif) -> bool:
+    def _has_original_timestamp(self, exif: Dict[str, Any]) -> bool:
         """
-        Report whether a genuine capture timestamp exists in IFD0 or the sub-IFD.
+        Report whether a genuine capture timestamp exists in the merged EXIF.
 
         ``DateTimeOriginal`` (0x9003) and ``DateTimeDigitized`` (0x9004) live in
         the Exif sub-IFD behind pointer tag ``0x8769``, which ``Image.getexif()``
-        does not expose at the top level (issue #25). Both directories are
-        checked so a real photo's capture time is actually found.
+        does not expose at the top level (issue #25). Since issue #24, ``exif``
+        is already the merged tag-name view that includes it (see
+        :func:`exif_handler.merge_exif_ifds`), so this is a plain key lookup.
 
         Args:
-            exif: The :class:`PIL.Image.Exif` object from ``Image.getexif()``.
+            exif: Merged tag-name -> value mapping.
 
         Returns:
             True if an original/digitized capture timestamp is present.
         """
-        from PIL.ExifTags import TAGS
-
-        capture_tags = {'DateTimeOriginal', 'DateTimeDigitized'}
-
-        if any(TAGS.get(tag_id, str(tag_id)) in capture_tags for tag_id in exif):
-            return True
-
-        # get_ifd returns {} when the sub-IFD is absent; the guard also covers
-        # exif doubles lacking the API and malformed pointers that raise.
-        try:
-            sub_ifd = exif.get_ifd(self.EXIF_IFD)
-        except (AttributeError, KeyError, OSError, ValueError):
-            sub_ifd = {}
-
-        return any(TAGS.get(tag_id, str(tag_id)) in capture_tags for tag_id in sub_ifd)
+        return 'DateTimeOriginal' in exif or 'DateTimeDigitized' in exif
 
     @staticmethod
     def _has_uuid_stem(file_path: str) -> bool:
@@ -376,9 +549,13 @@ class FileCategorizer:
             it is shallow, so its values would still be the same list objects
             this method clears on its next invocation.
         """
-        # Clear previous categorization
+        # Clear previous categorization. image_metadata is cleared alongside
+        # categorized_files (issue #24) so the per-file cache's lifetime is
+        # unambiguously "one batch_categorize call" and never accumulates
+        # stale entries across repeated calls on a reused FileCategorizer.
         for category in self.categorized_files:
             self.categorized_files[category].clear()
+        self.image_metadata.clear()
 
         for file_path in file_paths:
             if not os.path.exists(file_path):
@@ -526,3 +703,4 @@ class FileCategorizer:
         """Clear all categorized files"""
         for category in self.categorized_files:
             self.categorized_files[category].clear()
+        self.image_metadata.clear()
