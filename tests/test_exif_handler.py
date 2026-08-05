@@ -483,7 +483,12 @@ class TestVideoTimestampExtraction(unittest.TestCase):
         expected = datetime(2024, 1, 15, 14, 30, 45)
 
         class FakeMetadata:
-            creation_date = expected
+            """Mimics hachoir's real ``get(key)`` API, not an attribute probe."""
+
+            def get(self, key, default=None, index=0):
+                if key == 'creation_date':
+                    return expected
+                return default
 
         mock_create_parser.return_value = MagicMock()  # truthy context manager
         mock_extract_metadata.return_value = FakeMetadata()

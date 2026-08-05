@@ -21,6 +21,7 @@ from src.exif_handler import (
     ExifHandler,
     QUICKTIME_CREATIONDATE_KEY,
     _creationdate_key_index,
+    _hachoir_creation_date,
     _ilst_string_value,
     _iter_boxes,
     _meta_children_start,
@@ -33,6 +34,66 @@ from tests.fixtures import quicktime_creationdate_moov, write_quicktime_mov
 def _box(box_type: bytes, payload: bytes) -> bytes:
     """Wrap payload in a 32-bit ISO base-media box header."""
     return struct.pack(">I", 8 + len(payload)) + box_type + payload
+
+
+def _mvhd_only_moov(creation_1904: int) -> bytes:
+    """
+    Build a real, minimal ``moov`` payload containing only a v0 ``mvhd`` box.
+
+    hachoir's MP4 parser reads ``creation_time`` (seconds since 1904-01-01
+    UTC) straight out of this box, giving a genuinely hachoir-populated
+    ``creation_date`` field with no Apple ``meta``/``keys``/``ilst`` atoms
+    involved at all -- this exercises hachoir's OWN fast path, not issue #28's
+    Apple-key path.
+    """
+    mvhd_payload = (
+        struct.pack(">I", 0)                    # version + flags
+        + struct.pack(">I", creation_1904)      # creation_time
+        + struct.pack(">I", creation_1904)      # modification_time
+        + struct.pack(">I", 1000)               # timescale
+        + struct.pack(">I", 1000)               # duration (== 1 second)
+        + b"\x00" * 80                          # rate/volume/matrix/next_id
+    )
+    return _box(b"mvhd", mvhd_payload)
+
+
+def _tkhd_only_moov() -> bytes:
+    """
+    Build a real, minimal ``moov`` payload containing a ``trak``/``tkhd`` only.
+
+    A track header carries no creation-time field hachoir's MP4Metadata reads,
+    so real, unmocked hachoir extraction genuinely produces metadata with no
+    ``creation_date`` value -- unlike an empty ``moov``, whose ``Metadata`` is
+    falsy and short-circuits before ``get()`` is ever called. ``tkhd`` must be
+    wrapped in its enclosing ``trak`` box: hachoir's MP4 parser only descends
+    into ``tkhd`` there, and a bare top-level ``tkhd`` is not recognized at all
+    (metadata comes back empty/falsy rather than "present but dateless").
+    """
+    tkhd_payload = (
+        struct.pack(">I", 0)         # version + flags
+        + struct.pack(">I", 0)       # creation_time (unused by hachoir here)
+        + struct.pack(">I", 0)       # modification_time
+        + struct.pack(">I", 1)       # track_id
+        + struct.pack(">I", 0)       # reserved
+        + struct.pack(">I", 1000)    # duration
+        + b"\x00" * 8                # reserved
+        + b"\x00" * 2                # layer
+        + b"\x00" * 2                # alternate group
+        + b"\x00" * 2                # volume
+        + b"\x00" * 2                # reserved
+        + b"\x00" * 36               # matrix
+        + struct.pack(">I", 640 << 16)  # width (16.16 fixed point)
+        + struct.pack(">I", 480 << 16)  # height (16.16 fixed point)
+    )
+    tkhd = _box(b"tkhd", tkhd_payload)
+    return _box(b"trak", tkhd)
+
+
+def _write_minimal_mp4(path: str, moov_children: bytes) -> None:
+    """Write a minimal, real ``ftyp`` + ``moov`` file hachoir can parse."""
+    ftyp = _box(b"ftyp", b"qt  " + struct.pack(">I", 512) + b"qt  ")
+    with open(path, "wb") as handle:
+        handle.write(ftyp + _box(b"moov", moov_children))
 
 
 class TestIterBoxes(unittest.TestCase):
@@ -261,7 +322,7 @@ class TestQuicktimeCreationdateHelperBranches(unittest.TestCase):
 
 
 class TestHachoirFallbackBranches(unittest.TestCase):
-    """_extract_video_timestamp_hachoir: metadata None, field raise, plaintext."""
+    """_extract_video_timestamp_hachoir: metadata None, get() raise, plaintext (#16)."""
 
     def setUp(self):
         self.handler = ExifHandler()
@@ -282,19 +343,61 @@ class TestHachoirFallbackBranches(unittest.TestCase):
     @patch("src.exif_handler.HACHOIR_AVAILABLE", True)
     @patch("src.exif_handler.extractMetadata", create=True)
     @patch("src.exif_handler.createParser", create=True)
-    def test_field_access_raising_then_no_date(self, mock_parser, mock_extract):
-        """A field whose access raises is skipped; no date is found overall."""
+    def test_creation_date_from_get_skips_plaintext_entirely(
+        self, mock_parser, mock_extract
+    ):
+        """
+        When get('creation_date') succeeds, exportPlaintext is never invoked.
 
-        class Raising:
-            @property
-            def creation_date(self):  # noqa: D401 - test double
-                raise ValueError("boom")
+        This is the fast path issue #16 fixes: the old code probed for a
+        ``creation_date`` attribute via ``hasattr``/``getattr``, which hachoir's
+        ``Metadata`` object never has (it only exposes ``get(key)``), so this
+        double -- which deliberately has no ``creation_date`` attribute, only
+        ``get`` -- was unreachable under the old code and fell through to
+        ``exportPlaintext``, which raises here to prove it.
+        """
+
+        expected = datetime(2024, 1, 15, 14, 30, 45)
+
+        class HasCreationDate:
+            def get(self, key, default=None, index=0):
+                if key == 'creation_date':
+                    return expected
+                return default
+
+            def exportPlaintext(self):
+                raise AssertionError("exportPlaintext() should not be reached")
+
+        mock_parser.return_value = MagicMock()
+        mock_extract.return_value = HasCreationDate()
+
+        result = self.handler._extract_video_timestamp_hachoir("movie.mov")
+
+        self.assertEqual(result, expected)
+
+    @patch("src.exif_handler.HACHOIR_AVAILABLE", True)
+    @patch("src.exif_handler.extractMetadata", create=True)
+    @patch("src.exif_handler.createParser", create=True)
+    def test_missing_creation_date_key_then_plaintext_also_empty(
+        self, mock_parser, mock_extract
+    ):
+        """
+        get('creation_date') raising ValueError (hachoir's real "no such key"
+        contract) is guarded rather than propagating; when the plaintext
+        fallback also finds nothing, the overall result is None.
+        """
+
+        class NoCreationDate:
+            def get(self, key, default=None, index=0):
+                raise ValueError(
+                    "Metadata has no value '%s' (index %s)" % (key, index)
+                )
 
             def exportPlaintext(self):
                 return ["nothing datelike here"]
 
         mock_parser.return_value = MagicMock()
-        mock_extract.return_value = Raising()
+        mock_extract.return_value = NoCreationDate()
 
         result = self.handler._extract_video_timestamp_hachoir("movie.mov")
 
@@ -308,6 +411,9 @@ class TestHachoirFallbackBranches(unittest.TestCase):
         """A creation date found only in plaintext lines is parsed out."""
 
         class PlaintextOnly:
+            def get(self, key, default=None, index=0):
+                raise ValueError("Metadata has no value '%s'" % key)
+
             def exportPlaintext(self):
                 return ["Creation date: 2024-01-15 14:30:45"]
 
@@ -327,6 +433,9 @@ class TestHachoirFallbackBranches(unittest.TestCase):
         """A regex-matching but calendar-invalid date line is skipped safely."""
 
         class BadDateLine:
+            def get(self, key, default=None, index=0):
+                raise ValueError("Metadata has no value '%s'" % key)
+
             def exportPlaintext(self):
                 # Matches the date regex but is not a real calendar date, so
                 # strptime raises and the line is skipped (no date found).
@@ -352,6 +461,119 @@ class TestHachoirFallbackBranches(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn("movie.mov", self.handler.missing_exif_files)
+
+
+class TestHachoirCreationDateHelper(unittest.TestCase):
+    """
+    _hachoir_creation_date: the get() guard, date->datetime promotion, and
+    rejection of any other type (#16).
+
+    hachoir's registered ``creation_date`` key declares its type as
+    ``(datetime, date)`` (see ``hachoir/metadata/register.py``), so a bare
+    ``date`` is a real possibility, not a hypothetical -- this is what closes
+    the type hazard flagged in the issue, where an unchecked value could
+    previously have reached ``dt.strftime(...)`` and raised.
+    """
+
+    def test_returns_datetime_value_unchanged(self):
+        """A datetime value round-trips exactly, read via the real get() shape."""
+        metadata = Mock()
+        metadata.get.return_value = datetime(2024, 1, 15, 14, 30, 45)
+
+        result = _hachoir_creation_date(metadata)
+
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
+        metadata.get.assert_called_once_with('creation_date')
+
+    def test_bare_date_is_promoted_to_midnight_datetime(self):
+        """A date-only value (hachoir's declared alternate type) becomes midnight."""
+        from datetime import date
+
+        metadata = Mock()
+        metadata.get.return_value = date(2024, 1, 15)
+
+        result = _hachoir_creation_date(metadata)
+
+        self.assertEqual(result, datetime(2024, 1, 15, 0, 0, 0))
+
+    def test_missing_key_value_error_returns_none(self):
+        """get() raising ValueError (hachoir's real "no value" contract) yields None."""
+        metadata = Mock()
+        metadata.get.side_effect = ValueError(
+            "Metadata has no value 'creation_date' (index 0)"
+        )
+
+        self.assertIsNone(_hachoir_creation_date(metadata))
+
+    def test_unexpected_type_is_rejected_not_returned_raw(self):
+        """A value that is neither datetime nor date is rejected, not passed through."""
+        metadata = Mock()
+        metadata.get.return_value = "2024-01-15"  # a str, not datetime/date
+
+        self.assertIsNone(_hachoir_creation_date(metadata))
+
+
+class TestHachoirFastPathRealBoundary(unittest.TestCase):
+    """
+    _extract_video_timestamp_hachoir against REAL hachoir parsing (#16).
+
+    Every other hachoir test in this module mocks ``createParser``/
+    ``extractMetadata``. These two build genuine MP4/MOV box bytes and let
+    hachoir's actual parser and ``Metadata.get(...)`` run unmocked, so a
+    regression back to the dead ``hasattr``/``getattr`` probe is caught
+    against the real library boundary the fast path depends on, not a mock of
+    this module's own code.
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_real_mvhd_creation_date_skips_plaintext_scan(self):
+        """A real mvhd creation_time is read via get(); exportPlaintext never runs."""
+        from hachoir.metadata.metadata import RootMetadata
+
+        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        path = os.path.join(self.temp_dir, "real_mvhd.mov")
+        _write_minimal_mp4(path, _mvhd_only_moov(utc_1904))
+
+        with patch.object(
+            RootMetadata, "exportPlaintext", wraps=RootMetadata.exportPlaintext
+        ) as spy:
+            result = self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertEqual(result, datetime(2026, 7, 5, 1, 33, 3))
+        spy.assert_not_called()
+
+    def test_real_metadata_without_creation_date_reaches_plaintext(self):
+        """
+        A real file whose only box is a track header (no mvhd, so hachoir's
+        Metadata carries no ``creation_date``) genuinely reaches
+        exportPlaintext -- proving that scan is a real last resort, not
+        permanently disabled -- and still yields no date, recording the file
+        as missing.
+        """
+        from hachoir.metadata.metadata import RootMetadata
+
+        path = os.path.join(self.temp_dir, "real_tkhd_only.mov")
+        _write_minimal_mp4(path, _tkhd_only_moov())
+
+        with patch.object(
+            RootMetadata, "exportPlaintext", wraps=RootMetadata.exportPlaintext
+        ) as spy:
+            result = self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertIsNone(result)
+        self.assertIn(path, self.handler.missing_exif_files)
+        spy.assert_called_once()
+
+    @staticmethod
+    def _seconds_1904(dt_utc: datetime) -> int:
+        """Seconds from 1904-01-01 to a UTC datetime, for building mvhd fixtures."""
+        return int((dt_utc - datetime(1904, 1, 1)).total_seconds())
 
 
 class TestTimestampCandidatesGuard(unittest.TestCase):
