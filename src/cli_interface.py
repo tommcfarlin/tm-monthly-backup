@@ -19,8 +19,7 @@ from rich.markup import escape
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from .file_processor import FileProcessor
-from .file_categorizer import FileCategory
+from .file_processor import FileProcessor, ProgressReporter
 
 # Initialize rich console
 console = Console()
@@ -225,7 +224,21 @@ class CLIInterface:
         # Categorize files for display
         self.processor.categorizer.batch_categorize(files)
         stats = self.processor.categorizer.get_categorization_stats()
+        self.display_categorization_summary(stats)
 
+    def display_categorization_summary(self, stats: Dict[str, int]):
+        """
+        Render the file-discovery table from a categorization stats dict.
+
+        Split out of :meth:`display_file_scan_results` so the run path can
+        render the discovery table from the single categorization pass
+        ``FileProcessor`` already performed -- no second ``batch_categorize``
+        (issue #13).
+
+        Args:
+            stats: Categorization counts from
+                :meth:`FileCategorizer.get_categorization_stats`.
+        """
         # Create summary table
         table = Table(title="File Discovery Summary", show_header=True, header_style="bold magenta")
         table.add_column("Category", style="cyan", width=15)
@@ -249,81 +262,40 @@ class CLIInterface:
         """
         Process files with beautiful progress indicators.
 
+        Drives the run through the single public ``FileProcessor`` entry point
+        (:meth:`FileProcessor.process_all_files`), passing a
+        :class:`_CLIProgressReporter` that renders the discovery table, runs the
+        confirmation prompt, and advances a per-file progress bar. All
+        scanning, categorization, sidecar deletion, and summary generation now
+        happen exactly once, inside the processor -- this method reaches into no
+        private members and re-drives no part of the pipeline (issue #13).
+
         Args:
             dry_run: If True, only show what would be done
 
         Returns:
             Processing results dictionary
         """
-        # Scan files first
-        with self.console.status("[bold green]Scanning export directory...") as status:
-            files = self.processor._scan_export_directory()
+        reporter = _CLIProgressReporter(self, dry_run)
+        try:
+            summary = self.processor.process_all_files(
+                dry_run=dry_run, progress=reporter
+            )
+        finally:
+            reporter.close()
 
-        if not files:
-            self.console.print("[yellow]No files found to process[/yellow]")
-            # Return a tagged (not empty) result so the caller can tell "nothing
-            # to do" apart from "cancelled" and "done" instead of inferring the
-            # outcome from a falsy dict (issue #31).
-            summary = self.processor._generate_summary()
+        # Tag the outcome so the caller can distinguish a completed run from a
+        # cancelled or empty one and choose an exit code accordingly (#31).
+        if reporter.no_files:
+            # Nothing to do: distinct from "cancelled" and "done".
             summary['status'] = 'no_files'
             return summary
+        if reporter.cancelled:
+            # Signal cancellation explicitly rather than with an empty dict so
+            # the caller exits with the POSIX cancel code (130) and never
+            # confuses a declined run with a clean success (issue #31).
+            return {'status': 'cancelled'}
 
-        self.display_file_scan_results(files)
-
-        if dry_run:
-            self.console.print(f"\n[bold blue]DRY RUN MODE[/bold blue] - No files will be modified")
-
-        # Confirm processing
-        if not dry_run:
-            if not Confirm.ask(f"\nProceed with processing {len(files)} files?"):
-                self.console.print("[yellow]Processing cancelled[/yellow]")
-                # Signal cancellation explicitly rather than with an empty dict
-                # so the caller can exit with the POSIX cancel code (130) and
-                # never confuse a declined run with a clean success (issue #31).
-                return {'status': 'cancelled'}
-
-        # Process with progress tracking
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            console=self.console
-        ) as progress:
-
-            # Add tasks for different phases
-            categorize_task = progress.add_task("Categorizing files...", total=1)
-            sidecar_task = progress.add_task("Processing sidecar files...", total=1)
-            convert_task = progress.add_task("Converting HEIC files...", total=None)
-            organize_task = progress.add_task("Organizing files...", total=None)
-
-            # Categorize files
-            categorized = self.processor.categorizer.batch_categorize(files)
-            progress.update(categorize_task, completed=1)
-
-            # Delete sidecar files
-            sidecar_files = categorized.get(FileCategory.SIDECAR, [])
-            if sidecar_files:
-                progress.update(sidecar_task, total=len(sidecar_files))
-                self.processor._delete_sidecar_files(sidecar_files, dry_run)
-            progress.update(sidecar_task, completed=progress.tasks[sidecar_task].total or 1)
-
-            # Process all files using the FileProcessor's main method
-            # This replaces the duplicate processing loop that was causing duplicates
-            self.processor.process_all_files(dry_run=dry_run)
-
-            # Update progress bars to completed
-            progress.update(convert_task, completed=progress.tasks[convert_task].total or 1)
-            progress.update(organize_task, completed=progress.tasks[organize_task].total or 1)
-
-            # Ensure all progress bars are complete
-            progress.update(convert_task, completed=progress.tasks[convert_task].total or 1)
-            progress.update(organize_task, completed=progress.tasks[organize_task].total or 1)
-
-        # Generate and return summary, tagged so the caller can distinguish a
-        # completed run from a cancelled or empty one (issue #31).
-        summary = self.processor._generate_summary()
         summary['status'] = 'completed'
         return summary
 
@@ -473,3 +445,94 @@ class CLIInterface:
             padding=(1, 2)
         )
         self.console.print(panel)
+
+
+class _CLIProgressReporter(ProgressReporter):
+    """
+    Bridge ``FileProcessor``'s run to the rich CLI (issue #13).
+
+    Implements the :class:`~src.file_processor.ProgressReporter` seam so
+    ``process_all_files`` can render, gate, and report a run without the CLI
+    reaching into any private processor method. Responsibilities:
+
+    * :meth:`on_no_files` -- print the "nothing to do" notice and flag it.
+    * :meth:`on_categorized` -- render the discovery table, print the dry-run
+      notice, and (for a real run) run the confirmation prompt. Declining aborts
+      the run before anything is touched and is flagged for the caller.
+    * :meth:`on_file` -- advance a single per-file progress bar. The bar is a
+      deliberately minimal seam: issue #14 replaces it with real per-phase bars.
+
+    The ``no_files`` / ``cancelled`` flags let
+    :meth:`CLIInterface.process_with_progress` tag the summary (and pick an exit
+    code) without inspecting private state.
+    """
+
+    def __init__(self, cli: "CLIInterface", dry_run: bool):
+        """
+        Args:
+            cli: The owning interface (for its console and render helpers).
+            dry_run: Whether this run is a dry run (skips the confirm prompt).
+        """
+        self.cli = cli
+        self.dry_run = dry_run
+        self.no_files = False
+        self.cancelled = False
+        self._progress = None
+        self._task = None
+
+    def on_no_files(self) -> None:
+        """Record and announce that the scan found nothing to process."""
+        self.no_files = True
+        self.cli.console.print("[yellow]No files found to process[/yellow]")
+
+    def on_categorized(self, total: int, stats: Dict[str, int]) -> bool:
+        """
+        Render the discovery table, then gate the run on the confirm prompt.
+
+        Args:
+            total: Number of scanned files (the count the prompt quotes).
+            stats: Categorization counts for the discovery table.
+
+        Returns:
+            True to proceed, False to abort (user declined the prompt).
+        """
+        self.cli.display_categorization_summary(stats)
+
+        if self.dry_run:
+            self.cli.console.print(
+                "\n[bold blue]DRY RUN MODE[/bold blue] - No files will be modified"
+            )
+        else:
+            if not Confirm.ask(f"\nProceed with processing {total} files?"):
+                self.cli.console.print("[yellow]Processing cancelled[/yellow]")
+                self.cancelled = True
+                return False
+
+        # Start the per-file bar only after any prompt is answered, so the live
+        # display never overlaps the interactive confirm. Sidecars are deleted,
+        # not processed, so the bar tracks only the processable files.
+        processable_total = total - stats.get('sidecar', 0)
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=self.cli.console,
+        )
+        self._progress.start()
+        self._task = self._progress.add_task(
+            "Processing files...", total=processable_total or None
+        )
+        return True
+
+    def on_file(self, path: str, category: str, action: str) -> None:
+        """Advance the per-file progress bar by one file."""
+        if self._progress is not None:
+            self._progress.advance(self._task)
+
+    def close(self) -> None:
+        """Stop the live progress display if it was started."""
+        if self._progress is not None:
+            self._progress.stop()
+            self._progress = None
