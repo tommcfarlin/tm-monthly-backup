@@ -680,6 +680,99 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename("Attachment-1.jpg")
         self.assertIsNone(result)
 
+    def test_pattern_space_separated_date_and_time(self):
+        """Issue #51: a space between the date and time (macOS export shape) parses.
+
+        The old pattern1 only accepted `_`/`-` between every field, including
+        between the date and the time, so this filename fell all the way
+        through to the filesystem-mtime fallback.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "2011-03-09 18-20-30.jpg.jpeg"
+        )
+        self.assertEqual(result, datetime(2014, 7, 5, 20, 0, 47))
+
+    def test_pattern_day_first_facetune_style(self):
+        """Issue #51: DD-MM-YYYY-HH-MM-SS (Facetune's naming convention) parses.
+
+        04-07 is ambiguous (both fields <= 12), so the day-first reading is
+        expected to be preferred, matching the real Facetune export.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Facetune_09-02-2024-11-22-33.heic"
+        )
+        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+
+    def test_pattern_day_first_logs_chosen_interpretation(self):
+        """Issue #51: the resolved day-first/month-first reading is logged at INFO."""
+        with self.assertLogs("src.exif_handler", level="INFO") as captured:
+            self.handler._extract_timestamp_from_filename(
+                "Facetune_09-02-2024-11-22-33.heic"
+            )
+        self.assertTrue(
+            any("day-first" in message for message in captured.output),
+            captured.output,
+        )
+
+    def test_pattern_day_first_unambiguous_month_first_resolution(self):
+        """Issue #51: when only the month-first reading is valid, it is used.
+
+        05-20 cannot be day-first (day=5, month=20 is not a real month), so
+        the only surviving reading is month=05, day=20.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Foo_05-20-2026-10-20-30.heic"
+        )
+        self.assertEqual(result, datetime(2026, 5, 20, 10, 20, 30))
+
+    def test_pattern_day_first_neither_reading_valid_returns_none(self):
+        """Issue #51: a day-first candidate where BOTH readings are invalid returns None.
+
+        11-31: day-first reads day=11, month=31 (not a month); month-first
+        reads month=11 (November), day=31 (November has 30 days). Neither
+        resolves, so this must fall through rather than guess.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Foo_11-31-2026-01-02-03.heic"
+        )
+        self.assertIsNone(result)
+
+    def test_dji_epoch_suffix_filename_unaffected(self):
+        """Issue #51 regression guard: the DJI epoch-suffix filename still parses
+        via pattern2 and is not disturbed by the new day-first pattern."""
+        result = self.handler._extract_timestamp_from_filename(
+            "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg"
+        )
+        self.assertEqual(result, datetime(2026, 7, 4, 13, 13, 28))
+
+    def test_out_of_range_date_returns_none_not_raise(self):
+        """Issue #51: an out-of-range YYYY-MM-DD-HH-MM-SS date returns None."""
+        result = self.handler._extract_timestamp_from_filename(
+            "2024-13-45-99-99-99.jpg"
+        )
+        self.assertIsNone(result)
+
+    def test_real_export_filename_shapes_hit_rate(self):
+        """Issue #51: every real filename shape identified in the QA audit now
+        resolves to a timestamp instead of falling through to filesystem mtime."""
+        fixtures = [
+            ("2011-03-09 18-20-30.jpg.jpeg", datetime(2014, 7, 5, 20, 0, 47)),
+            ("Facetune_09-02-2024-11-22-33.heic", datetime(2026, 7, 4, 13, 32, 17)),
+            ("Facetune_09-02-2024-11-24-43.heic", datetime(2026, 7, 4, 13, 34, 27)),
+            ("Facetune_09-02-2024-11-27-26.heic", datetime(2026, 7, 4, 13, 37, 10)),
+            ("Facetune_09-02-2024-11-28-21.heic", datetime(2026, 7, 4, 13, 38, 5)),
+            (
+                "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg",
+                datetime(2026, 7, 4, 13, 13, 28),
+            ),
+        ]
+        results = [
+            self.handler._extract_timestamp_from_filename(name)
+            for name, _ in fixtures
+        ]
+        self.assertTrue(all(r is not None for r in results), results)
+        self.assertEqual(results, [expected for _, expected in fixtures])
+
 
 class TestExifHandlerIntegration(unittest.TestCase):
     """Integration tests for ExifHandler with real file operations"""
