@@ -745,8 +745,17 @@ class FileProcessor:
                     )
                     return
 
-        # Step 2: Extract timestamp
-        timestamp = self.exif_handler.extract_timestamp(current_path)
+        # Step 2: Extract timestamp. Pass forward the metadata FileCategorizer
+        # already read once for this file while categorizing it (issue #24),
+        # keyed by the ORIGINAL file_path (not current_path -- a converted
+        # HEIC's current_path is a different, temporary JPEG whose EXIF is
+        # verified-preserved from the original by this point). A cache miss
+        # (video/unknown files never populate it; RAW/undecodable files that
+        # failed to open at categorize time don't either) yields None, and
+        # extract_timestamp falls back to opening current_path itself.
+        timestamp = self.exif_handler.extract_timestamp(
+            current_path, self.categorizer.get_image_metadata(file_path)
+        )
         if timestamp is None:
             # Use fallback timestamp
             timestamp = self.exif_handler.get_fallback_timestamp(current_path)

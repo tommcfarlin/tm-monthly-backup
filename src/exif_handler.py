@@ -6,7 +6,7 @@ import os
 import struct
 import logging
 from datetime import date, datetime, time, timedelta
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from PIL import Image
 from PIL.ExifTags import TAGS
@@ -20,6 +20,13 @@ try:
     HACHOIR_AVAILABLE = True
 except ImportError:
     HACHOIR_AVAILABLE = False
+
+if TYPE_CHECKING:
+    # Type-hint only: FileCategorizer.ImageMetadata is not imported at runtime
+    # so this module never depends on file_categorizer (which imports THIS
+    # module for merge_exif_ifds -- keeping the edge one-directional avoids a
+    # circular import, issue #24).
+    from .file_categorizer import ImageMetadata
 
 # Enable HEIF support in Pillow
 pillow_heif.register_heif_opener()
@@ -265,6 +272,52 @@ def _hachoir_creation_date(metadata) -> Optional[datetime]:
     return None
 
 
+def merge_exif_ifds(exif, file_path: str = "") -> dict:
+    """
+    Flatten IFD0 and the Exif sub-IFD of a PIL ``Image.Exif`` into one
+    tag-name -> value mapping.
+
+    ``Image.getexif()`` exposes IFD0 only. The preferred ``DateTimeOriginal``
+    (0x9003) and ``DateTimeDigitized`` (0x9004) tags -- and the ``Software``
+    tag some EXIF writers place there instead of IFD0 -- can live in the Exif
+    sub-IFD behind pointer tag ``0x8769``, reachable only via
+    ``Image.Exif.get_ifd()`` (issue #25). This is the single place that merge
+    happens: used by :meth:`ExifHandler._timestamp_candidates` (the standalone
+    open path) and, since issue #24, by :class:`FileCategorizer`'s
+    once-per-file metadata read -- both used to build this same view from
+    their own separate ``Image.open`` of the same file.
+
+    IFD0 values win over sub-IFD values for any shared tag id (setdefault),
+    though in practice the tags either caller cares about do not overlap
+    between the two directories.
+
+    Args:
+        exif: The ``Image.Exif`` mapping returned by ``Image.getexif()``.
+        file_path: Source path, used only for logging context if the sub-IFD
+            lookup raises.
+
+    Returns:
+        Mapping of resolved tag name -> raw tag value.
+    """
+    merged = {}
+    for tag_id, value in exif.items():
+        merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+
+    # get_ifd returns {} when the sub-IFD is absent. The guard also covers
+    # exif objects that predate the sub-IFD API (e.g. plain-dict test doubles
+    # lack get_ifd) and malformed pointers that raise on access.
+    try:
+        sub_ifd = exif.get_ifd(ExifHandler.EXIF_IFD)
+    except (AttributeError, KeyError, OSError, ValueError) as exc:
+        logger.debug("No Exif sub-IFD in %s: %s", file_path, exc)
+        sub_ifd = {}
+
+    for tag_id, value in sub_ifd.items():
+        merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+
+    return merged
+
+
 class ExifHandler:
     """Handles EXIF data extraction and timestamp processing for photos and videos"""
 
@@ -294,12 +347,24 @@ class ExifHandler:
         """Check if file is a video file based on extension"""
         return Path(file_path).suffix.lower() in self.VIDEO_EXTENSIONS
 
-    def extract_timestamp(self, file_path: str) -> Optional[datetime]:
+    def extract_timestamp(
+        self, file_path: str, metadata: Optional["ImageMetadata"] = None
+    ) -> Optional[datetime]:
         """
         Extract timestamp from EXIF data (photos) or metadata (videos).
 
         Args:
             file_path: Path to image or video file
+            metadata: Optional pre-read ``FileCategorizer.ImageMetadata``
+                (issue #24). When given, its ``exif`` mapping is used directly
+                and ``file_path`` is NOT opened again here -- this is how
+                ``FileProcessor`` hands forward the metadata
+                ``FileCategorizer.categorize_file`` already read once for this
+                same file, closing the second Pillow open this method used to
+                perform on every image in a run. ``None`` (the default) is the
+                standalone path: every direct caller, the tests, and the video
+                path (which never has Pillow metadata to reuse) get exactly
+                the pre-#24 behavior of opening ``file_path`` here.
 
         Returns:
             datetime object if found, None if missing/invalid
@@ -307,6 +372,15 @@ class ExifHandler:
         # Handle video files differently
         if self._is_video_file(file_path):
             return self._extract_video_timestamp(file_path)
+
+        if metadata is not None:
+            # Pre-read by FileCategorizer while it categorized this same file
+            # (issue #24) -- reuse it rather than opening file_path again.
+            if not metadata.exif:
+                logger.warning("No EXIF data found in %s", file_path)
+                self.missing_exif_files.append(file_path)
+                return None
+            return self._select_timestamp(metadata.exif, file_path)
 
         # Handle image files with EXIF data
         try:
@@ -323,42 +397,58 @@ class ExifHandler:
                 # DateTimeOriginal / DateTimeDigitized tags.
                 candidates = self._timestamp_candidates(exif_data, file_path)
 
-                # Walk TIMESTAMP_TAGS in declared priority order and take the
-                # first tag that is present AND parses to a valid datetime. A
-                # malformed higher-priority value falls through to the next
-                # candidate rather than aborting the search.
-                for tag_name in self.TIMESTAMP_TAGS:
-                    if tag_name not in candidates:
-                        continue
-                    parsed = self._parse_exif_datetime(candidates[tag_name], file_path)
-                    if parsed is not None:
-                        # A malformed higher-priority tag may have recorded this
-                        # file as missing; a successful parse supersedes that.
-                        while file_path in self.missing_exif_files:
-                            self.missing_exif_files.remove(file_path)
-                        return parsed
-
-                logger.warning("No timestamp tags found in EXIF data for %s", file_path)
-                self.missing_exif_files.append(file_path)
-                return None
+                return self._select_timestamp(candidates, file_path)
 
         except Exception as e:
             logger.error("Error reading EXIF data from %s: %s", file_path, e)
             self.missing_exif_files.append(file_path)
             return None
 
+    def _select_timestamp(self, candidates: dict, file_path: str) -> Optional[datetime]:
+        """
+        Walk TIMESTAMP_TAGS in priority order and return the first valid parse.
+
+        Shared by both branches of :meth:`extract_timestamp` -- the
+        metadata-provided path and the standalone-open path (issue #24) -- so
+        the priority-walk logic lives in exactly one place regardless of
+        where ``candidates`` came from.
+
+        Args:
+            candidates: Tag-name -> value mapping (see
+                :func:`merge_exif_ifds`).
+            file_path: File path, used for logging and ``missing_exif_files``.
+
+        Returns:
+            The first tag's parsed datetime in TIMESTAMP_TAGS priority order,
+            or None if no declared tag is present and valid.
+        """
+        # Walk TIMESTAMP_TAGS in declared priority order and take the
+        # first tag that is present AND parses to a valid datetime. A
+        # malformed higher-priority value falls through to the next
+        # candidate rather than aborting the search.
+        for tag_name in self.TIMESTAMP_TAGS:
+            if tag_name not in candidates:
+                continue
+            parsed = self._parse_exif_datetime(candidates[tag_name], file_path)
+            if parsed is not None:
+                # A malformed higher-priority tag may have recorded this
+                # file as missing; a successful parse supersedes that.
+                while file_path in self.missing_exif_files:
+                    self.missing_exif_files.remove(file_path)
+                return parsed
+
+        logger.warning("No timestamp tags found in EXIF data for %s", file_path)
+        self.missing_exif_files.append(file_path)
+        return None
+
     def _timestamp_candidates(self, exif: "Image.Exif", file_path: str) -> dict:
         """
         Flatten IFD0 and the Exif sub-IFD into a tag-name -> value mapping.
 
-        Image.getexif() exposes IFD0 only, where the sole timestamp tag is
-        DateTime (file modification time). The preferred DateTimeOriginal and
-        DateTimeDigitized tags live in the Exif sub-IFD behind pointer tag
-        0x8769, reachable via Image.Exif.get_ifd(). This merges both so the
-        priority walk in extract_timestamp can see every declared tag.
-
-        IFD0 values win over sub-IFD values for any shared tag id (setdefault),
-        though in practice the timestamp tags do not overlap between the two.
+        Delegates to the module-level :func:`merge_exif_ifds`, which is
+        shared with :class:`FileCategorizer`'s once-per-file metadata read
+        (issue #24) so both build the identical tag-name view from a decoded
+        EXIF blob rather than each re-implementing the IFD0/sub-IFD merge.
 
         Args:
             exif: The Image.Exif object returned by Image.getexif()
@@ -367,23 +457,7 @@ class ExifHandler:
         Returns:
             Mapping of resolved tag name -> raw tag value
         """
-        merged = {}
-        for tag_id, value in exif.items():
-            merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
-
-        # get_ifd returns {} when the sub-IFD is absent. The guard also covers
-        # exif objects that predate the sub-IFD API (e.g. plain-dict test doubles
-        # lack get_ifd) and malformed pointers that raise on access.
-        try:
-            sub_ifd = exif.get_ifd(self.EXIF_IFD)
-        except (AttributeError, KeyError, OSError, ValueError) as exc:
-            logger.debug("No Exif sub-IFD in %s: %s", file_path, exc)
-            sub_ifd = {}
-
-        for tag_id, value in sub_ifd.items():
-            merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
-
-        return merged
+        return merge_exif_ifds(exif, file_path)
 
     def _extract_video_timestamp(self, file_path: str) -> Optional[datetime]:
         """
