@@ -1120,6 +1120,50 @@ class TestReadImageMetadataExceptionNarrowing(unittest.TestCase):
             result = self.categorizer._read_image_metadata("/tmp/locked.jpg")
         self.assertIsNone(result)
 
+    def test_open_failure_logs_debug_message_naming_exception_type(self):
+        """The open-failure message fires at DEBUG and names the exception type.
+
+        Pins the actual claim behind the deliberate DEBUG-not-WARNING
+        decision (documented inline and in the task report): the message
+        still exists, still names the file and the exception type, just at a
+        level that does not duplicate issue #58's own WARNING for the
+        extensions where that gate independently re-checks and reports. A
+        test that only asserts the return value (``None``) proves nothing
+        about whether anything was logged at all -- this uses ``assertLogs``
+        so a regression that silently drops the message (or moves it to a
+        level ``assertLogs(level="DEBUG")`` would not even capture) fails
+        here instead of only being caught by eye.
+
+        Fails against the pre-#39 code too, in the opposite direction it
+        might seem: the old bare ``except Exception`` DID log at DEBUG, but
+        with a message of ``"Error reading image metadata for %s: %s"`` that
+        never names the exception TYPE (only ``str(e)``) -- so the
+        type-name assertion below fails against it.
+        """
+        with self.assertLogs("src.file_categorizer", level="DEBUG") as captured:
+            with patch(
+                "PIL.Image.open",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                result = self.categorizer._read_image_metadata("/tmp/locked.jpg")
+
+        self.assertIsNone(result)
+        debug_records = [
+            r for r in captured.records if r.name == "src.file_categorizer"
+        ]
+        self.assertTrue(debug_records, "expected a log record from file_categorizer")
+        record = debug_records[0]
+        # Deliberately DEBUG, not WARNING (see the inline comment on
+        # _read_image_metadata and the task report's "Deviation" section):
+        # issue #58's _is_decodable_image already independently WARNs and
+        # quarantines for every extension where this is a real, actionable
+        # failure, so warning again here would be redundant there and a
+        # false alarm for every valid RAW file elsewhere.
+        self.assertEqual(record.levelname, "DEBUG")
+        message = record.getMessage()
+        self.assertIn("/tmp/locked.jpg", message)
+        self.assertIn("PermissionError", message)
+
 
 if __name__ == '__main__':
     unittest.main()

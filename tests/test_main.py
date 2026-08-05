@@ -122,6 +122,41 @@ class TestMainCli(unittest.TestCase):
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
         self.assertIn("Cannot proceed", result.output)
 
+    def test_check_directories_bug_reaches_top_level_handler(self):
+        """A non-OSError bug inside check_directories is reported, not raised.
+
+        Issue #39 fix round 1: check_directories' mkdir catch was narrowed
+        from ``Exception`` to ``OSError``, so a non-OSError bug now
+        propagates out of check_directories. Before this fix,
+        ``check_directories()`` was called BEFORE main()'s ``try:`` even
+        started, so that propagating exception went straight past main()
+        uncaught -- no logger.exception, no recorded traceback, no
+        "Unexpected error" message, and click.testing.CliRunner would report
+        exit_code=1 (colliding with EXIT_PARTIAL_FAILURE's documented
+        meaning) with the TypeError as ``result.exception`` instead of a
+        normal exit. The call now runs inside the try, so the bug reaches the
+        same top-level handler every other unexpected exception does.
+
+        Fails against the pre-fix code: the runner's invoke() catches the
+        propagating TypeError itself and reports exit_code=1 with
+        result.exception set, so "Unexpected error" never appears in
+        result.output and the assertion on EXIT_PRECONDITION (2) fails too.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        with patch(
+            "pathlib.Path.mkdir",
+            side_effect=TypeError("not a real bug, a test one"),
+        ):
+            result = self.runner.invoke(main, self._args("--yes"))
+
+        self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Unexpected error", result.output)
+        self.assertIn("TypeError", result.output)
+
     def test_successful_run_exits_zero(self):
         """A confirmed (--yes) run over a decodable photo processes it and
         exits 0, with no prompt to answer and without patching ``Confirm.ask``
