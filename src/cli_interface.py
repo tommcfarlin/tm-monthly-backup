@@ -265,10 +265,12 @@ class CLIInterface:
         Drives the run through the single public ``FileProcessor`` entry point
         (:meth:`FileProcessor.process_all_files`), passing a
         :class:`_CLIProgressReporter` that renders the discovery table, runs the
-        confirmation prompt, and advances a per-file progress bar. All
-        scanning, categorization, sidecar deletion, and summary generation now
-        happen exactly once, inside the processor -- this method reaches into no
-        private members and re-drives no part of the pipeline (issue #13).
+        confirmation prompt, and advances two real per-phase progress bars --
+        HEIC conversion and file organization -- from actual per-file
+        completions (issue #14). All scanning, categorization, sidecar
+        deletion, and summary generation now happen exactly once, inside the
+        processor -- this method reaches into no private members and
+        re-drives no part of the pipeline (issue #13).
 
         Args:
             dry_run: If True, only show what would be done
@@ -449,7 +451,7 @@ class CLIInterface:
 
 class _CLIProgressReporter(ProgressReporter):
     """
-    Bridge ``FileProcessor``'s run to the rich CLI (issue #13).
+    Bridge ``FileProcessor``'s run to the rich CLI (issues #13, #14).
 
     Implements the :class:`~src.file_processor.ProgressReporter` seam so
     ``process_all_files`` can render, gate, and report a run without the CLI
@@ -458,9 +460,22 @@ class _CLIProgressReporter(ProgressReporter):
     * :meth:`on_no_files` -- print the "nothing to do" notice and flag it.
     * :meth:`on_categorized` -- render the discovery table, print the dry-run
       notice, and (for a real run) run the confirmation prompt. Declining aborts
-      the run before anything is touched and is flagged for the caller.
-    * :meth:`on_file` -- advance a single per-file progress bar. The bar is a
-      deliberately minimal seam: issue #14 replaces it with real per-phase bars.
+      the run before anything is touched. On proceeding, it starts two real
+      progress bars sized from data the seam now carries: a conversion bar
+      (total = the ``'heic'`` count) shown only when there is at least one HEIC
+      file, and an organize bar (total = every processable file).
+    * :meth:`on_heic_converted` -- advance the conversion bar by one, with the
+      just-converted file's name in its description. This is what makes the
+      conversion bar move *during* the parallel HEIC pool phase (issue #42)
+      for large batches, rather than only once the (much faster) sequential
+      place phase reaches those files afterward.
+    * :meth:`on_file` -- advance the organize bar by one, with the file's name
+      in its description. Fires for every processable file exactly once,
+      regardless of ``action``.
+
+    Every filename entering a task description is reduced to its basename and
+    passed through ``safe_markup`` (issue #9): filenames are untrusted and
+    ``rich`` parses bracketed text in task descriptions as markup.
 
     The ``no_files`` / ``cancelled`` flags let
     :meth:`CLIInterface.process_with_progress` tag the summary (and pick an exit
@@ -478,7 +493,8 @@ class _CLIProgressReporter(ProgressReporter):
         self.no_files = False
         self.cancelled = False
         self._progress = None
-        self._task = None
+        self._convert_task = None
+        self._organize_task = None
 
     def on_no_files(self) -> None:
         """Record and announce that the scan found nothing to process."""
@@ -491,7 +507,8 @@ class _CLIProgressReporter(ProgressReporter):
 
         Args:
             total: Number of scanned files (the count the prompt quotes).
-            stats: Categorization counts for the discovery table.
+            stats: Categorization counts for the discovery table, plus the
+                ``'heic'`` count issue #14 added to size the conversion bar.
 
         Returns:
             True to proceed, False to abort (user declined the prompt).
@@ -508,10 +525,11 @@ class _CLIProgressReporter(ProgressReporter):
                 self.cancelled = True
                 return False
 
-        # Start the per-file bar only after any prompt is answered, so the live
-        # display never overlaps the interactive confirm. Sidecars are deleted,
-        # not processed, so the bar tracks only the processable files.
+        # Start the bars only after any prompt is answered, so the live
+        # display never overlaps the interactive confirm. Sidecars are
+        # deleted, not processed, so the organize total excludes them.
         processable_total = total - stats.get('sidecar', 0)
+        heic_total = stats.get('heic', 0)
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -521,15 +539,36 @@ class _CLIProgressReporter(ProgressReporter):
             console=self.cli.console,
         )
         self._progress.start()
-        self._task = self._progress.add_task(
-            "Processing files...", total=processable_total or None
+        # Only shown when there is HEIC work to do: a batch with none would
+        # otherwise show a permanently-empty bar for a phase that never runs.
+        if heic_total > 0:
+            self._convert_task = self._progress.add_task(
+                "Converting HEIC files...", total=heic_total
+            )
+        self._organize_task = self._progress.add_task(
+            "Organizing files...", total=processable_total or None
         )
         return True
 
+    def on_heic_converted(self, path: str) -> None:
+        """Advance the conversion bar by one, naming the file just converted."""
+        if self._progress is None or self._convert_task is None:
+            return
+        name = safe_markup(os.path.basename(path))
+        self._progress.update(
+            self._convert_task, description=f"Converting {name}..."
+        )
+        self._progress.advance(self._convert_task)
+
     def on_file(self, path: str, category: str, action: str) -> None:
-        """Advance the per-file progress bar by one file."""
-        if self._progress is not None:
-            self._progress.advance(self._task)
+        """Advance the organize bar by one, naming the file just handled."""
+        if self._progress is None or self._organize_task is None:
+            return
+        name = safe_markup(os.path.basename(path))
+        self._progress.update(
+            self._organize_task, description=f"Organizing {name}..."
+        )
+        self._progress.advance(self._organize_task)
 
     def close(self) -> None:
         """Stop the live progress display if it was started."""
