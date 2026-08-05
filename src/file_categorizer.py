@@ -225,13 +225,27 @@ class FileCategorizer:
         identifiable keys -- while the value match is confined to whole-word
         product names so ordinary caption text can no longer trip it (issue #8).
 
+        Reads ``img.info`` rather than ``img.text`` (issue #44). Pillow's
+        ``PngImageFile.text`` property calls ``self.load()`` before returning,
+        because tEXt/iTXt chunks are legally allowed to follow IDAT and Pillow
+        will not report a partial answer -- so merely probing ``.text`` forces
+        a full pixel decode of the whole image, at the same cost as an explicit
+        ``load()``, purely to read metadata. ``img.info`` is a plain dict
+        populated while ``Image.open()`` parses the chunk stream and already
+        holds every chunk that precedes IDAT, which is where C2PA manifests and
+        generator ``Software``/``parameters`` chunks are actually written by
+        every mainstream tool; reading it costs nothing extra because
+        ``Image.open()`` performed that parse regardless. The trade-off is a
+        chunk written strictly after IDAT would be invisible here -- no
+        mainstream generator does that, so detection is unaffected in practice.
+
         Args:
             img: An open :class:`PIL.Image.Image`.
 
         Returns:
             True if any text chunk indicates AI-generated provenance.
         """
-        text_chunks = getattr(img, 'text', None)
+        text_chunks = getattr(img, 'info', None)
         if not text_chunks:
             return False
 

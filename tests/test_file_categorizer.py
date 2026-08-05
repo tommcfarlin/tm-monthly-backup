@@ -634,6 +634,96 @@ class TestGeneratedContentPrecision(unittest.TestCase):
         self.assertTrue(self.categorizer._is_generated_content(path))
 
 
+class TestPngProvenanceProbeDoesNotDecode(unittest.TestCase):
+    """PNG text-chunk provenance is read without a full pixel decode (#44).
+
+    ``PngImageFile.text`` calls ``self.load()`` before returning, because
+    tEXt/iTXt chunks are legally permitted to follow IDAT and Pillow will not
+    report a partial answer -- so probing ``.text`` decodes the whole image
+    purely to read metadata. ``img.info`` is populated while ``Image.open()``
+    parses the chunk stream and already holds every chunk written before
+    IDAT, which covers every mainstream generator/C2PA marker, at no extra
+    decode cost.
+
+    Pillow's own decode boundary is ``Image.tile``: it starts as a non-empty
+    list of pending decode ops and ``Image.load()`` (called directly or via
+    any Pillow API documented to force a load) empties it once the pixel data
+    has actually been read. Asserting on ``img.tile`` -- rather than mocking
+    ``_png_text_has_ai_provenance`` or stubbing Pillow -- means these tests
+    exercise the real decode boundary the issue is about.
+    """
+
+    def setUp(self):
+        self.categorizer = FileCategorizer()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_ai_marker_text_chunk_probed_without_decode(self):
+        """A PNG whose text chunk carries an AI marker is read undecoded."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "gpt.png"),
+            {"Comment": "Created with ChatGPT / OpenAI"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(
+                img.tile, "fixture PNG was already decoded before the probe"
+            )
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "(img.tile was emptied) merely to read a text chunk",
+            )
+
+        self.assertTrue(result, "the AI marker should still be detected")
+
+    def test_c2pa_key_probed_without_decode(self):
+        """A PNG carrying a bare 'c2pa' provenance key is read undecoded."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "c2pa.png"),
+            {"c2pa": "manifest-stub"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(img.tile)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "merely to read the c2pa key",
+            )
+
+        self.assertTrue(result)
+
+    def test_plain_png_probed_without_decode(self):
+        """A PNG with no provenance markers is also read without decoding."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "plain.png"),
+            {"Comment": "An ordinary caption about a chair on a trail"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(img.tile)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "even though no provenance marker was present",
+            )
+
+        self.assertFalse(result)
+
+
 class TestFileCategorization_EdgeCases(unittest.TestCase):
     """Test edge cases and special scenarios for file categorization"""
 
