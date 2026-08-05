@@ -634,6 +634,192 @@ class TestGeneratedContentPrecision(unittest.TestCase):
         self.assertTrue(self.categorizer._is_generated_content(path))
 
 
+class TestPngProvenanceProbeDoesNotDecode(unittest.TestCase):
+    """PNG text-chunk provenance is read without a full pixel decode (#44).
+
+    ``PngImageFile.text`` calls ``self.load()`` before returning, because
+    tEXt/iTXt chunks are legally permitted to follow IDAT and Pillow will not
+    report a partial answer -- so probing ``.text`` decodes the whole image
+    purely to read metadata. ``img.info`` is populated while ``Image.open()``
+    parses the chunk stream and already holds every chunk written before
+    IDAT, which covers every mainstream generator/C2PA marker, at no extra
+    decode cost.
+
+    Pillow's own decode boundary is ``Image.tile``: it starts as a non-empty
+    list of pending decode ops and ``Image.load()`` (called directly or via
+    any Pillow API documented to force a load) empties it once the pixel data
+    has actually been read. Asserting on ``img.tile`` -- rather than mocking
+    ``_png_text_has_ai_provenance`` or stubbing Pillow -- means these tests
+    exercise the real decode boundary the issue is about.
+    """
+
+    def setUp(self):
+        self.categorizer = FileCategorizer()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_ai_marker_text_chunk_probed_without_decode(self):
+        """A PNG whose text chunk carries an AI marker is read undecoded."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "gpt.png"),
+            {"Comment": "Created with ChatGPT / OpenAI"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(
+                img.tile, "fixture PNG was already decoded before the probe"
+            )
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "(img.tile was emptied) merely to read a text chunk",
+            )
+
+        self.assertTrue(result, "the AI marker should still be detected")
+
+    def test_c2pa_key_probed_without_decode(self):
+        """A PNG carrying a bare 'c2pa' provenance key is read undecoded."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "c2pa.png"),
+            {"c2pa": "manifest-stub"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(img.tile)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "merely to read the c2pa key",
+            )
+
+        self.assertTrue(result)
+
+    def test_plain_png_probed_without_decode(self):
+        """A PNG with no provenance markers is also read without decoding."""
+        from PIL import Image
+
+        path = make_png_with_text(
+            os.path.join(self.temp_dir, "plain.png"),
+            {"Comment": "An ordinary caption about a chair on a trail"},
+        )
+
+        with Image.open(path) as img:
+            self.assertTrue(img.tile)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode "
+                "even though no provenance marker was present",
+            )
+
+        self.assertFalse(result)
+
+    def test_binary_icc_profile_chunk_does_not_cause_false_positive(self):
+        """A marker word embedded in binary ``icc_profile`` bytes must not flag.
+
+        ``img.info`` -- unlike ``img.text`` -- carries every PNG ancillary
+        chunk Pillow parses before IDAT, including binary ones: ``icc_profile``
+        and raw ``exif`` land there as ``bytes``, never as ``str``. Scanning
+        ``str(value)`` for every ``info`` entry (rather than only genuinely
+        text-typed values) would search the *byte-repr* of those blobs too --
+        a real widening of the match surface beyond what ``img.text`` ever
+        exposed, which issue #44 requires this read-path change to avoid. The
+        ICC profile below deliberately contains the ASCII bytes "Firefly" at a
+        word boundary in its ``str()`` repr, and a genuine ``eXIf`` chunk is
+        also present (also binary), alongside an ordinary, non-matching text
+        chunk -- the categorization result must depend only on the text
+        chunk, not on either binary chunk's contents.
+        """
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+        from PIL.ExifTags import TAGS
+
+        path = os.path.join(self.temp_dir, "icc_false_positive.png")
+        image = Image.new("RGB", (16, 16), color="green")
+
+        # Sizeable binary ICC profile whose str() repr contains "Firefly" at
+        # a word boundary -- exactly the shape a value-type-blind scan over
+        # img.info would mis-detect.
+        icc_profile = b"ICC PROFILE WITH Firefly INSIDE" + bytes(512)
+
+        exif = image.getexif()
+        software_tag = next(tid for tid, name in TAGS.items() if name == "Software")
+        exif[software_tag] = "TestCam 1.0"
+
+        metadata = PngInfo()
+        metadata.add_text("Comment", "A family photo from the lake house")
+
+        image.save(path, pnginfo=metadata, icc_profile=icc_profile, exif=exif)
+
+        with Image.open(path) as img:
+            self.assertIn("icc_profile", img.info)
+            self.assertIsInstance(img.info["icc_profile"], bytes)
+            self.assertIn("exif", img.info)
+            self.assertIsInstance(img.info["exif"], bytes)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode",
+            )
+
+        self.assertFalse(
+            result,
+            "a marker word embedded in the binary icc_profile chunk was "
+            "matched as if it were text provenance",
+        )
+
+    def test_genuine_marker_still_detected_alongside_binary_chunks(self):
+        """A real text-chunk marker is still caught when binary chunks coexist.
+
+        Mirrors the false-positive test's fixture shape (binary ``icc_profile``
+        and ``exif`` chunks alongside a text chunk) but with the text chunk
+        actually carrying a marker, confirming the type filter that rejects
+        binary values does not also reject the genuine str-typed text chunks
+        it is meant to keep scanning.
+        """
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+        from PIL.ExifTags import TAGS
+
+        path = os.path.join(self.temp_dir, "icc_true_positive.png")
+        image = Image.new("RGB", (16, 16), color="green")
+
+        # No marker words in this ICC profile -- only the text chunk below
+        # should be able to trigger a match.
+        icc_profile = b"GENERIC DISPLAY PROFILE" + bytes(512)
+
+        exif = image.getexif()
+        software_tag = next(tid for tid, name in TAGS.items() if name == "Software")
+        exif[software_tag] = "TestCam 1.0"
+
+        metadata = PngInfo()
+        metadata.add_text("Comment", "Created with ChatGPT / OpenAI")
+
+        image.save(path, pnginfo=metadata, icc_profile=icc_profile, exif=exif)
+
+        with Image.open(path) as img:
+            self.assertIn("icc_profile", img.info)
+            self.assertIn("exif", img.info)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode",
+            )
+
+        self.assertTrue(
+            result, "the genuine text-chunk marker should still be detected"
+        )
+
+
 class TestFileCategorization_EdgeCases(unittest.TestCase):
     """Test edge cases and special scenarios for file categorization"""
 

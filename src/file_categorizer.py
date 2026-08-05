@@ -225,20 +225,45 @@ class FileCategorizer:
         identifiable keys -- while the value match is confined to whole-word
         product names so ordinary caption text can no longer trip it (issue #8).
 
+        Reads ``img.info`` rather than ``img.text`` (issue #44). Pillow's
+        ``PngImageFile.text`` property calls ``self.load()`` before returning,
+        because tEXt/iTXt chunks are legally allowed to follow IDAT and Pillow
+        will not report a partial answer -- so merely probing ``.text`` forces
+        a full pixel decode of the whole image, at the same cost as an explicit
+        ``load()``, purely to read metadata. ``img.info`` is a plain dict
+        populated while ``Image.open()`` parses the chunk stream and already
+        holds every chunk that precedes IDAT, which is where C2PA manifests and
+        generator ``Software``/``parameters`` chunks are actually written by
+        every mainstream tool; reading it costs nothing extra because
+        ``Image.open()`` performed that parse regardless. The trade-off is a
+        chunk written strictly after IDAT would be invisible here -- no
+        mainstream generator does that, so detection is unaffected in practice.
+
+        Unlike ``img.text``, ``img.info`` also carries every *non*-text PNG
+        ancillary chunk Pillow parses before IDAT -- ``icc_profile``
+        (``bytes``), raw ``exif`` (``bytes``), ``transparency``, ``dpi``,
+        ``gamma``, ``aspect``, and others. Only entries whose value is a
+        ``str`` are scanned below (``PIL.PngImagePlugin.iTXt`` is itself a
+        ``str`` subclass, so unicode iTXt values are included too); this
+        reconstructs exactly ``img.text``'s value-space without decoding, so
+        this is still a how-we-read change, not a what-we-match change --
+        a binary chunk like an ICC profile can never widen what gets matched,
+        the way scanning ``str(value)`` over every ``info`` entry would.
+
         Args:
             img: An open :class:`PIL.Image.Image`.
 
         Returns:
             True if any text chunk indicates AI-generated provenance.
         """
-        text_chunks = getattr(img, 'text', None)
-        if not text_chunks:
+        png_info = getattr(img, 'info', None)
+        if not png_info:
             return False
 
-        for key, value in text_chunks.items():
+        for key, value in png_info.items():
             if str(key).lower() in self.GENERATED_TEXT_KEYS:
                 return True
-            if self.AI_MARKER_PATTERN.search(str(value)):
+            if isinstance(value, str) and self.AI_MARKER_PATTERN.search(value):
                 return True
 
         return False
