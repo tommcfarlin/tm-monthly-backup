@@ -107,21 +107,23 @@ class TestMainCli(unittest.TestCase):
         """A nonexistent export directory exits with the precondition code."""
         missing = os.path.join(self.temp_dir, "does_not_exist")
         result = self.runner.invoke(
-            main, ["--export-dir", missing, "--backup-dir", self.backup_dir]
+            main,
+            ["--export-dir", missing, "--backup-dir", self.backup_dir, "--yes"],
         )
 
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
         self.assertIn("Cannot proceed", result.output)
 
     def test_successful_run_exits_zero(self):
-        """A confirmed run over a decodable photo processes it and exits 0."""
+        """A confirmed (--yes) run over a decodable photo processes it and
+        exits 0, with no prompt to answer and without patching ``Confirm.ask``
+        (issue #33)."""
         make_exif_jpeg(
             os.path.join(self.export_dir, "pic.jpg"),
             date_time_original="2024:01:15 14:30:45",
         )
 
-        # 'y' confirms the "Proceed with processing" prompt.
-        result = self.runner.invoke(main, self._args(), input="y\n")
+        result = self.runner.invoke(main, self._args("--yes"))
 
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertIn("All files processed successfully", result.output)
@@ -146,13 +148,21 @@ class TestMainCli(unittest.TestCase):
         )
 
     def test_declining_prompt_is_cancelled(self):
-        """Answering no to the confirmation exits with the cancel code."""
+        """Answering no to the confirmation exits with the cancel code.
+
+        No ``--yes`` is passed here -- the point is to exercise the real
+        prompt -- so the non-interactive gate (issue #33) is bypassed by
+        forcing ``_stdin_is_interactive`` True, standing in for a real TTY
+        that ``CliRunner`` cannot provide (it never presents stdin as a tty,
+        even when ``input=`` supplies text for a prompt to read).
+        """
         make_exif_jpeg(
             os.path.join(self.export_dir, "pic.jpg"),
             date_time_original="2024:01:15 14:30:45",
         )
 
-        result = self.runner.invoke(main, self._args(), input="n\n")
+        with patch("src.main._stdin_is_interactive", return_value=True):
+            result = self.runner.invoke(main, self._args(), input="n\n")
 
         self.assertEqual(result.exit_code, EXIT_CANCELLED)
 
@@ -168,7 +178,7 @@ class TestMainCli(unittest.TestCase):
             "src.main.CLIInterface.process_with_progress",
             return_value=fake_results,
         ), patch("src.main.CLIInterface.check_directories", return_value=True):
-            result = self.runner.invoke(main, self._args())
+            result = self.runner.invoke(main, self._args("--yes"))
 
         self.assertEqual(result.exit_code, EXIT_PARTIAL_FAILURE)
         # Rich styles the count separately, so match the surrounding phrase.
@@ -181,7 +191,7 @@ class TestMainCli(unittest.TestCase):
             "src.main.CLIInterface.process_with_progress",
             return_value={"status": "cancelled"},
         ), patch("src.main.CLIInterface.check_directories", return_value=True):
-            result = self.runner.invoke(main, self._args())
+            result = self.runner.invoke(main, self._args("--yes"))
 
         self.assertEqual(result.exit_code, EXIT_CANCELLED)
 
@@ -191,7 +201,7 @@ class TestMainCli(unittest.TestCase):
             "src.main.CLIInterface.process_with_progress",
             side_effect=ValueError("overlapping directories"),
         ), patch("src.main.CLIInterface.check_directories", return_value=True):
-            result = self.runner.invoke(main, self._args())
+            result = self.runner.invoke(main, self._args("--yes"))
 
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
         self.assertIn("Configuration error", result.output)
@@ -202,7 +212,7 @@ class TestMainCli(unittest.TestCase):
             "src.main.CLIInterface.process_with_progress",
             side_effect=KeyboardInterrupt,
         ), patch("src.main.CLIInterface.check_directories", return_value=True):
-            result = self.runner.invoke(main, self._args())
+            result = self.runner.invoke(main, self._args("--yes"))
 
         self.assertEqual(result.exit_code, EXIT_CANCELLED)
         self.assertIn("interrupted by user", result.output)
@@ -213,7 +223,7 @@ class TestMainCli(unittest.TestCase):
             "src.main.CLIInterface.process_with_progress",
             side_effect=RuntimeError("boom"),
         ), patch("src.main.CLIInterface.check_directories", return_value=True):
-            result = self.runner.invoke(main, self._args("--verbose"))
+            result = self.runner.invoke(main, self._args("--verbose", "--yes"))
 
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
         self.assertIn("Unexpected error", result.output)

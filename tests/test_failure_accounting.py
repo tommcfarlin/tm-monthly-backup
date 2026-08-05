@@ -246,18 +246,23 @@ class TestExitCodeTaxonomy(unittest.TestCase):
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
 
     def test_clean_run_exits_zero_end_to_end(self):
-        """A real, confirmed run over a good file exits 0 through ``main``."""
+        """A real, --yes-confirmed run over a good file exits 0 through
+        ``main`` -- the full pipeline, with no ``Confirm.ask`` patch anywhere
+        (issue #33's non-interactive path)."""
         make_exif_jpeg(
             os.path.join(self.export_dir, "good.jpg"),
             date_time_original="2024:08:08 08:08:08",
         )
         runner = CliRunner()
 
-        with patch("src.cli_interface.Confirm.ask", return_value=True):
-            result = runner.invoke(
-                main,
-                ["--export-dir", self.export_dir, "--backup-dir", self.backup_dir],
-            )
+        result = runner.invoke(
+            main,
+            [
+                "--export-dir", self.export_dir,
+                "--backup-dir", self.backup_dir,
+                "--yes",
+            ],
+        )
 
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
 
@@ -278,13 +283,17 @@ class TestExitCodeTaxonomy(unittest.TestCase):
         )
         runner = CliRunner()
 
-        with patch("src.cli_interface.Confirm.ask", return_value=True), patch(
+        with patch(
             "src.heic_converter.HeicConverter.convert_heic_to_jpeg",
             return_value=None,
         ):
             result = runner.invoke(
                 main,
-                ["--export-dir", self.export_dir, "--backup-dir", self.backup_dir],
+                [
+                    "--export-dir", self.export_dir,
+                    "--backup-dir", self.backup_dir,
+                    "--yes",
+                ],
             )
 
         self.assertEqual(result.exit_code, EXIT_PARTIAL_FAILURE)

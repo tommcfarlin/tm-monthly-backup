@@ -17,6 +17,24 @@ EXIT_PRECONDITION = 2       # cannot run: bad/overlapping dirs, unexpected error
 EXIT_CANCELLED = 130        # user declined the prompt or sent SIGINT (128 + 2)
 
 
+def _stdin_is_interactive() -> bool:
+    """
+    Report whether stdin is an interactive terminal.
+
+    Factored out of :func:`main` so the non-interactive gate below can be
+    exercised in tests without a real TTY. Patching ``sys.stdin.isatty``
+    directly does not reliably work under ``click.testing.CliRunner``: the
+    runner replaces the ``sys.stdin`` object itself during ``invoke()``, so a
+    patch applied to whatever object was ``sys.stdin`` beforehand attaches to
+    an object the runner immediately discards. Patching this function's
+    return value instead is unaffected by that swap.
+
+    Returns:
+        ``sys.stdin.isatty()``.
+    """
+    return sys.stdin.isatty()
+
+
 def determine_exit_code(results: dict) -> int:
     """
     Map a processing-results dict to a process exit code.
@@ -47,11 +65,13 @@ def determine_exit_code(results: dict) -> int:
 
 @click.command()
 @click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
+@click.option('--yes', '-y', is_flag=True,
+              help='Assume yes for all prompts (required for non-interactive use)')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.option('--export-dir', default='export', help='Directory containing exported files (default: export)')
 @click.option('--backup-dir', default='backup', help='Directory for organized output (default: backup)')
 @click.version_option(version='1.0.0', prog_name='tm-monthly-backup')
-def main(dry_run, verbose, export_dir, backup_dir):
+def main(dry_run, yes, verbose, export_dir, backup_dir):
     """
     Process exported Apple Photos files and organize them by type.
 
@@ -61,7 +81,22 @@ def main(dry_run, verbose, export_dir, backup_dir):
     - Organize files into photos/, videos/, and screenshots/ directories
     - Remove Apple sidecar (.aae) files
     - Handle duplicate timestamps intelligently
+
+    Interactive confirmation prompts require a terminal. Pass --yes to assume
+    yes for all of them (needed for cron, CI, or any other non-interactive
+    invocation); --dry-run never prompts, since it makes no changes to confirm.
     """
+
+    # A run with no terminal to prompt from (cron, CI, `nohup`, a piped
+    # invocation) would otherwise hit a bare, unexplained EOFError once a
+    # confirmation prompt is actually reached. Fail fast here instead, before
+    # any other setup, with an actionable instruction naming both opt-outs:
+    # --yes assumes yes for every prompt, and --dry-run never prompts at all
+    # because it makes no change that needs confirming (issue #33).
+    if not _stdin_is_interactive() and not (yes or dry_run):
+        raise click.UsageError(
+            "No terminal available for confirmation. Re-run with --yes or --dry-run."
+        )
 
     # Setup logging with rich formatting
     setup_logging(verbose)
@@ -75,14 +110,17 @@ def main(dry_run, verbose, export_dir, backup_dir):
     # Check directories and prerequisites. A directory problem (missing export
     # dir, unwritable backup dir, or the #52 overlap rejection) is a
     # precondition failure -- nothing was attempted -- so it exits distinctly
-    # from a partial processing failure.
-    if not cli.check_directories():
+    # from a partial processing failure. ``auto_confirm`` skips the
+    # empty-export "Continue anyway?" prompt: --yes is the explicit
+    # non-interactive opt-out, and --dry-run touches nothing, so that prompt
+    # guards no risk on a dry run either (issue #33).
+    if not cli.check_directories(auto_confirm=yes or dry_run):
         cli.console.print("[red]Cannot proceed due to directory issues.[/red]")
         sys.exit(EXIT_PRECONDITION)
 
     try:
         # Process files with beautiful progress indicators
-        results = cli.process_with_progress(dry_run=dry_run)
+        results = cli.process_with_progress(dry_run=dry_run, yes=yes)
 
         exit_code = determine_exit_code(results)
 

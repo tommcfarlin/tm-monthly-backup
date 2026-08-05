@@ -165,9 +165,16 @@ class CLIInterface:
         )
         self.console.print(panel)
 
-    def check_directories(self) -> bool:
+    def check_directories(self, auto_confirm: bool = False) -> bool:
         """
         Check if required directories exist and are accessible.
+
+        Args:
+            auto_confirm: Skip the empty-export "Continue anyway?" prompt and
+                proceed as though it were accepted. The caller sets this when
+                ``--yes`` or ``--dry-run`` was passed (issue #33): ``--yes`` is
+                the explicit non-interactive opt-out, and a dry run touches
+                nothing, so the prompt guards no risk either way.
 
         Returns:
             True if directories are ready, False otherwise
@@ -197,7 +204,7 @@ class CLIInterface:
 
         if not any(export_path.iterdir()):
             self.console.print(f"[yellow]Warning: Export directory is empty: {safe_export}[/yellow]")
-            if not Confirm.ask("Continue anyway?"):
+            if not auto_confirm and not Confirm.ask("Continue anyway?"):
                 return False
 
         # Create backup directory if needed
@@ -258,7 +265,7 @@ class CLIInterface:
 
         self.console.print(table)
 
-    def process_with_progress(self, dry_run: bool = False) -> Dict:
+    def process_with_progress(self, dry_run: bool = False, yes: bool = False) -> Dict:
         """
         Process files with beautiful progress indicators.
 
@@ -274,11 +281,15 @@ class CLIInterface:
 
         Args:
             dry_run: If True, only show what would be done
+            yes: If True, skip the "Proceed with processing N files?" prompt
+                and proceed as though it were accepted (issue #33) -- the
+                command layer's non-interactive opt-out. Ignored on a dry run,
+                which already never prompts.
 
         Returns:
             Processing results dictionary
         """
-        reporter = _CLIProgressReporter(self, dry_run)
+        reporter = _CLIProgressReporter(self, dry_run, yes)
         try:
             summary = self.processor.process_all_files(
                 dry_run=dry_run, progress=reporter
@@ -459,11 +470,14 @@ class _CLIProgressReporter(ProgressReporter):
 
     * :meth:`on_no_files` -- print the "nothing to do" notice and flag it.
     * :meth:`on_categorized` -- render the discovery table, print the dry-run
-      notice, and (for a real run) run the confirmation prompt. Declining aborts
-      the run before anything is touched. On proceeding, it starts two real
-      progress bars sized from data the seam now carries: a conversion bar
-      (total = the ``'heic'`` count) shown only when there is at least one HEIC
-      file, and an organize bar (total = every processable file).
+      notice, and (for a real run not auto-confirmed by ``--yes``) run the
+      confirmation prompt. Declining aborts the run before anything is
+      touched; ``--yes`` skips the prompt and proceeds as though it were
+      accepted -- the non-interactive opt-out (issue #33). On proceeding, it
+      starts two real progress bars sized from data the seam now carries: a
+      conversion bar (total = the ``'heic'`` count) shown only when there is
+      at least one HEIC file, and an organize bar (total = every processable
+      file).
     * :meth:`on_heic_converted` -- advance the conversion bar by one, with the
       just-converted file's name in its description. This is what makes the
       conversion bar move *during* the parallel HEIC pool phase (issue #42)
@@ -482,14 +496,17 @@ class _CLIProgressReporter(ProgressReporter):
     code) without inspecting private state.
     """
 
-    def __init__(self, cli: "CLIInterface", dry_run: bool):
+    def __init__(self, cli: "CLIInterface", dry_run: bool, yes: bool = False):
         """
         Args:
             cli: The owning interface (for its console and render helpers).
             dry_run: Whether this run is a dry run (skips the confirm prompt).
+            yes: Whether ``--yes`` was passed (skips the confirm prompt on a
+                real run, proceeding as though it were accepted; issue #33).
         """
         self.cli = cli
         self.dry_run = dry_run
+        self.yes = yes
         self.no_files = False
         self.cancelled = False
         self._progress = None
@@ -519,11 +536,13 @@ class _CLIProgressReporter(ProgressReporter):
             self.cli.console.print(
                 "\n[bold blue]DRY RUN MODE[/bold blue] - No files will be modified"
             )
-        else:
-            if not Confirm.ask(f"\nProceed with processing {total} files?"):
-                self.cli.console.print("[yellow]Processing cancelled[/yellow]")
-                self.cancelled = True
-                return False
+        elif not self.yes and not Confirm.ask(f"\nProceed with processing {total} files?"):
+            # ``self.yes`` short-circuits the prompt entirely when --yes was
+            # passed (issue #33): the run proceeds exactly as an accepted
+            # prompt would, without ever calling ``Confirm.ask``.
+            self.cli.console.print("[yellow]Processing cancelled[/yellow]")
+            self.cancelled = True
+            return False
 
         # Start the bars only after any prompt is answered, so the live
         # display never overlaps the interactive confirm. Sidecars are
