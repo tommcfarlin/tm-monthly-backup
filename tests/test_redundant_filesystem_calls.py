@@ -153,5 +153,129 @@ class TestDryRunStillCreatesNoDirectories(unittest.TestCase):
         self.assertFalse(os.path.exists(self.backup_dir))
 
 
+class TestAbsentTargetDirectoryRecordsRealCause(unittest.TestCase):
+    """
+    Fix round 1 regression test: an absent ``target_dir`` must be recorded as
+    a ``move_file`` failure carrying the real ``FileNotFoundError``, not an
+    ``UnboundLocalError`` raised out of the ``except`` handler itself.
+
+    Removing the per-file ``os.makedirs`` (this issue) made "target directory
+    absent" a live way to reach ``_process_single_file``'s ``except Exception
+    as e:`` handler with ``target_path`` never assigned -- that handler
+    references ``target_path`` (for the log message), which was previously
+    bound unconditionally by the removed call's side effect (every prior
+    caller went through ``ensure_target_directories`` too, so in practice this
+    path was never actually exercised, but the local variable's binding
+    depended on it regardless). ``target_path = None`` is now bound before the
+    ``try:`` -- mirroring ``_process_unknown_file``/``_quarantine_file``,
+    which already did this -- so the handler can always reference it.
+
+    Drives ``_process_category`` directly, deliberately never creating (or
+    removing) ``target_dir``, mirroring how the reviewer reproduced this.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.temp_dir, "export")
+        self.backup_dir = os.path.join(self.temp_dir, "backup")
+        os.makedirs(self.export_dir)
+        # Deliberately NOT creating self.backup_dir or any category
+        # subdirectory -- that absence is exactly what is under test.
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_missing_target_dir_records_move_file_failure_with_real_cause(self):
+        from src.file_categorizer import FileCategory
+
+        photo = make_exif_jpeg(
+            os.path.join(self.export_dir, "photo.jpg"),
+            date_time_original="2024:01:01 01:01:01",
+        )
+        target_dir = os.path.join(self.backup_dir, "photos")
+        processor = FileProcessor(self.export_dir, self.backup_dir)
+
+        # Drive the category loop directly -- process_all_files is not
+        # involved, so ensure_target_directories never runs and target_dir
+        # genuinely does not exist on disk.
+        processor._process_category(FileCategory.PHOTO, [photo], dry_run=False)
+
+        self.assertEqual(len(processor._failed_files), 1)
+        kind, path, message = processor._failed_files[0]
+        self.assertEqual(kind, "move_file")
+        self.assertEqual(path, photo)
+        # The real cause -- not the UnboundLocalError that leaked out of the
+        # except handler itself before this fix.
+        self.assertIn("No such file or directory", message)
+        self.assertNotIn("target_path", message)
+        self.assertNotIn("cannot access local variable", message)
+
+        # No data lost: the original is still sitting in export/ untouched.
+        self.assertTrue(os.path.isfile(photo))
+        self.assertFalse(os.path.isdir(target_dir))
+
+    def test_missing_target_dir_through_real_entry_point_mid_run(self):
+        """
+        Same failure mode, reproduced through the real public entry point:
+        the category directory is deleted between two files' placements, so
+        whichever of the two is placed SECOND hits the absent-directory path
+        while the other succeeds normally.
+
+        Deliberately does not assume which of the two files the categorizer
+        hands to ``_process_category`` first -- directory enumeration order
+        (``os.walk``) is not guaranteed to match creation order on every
+        filesystem, and the property under test (one succeeds, one fails with
+        the REAL cause, nothing is lost) holds regardless of which is which.
+        """
+        photo_a = make_exif_jpeg(
+            os.path.join(self.export_dir, "photo_a.jpg"),
+            date_time_original="2024:01:01 01:01:01",
+        )
+        photo_b = make_exif_jpeg(
+            os.path.join(self.export_dir, "photo_b.jpg"),
+            date_time_original="2024:01:02 02:02:02",
+        )
+        processor = FileProcessor(self.export_dir, self.backup_dir)
+
+        real_process_single_file = processor._process_single_file
+        photos_dir = os.path.join(self.backup_dir, "photos")
+        call_count = {"n": 0}
+
+        def delete_dir_before_second_call(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                shutil.rmtree(photos_dir)
+            return real_process_single_file(*args, **kwargs)
+
+        with patch.object(
+            processor,
+            "_process_single_file",
+            side_effect=delete_dir_before_second_call,
+        ):
+            results = processor.process_all_files(dry_run=False)
+
+        self.assertEqual(call_count["n"], 2)
+        self.assertEqual(results["files_processed"], 1)
+        self.assertEqual(results["files_failed"], 1)
+        kind, failed_path, message = processor._failed_files[0]
+        self.assertEqual(kind, "move_file")
+        self.assertIn(failed_path, {photo_a, photo_b})
+        self.assertIn("No such file or directory", message)
+        self.assertNotIn("cannot access local variable", message)
+
+        # No data lost for the failed file specifically: its original is
+        # still sitting in export/ at its original path -- the move never
+        # happened, so nothing was destroyed by the failure itself. (The
+        # succeeded file's original is correctly gone from export/ -- it was
+        # moved before photos_dir was rmtree'd out from under the run; that
+        # rmtree deleting the already-landed copy along with the directory is
+        # an external action outside the tool's control, not something this
+        # test needs -- or is able -- to guard against.)
+        self.assertTrue(
+            os.path.isfile(failed_path),
+            "the failed file's original must remain in export/, untouched",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
