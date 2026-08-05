@@ -723,6 +723,102 @@ class TestPngProvenanceProbeDoesNotDecode(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_binary_icc_profile_chunk_does_not_cause_false_positive(self):
+        """A marker word embedded in binary ``icc_profile`` bytes must not flag.
+
+        ``img.info`` -- unlike ``img.text`` -- carries every PNG ancillary
+        chunk Pillow parses before IDAT, including binary ones: ``icc_profile``
+        and raw ``exif`` land there as ``bytes``, never as ``str``. Scanning
+        ``str(value)`` for every ``info`` entry (rather than only genuinely
+        text-typed values) would search the *byte-repr* of those blobs too --
+        a real widening of the match surface beyond what ``img.text`` ever
+        exposed, which issue #44 requires this read-path change to avoid. The
+        ICC profile below deliberately contains the ASCII bytes "Firefly" at a
+        word boundary in its ``str()`` repr, and a genuine ``eXIf`` chunk is
+        also present (also binary), alongside an ordinary, non-matching text
+        chunk -- the categorization result must depend only on the text
+        chunk, not on either binary chunk's contents.
+        """
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+        from PIL.ExifTags import TAGS
+
+        path = os.path.join(self.temp_dir, "icc_false_positive.png")
+        image = Image.new("RGB", (16, 16), color="green")
+
+        # Sizeable binary ICC profile whose str() repr contains "Firefly" at
+        # a word boundary -- exactly the shape a value-type-blind scan over
+        # img.info would mis-detect.
+        icc_profile = b"ICC PROFILE WITH Firefly INSIDE" + bytes(512)
+
+        exif = image.getexif()
+        software_tag = next(tid for tid, name in TAGS.items() if name == "Software")
+        exif[software_tag] = "TestCam 1.0"
+
+        metadata = PngInfo()
+        metadata.add_text("Comment", "A family photo from the lake house")
+
+        image.save(path, pnginfo=metadata, icc_profile=icc_profile, exif=exif)
+
+        with Image.open(path) as img:
+            self.assertIn("icc_profile", img.info)
+            self.assertIsInstance(img.info["icc_profile"], bytes)
+            self.assertIn("exif", img.info)
+            self.assertIsInstance(img.info["exif"], bytes)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode",
+            )
+
+        self.assertFalse(
+            result,
+            "a marker word embedded in the binary icc_profile chunk was "
+            "matched as if it were text provenance",
+        )
+
+    def test_genuine_marker_still_detected_alongside_binary_chunks(self):
+        """A real text-chunk marker is still caught when binary chunks coexist.
+
+        Mirrors the false-positive test's fixture shape (binary ``icc_profile``
+        and ``exif`` chunks alongside a text chunk) but with the text chunk
+        actually carrying a marker, confirming the type filter that rejects
+        binary values does not also reject the genuine str-typed text chunks
+        it is meant to keep scanning.
+        """
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+        from PIL.ExifTags import TAGS
+
+        path = os.path.join(self.temp_dir, "icc_true_positive.png")
+        image = Image.new("RGB", (16, 16), color="green")
+
+        # No marker words in this ICC profile -- only the text chunk below
+        # should be able to trigger a match.
+        icc_profile = b"GENERIC DISPLAY PROFILE" + bytes(512)
+
+        exif = image.getexif()
+        software_tag = next(tid for tid, name in TAGS.items() if name == "Software")
+        exif[software_tag] = "TestCam 1.0"
+
+        metadata = PngInfo()
+        metadata.add_text("Comment", "Created with ChatGPT / OpenAI")
+
+        image.save(path, pnginfo=metadata, icc_profile=icc_profile, exif=exif)
+
+        with Image.open(path) as img:
+            self.assertIn("icc_profile", img.info)
+            self.assertIn("exif", img.info)
+            result = self.categorizer._png_text_has_ai_provenance(img)
+            self.assertTrue(
+                img.tile,
+                "_png_text_has_ai_provenance forced a full pixel decode",
+            )
+
+        self.assertTrue(
+            result, "the genuine text-chunk marker should still be detected"
+        )
+
 
 class TestFileCategorization_EdgeCases(unittest.TestCase):
     """Test edge cases and special scenarios for file categorization"""
