@@ -5,7 +5,7 @@ EXIF timestamp extraction and handling module for photos and videos
 import os
 import struct
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Iterator, Optional, Tuple
 from pathlib import Path
 from PIL import Image
@@ -228,6 +228,41 @@ def parse_local_creationdate(value: str) -> Optional[datetime]:
     # Keep the wall-clock reading; discard the offset so the file is named by
     # the local time Apple recorded, not a UTC-shifted value.
     return parsed.replace(tzinfo=None)
+
+
+def _hachoir_creation_date(metadata) -> Optional[datetime]:
+    """
+    Read hachoir's ``creation_date`` field via its real ``get`` API (issue #16).
+
+    hachoir's ``Metadata`` object has no ``creation_date`` attribute -- it
+    exposes values through ``get(key)`` -- so the previous ``hasattr``/
+    ``getattr`` probe never fired and every video paid for the
+    ``exportPlaintext()`` fallback. ``get`` also raises ``ValueError``,
+    rather than returning ``None``, when the key has no value, so that is
+    guarded here rather than at each call site.
+
+    The registered ``creation_date`` key's declared type is
+    ``(datetime, date)``. A bare ``date`` (no time-of-day) is promoted to
+    midnight so this always returns a real ``datetime`` or ``None`` --
+    never the raw hachoir value -- closing the type hazard where a non-
+    ``datetime`` result reached ``format_timestamp_filename``'s
+    ``dt.strftime(...)`` unchecked.
+
+    Args:
+        metadata: A hachoir ``Metadata`` object (or compatible test double).
+
+    Returns:
+        A ``datetime``, or ``None`` if the key is absent or not a usable type.
+    """
+    try:
+        value = metadata.get('creation_date')
+    except ValueError:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time())
+    return None
 
 
 class ExifHandler:
@@ -479,6 +514,13 @@ class ExifHandler:
         absent. The value hachoir reports is UTC, so a file named from it may be
         off by the local UTC offset -- a pre-existing limitation retained here.
 
+        Looks up hachoir's ``creation_date`` field via its real ``get(key)`` API
+        (issue #16 -- the previous ``hasattr``/``getattr`` probe named a field
+        hachoir does not expose as an attribute, so it never fired and every
+        video paid for the ``exportPlaintext()`` scan below regardless). That
+        scan remains as a genuine last resort, reached only when the direct
+        lookup finds nothing usable.
+
         Args:
             file_path: Path to video file
 
@@ -504,34 +546,26 @@ class ExifHandler:
                     self.missing_exif_files.append(file_path)
                     return None
 
-                # Try to get creation date from various metadata fields
-                creation_date = None
+                creation_date = _hachoir_creation_date(metadata)
 
-                # Common metadata fields for creation date
-                for field_name in ['creation_date', 'date', 'creation_time', 'media_creation']:
-                    try:
-                        if hasattr(metadata, field_name):
-                            creation_date = getattr(metadata, field_name)
-                            break
-                    except:
-                        continue
-
-                # If no direct field, try iterating through all metadata
-                if not creation_date:
+                # Last resort only: reached when the direct lookup found nothing
+                # usable. Iterates hachoir's rendered metadata lines and regex-
+                # scans them for a date, which materializes every field as text.
+                if creation_date is None:
                     for line in metadata.exportPlaintext():
                         line_lower = line.lower()
-                        if any(keyword in line_lower for keyword in ['creation', 'date', 'time']):
-                            # Extract timestamp from metadata line
-                            try:
-                                import re
-                                # Look for date patterns
-                                date_match = re.search(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})', line)
-                                if date_match:
-                                    date_str = date_match.group(1).replace('T', ' ')
-                                    creation_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                                    break
-                            except:
-                                continue
+                        if not any(keyword in line_lower for keyword in ('creation', 'date', 'time')):
+                            continue
+                        import re
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})', line)
+                        if not date_match:
+                            continue
+                        date_str = date_match.group(1).replace('T', ' ')
+                        try:
+                            creation_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                            break
+                        except Exception:
+                            continue
 
                 if creation_date:
                     logger.info("Extracted video creation date: %s -> %s", file_path, creation_date)
