@@ -390,13 +390,11 @@ class FileProcessor:
             stats = self.categorizer.get_categorization_stats()
             # Issue #14 addition: the count of processable files that are HEIC
             # -- not a categorization category of its own, so it is not among
-            # the keys ``get_categorization_stats`` already returns.
-            stats['heic'] = sum(
-                1
-                for files in processable_files.values()
-                for path in files
-                if self.heic_converter.is_heic_file(path)
-            )
+            # the keys ``get_categorization_stats`` already returns. Uses the
+            # SAME selection ``_prepare_heic_conversions`` uses below, so the
+            # conversion bar's total can never drift from the set of files
+            # that actually go through ``on_heic_converted``.
+            stats['heic'] = len(self._collect_heic_files(processable_files))
             if not progress.on_categorized(len(all_files), stats):
                 logger.info("Processing aborted by progress reporter")
                 return self._generate_summary()
@@ -543,6 +541,36 @@ class FileProcessor:
             if progress is not None:
                 progress.on_file(file_path, category.value, action)
 
+    def _collect_heic_files(
+        self, processable_files: Dict[FileCategory, List[str]]
+    ) -> List[str]:
+        """
+        Return every HEIC/HEIF file across all processable categories.
+
+        Single source of truth for "which files are HEIC" among the
+        processable set, shared by :meth:`process_all_files` (to size the
+        issue #14 conversion-bar total) and :meth:`_prepare_heic_conversions`
+        (to select the pool's input). The conversion bar's correctness IS the
+        equality of those two counts: if the selection changed independently
+        in each place, the bar would drift from what ``on_heic_converted``
+        actually reports -- hanging short of its total or overshooting it,
+        since ``rich`` does not clamp ``completed`` to ``total``.
+
+        Args:
+            processable_files: The per-category file lists about to be placed.
+
+        Returns:
+            Every HEIC/HEIF source path among ``processable_files``, in
+            per-category-then-scan order (the same order
+            ``processable_files`` itself iterates in).
+        """
+        return [
+            path
+            for files in processable_files.values()
+            for path in files
+            if self.heic_converter.is_heic_file(path)
+        ]
+
     def _prepare_heic_conversions(
         self,
         processable_files: Dict[FileCategory, List[str]],
@@ -551,12 +579,13 @@ class FileProcessor:
         """
         Run the parallel HEIC convert phase, populating ``_converted_heic``.
 
-        Collects every HEIC file across all processable categories and, only
-        when there are enough of them to amortize pool startup
-        (``HEIC_PARALLEL_THRESHOLD``), converts them in a bounded process pool.
-        Below the threshold nothing is done: ``_converted_heic`` stays empty and
-        each HEIC is converted inline in the sequential place phase, exactly as
-        before issue #42. Non-HEIC files never enter here.
+        Collects every HEIC file across all processable categories (via
+        :meth:`_collect_heic_files`) and, only when there are enough of them
+        to amortize pool startup (``HEIC_PARALLEL_THRESHOLD``), converts them
+        in a bounded process pool. Below the threshold nothing is done:
+        ``_converted_heic`` stays empty and each HEIC is converted inline in
+        the sequential place phase, exactly as before issue #42. Non-HEIC
+        files never enter here.
 
         This method performs conversions only; it assigns no timestamps, moves
         nothing, and deletes nothing. All of that stays in the sequential place
@@ -570,12 +599,7 @@ class FileProcessor:
                 the sequential place phase reports those files itself, inline,
                 as each is actually converted.
         """
-        heic_files = [
-            path
-            for files in processable_files.values()
-            for path in files
-            if self.heic_converter.is_heic_file(path)
-        ]
+        heic_files = self._collect_heic_files(processable_files)
         if len(heic_files) < self.HEIC_PARALLEL_THRESHOLD:
             # Not worth a pool: leave the map empty so the place phase converts
             # these inline (sequentially), matching pre-#42 behaviour exactly.

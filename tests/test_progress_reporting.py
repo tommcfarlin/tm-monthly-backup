@@ -253,7 +253,8 @@ class TestCLIProgressBars(unittest.TestCase):
     def _task(self, reporter, task_id):
         return next(t for t in reporter._progress.tasks if t.id == task_id)
 
-    def test_convert_and_organize_totals_and_completion(self):
+    def test_convert_and_organize_totals_and_completion_inline_path(self):
+        """Below the pool threshold, each HEIC converts inline."""
         for index in range(3):
             make_exif_heic(
                 os.path.join(self.export, f"IMG_{index:04d}.heic"),
@@ -266,6 +267,7 @@ class TestCLIProgressBars(unittest.TestCase):
             )
 
         cli = _recording_cli(self.export, self.backup)
+        self.assertLess(3, cli.processor.HEIC_PARALLEL_THRESHOLD)
         reporter = _CLIProgressReporter(cli, dry_run=False)
         with patch("src.cli_interface.Confirm.ask", return_value=True):
             summary = cli.processor.process_all_files(
@@ -287,6 +289,96 @@ class TestCLIProgressBars(unittest.TestCase):
         self.assertEqual(convert_task.completed, 3)
         self.assertEqual(organize_task.total, 5)
         self.assertEqual(organize_task.completed, 5)
+
+        reporter.close()
+
+    def test_convert_and_organize_totals_and_completion_pool_path(self):
+        """At/above the pool threshold, the conversion bar must still reach
+        its real total, driven entirely by the pool's ``as_completed`` loop
+        (this is the batch size the issue is actually about -- a 3-file
+        inline-path batch alone would not catch a divergence between the
+        pool's HEIC selection and the bar's total, see issue #14 review
+        finding 2)."""
+        for index in range(9):
+            make_exif_heic(
+                os.path.join(self.export, f"IMG_{index:04d}.heic"),
+                date_time_original=f"2024:07:01 08:00:{index:02d}",
+            )
+        for index in range(2):
+            make_exif_jpeg(
+                os.path.join(self.export, f"pic_{index}.jpg"),
+                date_time_original=f"2024:07:02 09:00:0{index}",
+            )
+
+        cli = _recording_cli(self.export, self.backup)
+        self.assertGreaterEqual(9, cli.processor.HEIC_PARALLEL_THRESHOLD)
+        reporter = _CLIProgressReporter(cli, dry_run=False)
+        with patch("src.cli_interface.Confirm.ask", return_value=True):
+            summary = cli.processor.process_all_files(
+                dry_run=False, progress=reporter
+            )
+
+        self.assertEqual(summary['files_processed'], 11)
+        self.assertIsNotNone(reporter._convert_task)
+        self.assertIsNotNone(reporter._organize_task)
+
+        convert_task = self._task(reporter, reporter._convert_task)
+        organize_task = self._task(reporter, reporter._organize_task)
+
+        self.assertEqual(convert_task.total, 9)
+        self.assertEqual(convert_task.completed, 9)
+        self.assertEqual(organize_task.total, 11)
+        self.assertEqual(organize_task.completed, 11)
+
+        reporter.close()
+
+    def test_no_convert_bar_in_dry_run_even_with_heic_present(self):
+        """A dry run converts nothing (#10), so the convert bar must not
+        appear at all -- a spinning 0/N would read as work pending or hung,
+        when there is no conversion phase in a dry run to report on."""
+        for index in range(3):
+            make_exif_heic(
+                os.path.join(self.export, f"IMG_{index:04d}.heic"),
+                date_time_original=f"2024:06:01 08:00:{index:02d}",
+            )
+
+        cli = _recording_cli(self.export, self.backup)
+        reporter = _CLIProgressReporter(cli, dry_run=True)
+        summary = cli.processor.process_all_files(dry_run=True, progress=reporter)
+
+        self.assertEqual(summary['files_processed'], 0)  # dry run: no side effects
+        self.assertIsNone(reporter._convert_task)
+        self.assertIsNotNone(reporter._organize_task)
+        self.assertEqual(len(reporter._progress.tasks), 1)
+
+        reporter.close()
+
+    def test_organize_bar_real_total_zero_for_all_sidecar_batch(self):
+        """All-sidecar input: files exist (on_no_files does not fire), but the
+        processable total is genuinely 0. The bar must be created with a real,
+        concrete total of ``0`` -- not ``None`` (indeterminate), which is what
+        the old ``processable_total or None`` fallback produced for this exact
+        input, since ``0`` is falsy. A concrete zero total renders a static 0%
+        bar; ``None`` renders an indeterminate pulsing bar that never reflects
+        the (correct, if unglamorous) truth that there is nothing to organize.
+        """
+        open(os.path.join(self.export, "a.aae"), "wb").close()
+
+        cli = _recording_cli(self.export, self.backup)
+        reporter = _CLIProgressReporter(cli, dry_run=False)
+        with patch("src.cli_interface.Confirm.ask", return_value=True):
+            summary = cli.processor.process_all_files(
+                dry_run=False, progress=reporter
+            )
+
+        self.assertEqual(summary['files_processed'], 0)
+        self.assertIsNone(reporter._convert_task)
+        self.assertIsNotNone(reporter._organize_task)
+
+        organize_task = self._task(reporter, reporter._organize_task)
+        self.assertIsNotNone(organize_task.total)
+        self.assertEqual(organize_task.total, 0)
+        self.assertEqual(organize_task.completed, 0)
 
         reporter.close()
 

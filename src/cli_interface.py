@@ -539,14 +539,23 @@ class _CLIProgressReporter(ProgressReporter):
             console=self.cli.console,
         )
         self._progress.start()
-        # Only shown when there is HEIC work to do: a batch with none would
-        # otherwise show a permanently-empty bar for a phase that never runs.
-        if heic_total > 0:
+        # Only shown when there is HEIC work that will actually run: a batch
+        # with no HEIC files would show a permanently-empty bar for a phase
+        # that never runs, and a dry run converts nothing at all (issue #10),
+        # so a HEIC-carrying dry run would show the same thing -- a spinning
+        # 0/N that reads as work pending or hung, when there is in fact no
+        # conversion phase in a dry run to report progress on.
+        if heic_total > 0 and not self.dry_run:
             self._convert_task = self._progress.add_task(
                 "Converting HEIC files...", total=heic_total
             )
+        # ``total=processable_total`` (never ``or None``): an all-sidecar
+        # batch reaches here with ``processable_total == 0`` (files exist, so
+        # ``on_no_files`` never fired), and a bar with a real total of 0 is
+        # immediately, truthfully complete -- an indeterminate spinner would
+        # instead sit there forever, since there is nothing left to advance it.
         self._organize_task = self._progress.add_task(
-            "Organizing files...", total=processable_total or None
+            "Organizing files...", total=processable_total
         )
         return True
 
