@@ -93,7 +93,7 @@ class TestVerifyBeforeDelete(unittest.TestCase):
         # The original was deleted only after a verified-good landing.
         self.assertFalse(os.path.exists(heic), "verified original should be removed")
         self.assertEqual(results["files_failed"], 0)
-        self.assertEqual(self.processor.failed_files, [])
+        self.assertEqual(self.processor._failed_files, [])
         # Export is fully drained -- no leftover temp artifact.
         self.assertEqual(os.listdir(self.export_dir), [])
 
@@ -141,8 +141,8 @@ class TestVerifyBeforeDelete(unittest.TestCase):
         # The failure surfaced in the results and in failed_files.
         self.assertGreaterEqual(results["files_failed"], 1)
         self.assertTrue(
-            any(entry[1] == heic for entry in self.processor.failed_files),
-            f"failure for {heic} not recorded in {self.processor.failed_files}",
+            any(entry[1] == heic for entry in self.processor._failed_files),
+            f"failure for {heic} not recorded in {self.processor._failed_files}",
         )
 
         # No corrupt artifact was left where a good photo should be, in either

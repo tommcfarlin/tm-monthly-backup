@@ -365,6 +365,105 @@ class TestWorkflowIntegration(unittest.TestCase):
             # and still be processed via the fallback timestamp.
             self.assertEqual(results['missing_exif_files'], 1)
 
+    def test_missing_exif_real_run_reports_final_path_that_exists(self):
+        """A real run's missing_exif_list names a FINAL path that exists.
+
+        Before issue #35, ``missing_exif_list`` carried the SOURCE path
+        recorded at EXIF-extraction time. By the time a summary is rendered,
+        a real run has already moved that source into ``backup/``, so the
+        reported path named nothing on disk -- the exact defect the issue's
+        "actual files moved : 2 / files_processed reported : 4" and
+        "do reported missing_exif paths still exist on disk? {...: False}"
+        findings describe. This asserts the reported path is the file's
+        genuine final backup/ location (which exists), the original path is
+        carried alongside for identification only, and the original no
+        longer exists (the file was moved away, as a real run does).
+        """
+        photo_path = self.create_test_image_without_exif("no_exif_real.jpg")
+
+        with patch.object(
+            self.processor.exif_handler, 'get_fallback_timestamp'
+        ) as mock_fallback:
+            mock_fallback.return_value = datetime(2024, 3, 1, 8, 0, 0)
+            results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(len(results['missing_exif_list']), 1)
+        record = results['missing_exif_list'][0]
+        self.assertEqual(record['original_path'], photo_path)
+        self.assertTrue(
+            os.path.isfile(record['final_path']),
+            f"reported final_path does not exist on disk: {record['final_path']}",
+        )
+        self.assertFalse(
+            os.path.exists(record['original_path']),
+            "original export/ path still exists after a real run moved it",
+        )
+
+    def test_missing_exif_dry_run_reports_existing_original_path(self):
+        """A dry run's missing_exif_list names the still-existing original.
+
+        A dry run moves nothing, so the ORIGINAL export/ path is the one that
+        genuinely exists on disk right now; ``final_path`` is ``None`` because
+        no destination was actually created for a dry run to report.
+        """
+        photo_path = self.create_test_image_without_exif("no_exif_dry.jpg")
+
+        with patch.object(
+            self.processor.exif_handler, 'get_fallback_timestamp'
+        ) as mock_fallback:
+            mock_fallback.return_value = datetime(2024, 3, 1, 8, 0, 0)
+            results = self.processor.process_all_files(dry_run=True)
+
+        self.assertEqual(len(results['missing_exif_list']), 1)
+        record = results['missing_exif_list'][0]
+        self.assertEqual(record['original_path'], photo_path)
+        self.assertIsNone(record['final_path'])
+        self.assertTrue(os.path.isfile(photo_path))
+
+    def test_missing_exif_file_that_fails_to_move_is_not_double_counted(self):
+        """A missing-EXIF file that also fails to move is failed, not missing-EXIF.
+
+        Issue #35 changed what ``missing_exif_files``/``missing_exif_list``
+        count: they used to count every file whose EXIF extraction failed
+        (``ExifHandler.missing_exif_files``), regardless of what happened to
+        it afterward; they now count only files that actually LANDED using a
+        fallback timestamp (``_missing_exif_records``, populated only at the
+        point a file is recorded as successfully processed). A file that
+        lacks EXIF and then fails to move is therefore counted in
+        ``files_failed`` (and appears in the failure table) but NOT in
+        ``missing_exif_files`` -- counting it there too would tell the user
+        it "was processed using filesystem timestamps" when it was never
+        filed anywhere at all. This pins the new semantics in both
+        directions explicitly, since nothing else in the suite does.
+        """
+        self.create_test_image_without_exif("no_exif_move_fails.jpg")
+
+        real_move = shutil.move
+
+        def flaky_move(src, dst, *args, **kwargs):
+            if os.path.basename(src) == "no_exif_move_fails.jpg":
+                raise PermissionError("forced failure for the no-EXIF file")
+            return real_move(src, dst, *args, **kwargs)
+
+        with patch.object(
+            self.processor.exif_handler, 'get_fallback_timestamp'
+        ) as mock_fallback:
+            mock_fallback.return_value = datetime(2024, 4, 1, 9, 0, 0)
+            with patch('src.file_processor.shutil.move', side_effect=flaky_move):
+                results = self.processor.process_all_files(dry_run=False)
+
+        # The file failed to move -- it is accounted for as a failure...
+        self.assertEqual(results['files_processed'], 0)
+        self.assertEqual(results['files_failed'], 1)
+        operation, failed_path, _message = results['failed_files'][0]
+        self.assertEqual(operation, 'move_file')
+        self.assertTrue(failed_path.endswith("no_exif_move_fails.jpg"))
+
+        # ...and NOT counted (or listed) as a missing-EXIF file, since it was
+        # never actually filed using a fallback timestamp.
+        self.assertEqual(results['missing_exif_files'], 0)
+        self.assertEqual(results['missing_exif_list'], [])
+
     def test_exif_helper_embeds_real_exif(self):
         """
         The EXIF helper embeds real EXIF: extract_timestamp returns the embedded
@@ -460,13 +559,190 @@ class TestWorkflowIntegration(unittest.TestCase):
             categorizer.get_files_by_category(FileCategory.SCREENSHOT),
         )
 
+    def test_second_run_on_same_instance_reports_only_that_run(self):
+        """Calling process_all_files twice on one instance never unions runs.
+
+        Issue #35: FileProcessor is reusable, and every per-run accumulator
+        is reset at the start of each call, so a second run's summary
+        describes ONLY that run's files -- never the union with an earlier
+        run on the same instance. Without the reset, this reproduces exactly
+        the issue's verified defect: two files in each of two runs, and the
+        second summary reporting files_processed=4 (the union) instead of 2.
+
+        This drives two REAL runs on the SAME ``FileProcessor`` instance,
+        each with two genuinely distinct files, and asserts the second
+        summary's counts and ``processed_files`` list name only run 2's
+        files.
+        """
+        self.create_test_image_with_exif("run1_a.jpg", "2024:01:15 14:30:45")
+        self.create_test_image_with_exif("run1_b.jpg", "2024:01:15 14:30:46")
+
+        results1 = self.processor.process_all_files(dry_run=False)
+        self.assertEqual(results1['files_processed'], 2)
+
+        # Second run: two DIFFERENT files land in export/ after run 1 already
+        # drained it. Same processor instance, same export/backup dirs.
+        self.create_test_image_with_exif("run2_c.jpg", "2024:02:20 09:00:00")
+        self.create_test_image_with_exif("run2_d.jpg", "2024:02:20 09:00:01")
+
+        results2 = self.processor.process_all_files(dry_run=False)
+
+        # The second summary describes ONLY the two files just processed --
+        # never the union with run 1's two files (would be 4 pre-fix).
+        self.assertEqual(results2['files_processed'], 2)
+        self.assertEqual(results2['files_failed'], 0)
+        self.assertEqual(len(results2['processed_files']), 2)
+        final_names = {
+            os.path.basename(entry['final_path'])
+            for entry in results2['processed_files']
+        }
+        self.assertEqual(
+            final_names,
+            {"2024.02.20.09.00.00.jpg", "2024.02.20.09.00.01.jpg"},
+        )
+
+        # Both runs' output is preserved on disk -- run 2 did not erase run
+        # 1's files -- but run 2's SUMMARY counts only its own work.
+        photos_dir = os.path.join(self.backup_dir, "photos")
+        self.assertEqual(len(os.listdir(photos_dir)), 4)
+
+    def test_second_run_reuses_a_taken_timestamp_and_bumps_safely(self):
+        """A same-instance run 2 that collides with an existing file bumps it.
+
+        This is the riskiest edge of the reuse contract: "reusable" would be
+        actively dangerous if a second run on the same instance could file a
+        collision on top of a file already sitting in ``backup/photos/``
+        instead of bumping past it. Two mechanisms are supposed to jointly
+        guarantee this never happens: the atomic ``O_CREAT | O_EXCL``
+        destination reservation (issue #6), which is filesystem-authoritative
+        and does not care what any in-memory bookkeeping believes, and
+        ``_used_timestamps`` being reseeded from disk at the start of every
+        run (this issue) rather than carried over stale from a prior run on
+        the same instance.
+
+        The colliding file here is placed directly on disk -- standing in for
+        "a completely different process," per this issue's own reuse-contract
+        docstring -- rather than by having run 1 itself write it through this
+        instance. That distinction matters for what this test can actually
+        prove: if the colliding stem were instead one THIS instance wrote
+        during run 1, run 1's own bookkeeping would already carry that stem
+        into ``_used_timestamps`` regardless of whether ``clear_processing_state``
+        clears the dict at the top of run 2, so a test built that way could not
+        tell a working re-seed from a defeated one.
+
+        Even with the collision placed externally, the LANDING PATH and
+        ``_used_timestamps``'s content immediately AFTER run 2 turned out not
+        to discriminate either, on inspection: ``_reserve_destination``'s
+        ``except FileExistsError`` branch calls ``names.add(stem)`` on the
+        very stem that just collided, so a stale (un-reseeded) in-memory set
+        silently repairs itself the instant it is asked to reserve the taken
+        path and fails -- the exact same final state and landing path result
+        whether the set was proactively reseeded or reactively patched up
+        one failed ``os.open`` later. What DOES discriminate is *how many
+        times* ``os.open`` is attempted for run 2's file: a working re-seed
+        means ``handle_duplicate_timestamp`` already knows the natural stem
+        is taken and never asks the filesystem for it at all, so the FIRST
+        ``os.open`` call lands directly on the bumped path; a defeated
+        re-seed does not learn about the collision until that first
+        ``os.open`` call fails, so it takes two attempts. The spy below pins
+        exactly that -- confirmed to discriminate by temporarily deleting the
+        ``self._used_timestamps.clear()`` line in ``clear_processing_state``
+        and re-running this test: the landing-path and pixel assertions above
+        still passed unchanged, but the "collision never attempted" assertion
+        below failed, showing run 2 had in fact tried and failed at the
+        external file's exact path first.
+        """
+        # Run 1 through this instance: establishes _used_timestamps[photos_dir]
+        # as a real (non-None) entry, the way any first real run would.
+        self.create_test_image_with_exif("run1_other.jpg", "2024:05:10 08:00:00")
+        results1 = self.processor.process_all_files(dry_run=False)
+        self.assertEqual(results1['files_processed'], 1)
+
+        photos_dir = os.path.join(self.backup_dir, "photos")
+
+        # A file lands in backup/photos/ WITHOUT going through this
+        # FileProcessor instance at all -- standing in for a separate
+        # process/invocation between run 1 and run 2.
+        external_stem = "2024.06.01.10.00.00"
+        external_path = os.path.join(photos_dir, f"{external_stem}.jpg")
+        Image.new("RGB", (8, 8), "red").save(external_path, format="JPEG")
+
+        # Run 2, same instance: a file whose EXIF timestamp resolves to
+        # EXACTLY the externally-placed name above. ``make_exif_jpeg`` is
+        # called directly (rather than the ``create_test_image_with_exif``
+        # helper) so the fixture's ``color`` can be set to something
+        # distinguishable from the external file's, letting the pixel checks
+        # below tell the two apart.
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "run2_collide.jpg"),
+            date_time_original="2024:06:01 10:00:00",
+            color="blue",
+        )
+
+        # Spy on os.open (as file_processor.py looks it up) to record every
+        # path a reservation attempt is made against, without changing its
+        # behavior -- the real syscall still runs via side_effect.
+        real_open = os.open
+        opened_paths = []
+
+        def spy_open(path, *args, **kwargs):
+            opened_paths.append(path)
+            return real_open(path, *args, **kwargs)
+
+        with patch('src.file_processor.os.open', side_effect=spy_open):
+            results2 = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results2['files_processed'], 1)
+        self.assertEqual(results2['files_failed'], 0)
+
+        # The externally-placed file survives untouched -- not overwritten.
+        # JPEG re-encoding shifts pixel values slightly (254 vs 255), so the
+        # dominant-channel check tolerates lossy compression rather than
+        # requiring byte-exact equality.
+        with Image.open(external_path) as image:
+            r, g, b = image.convert("RGB").getpixel((0, 0))
+            self.assertGreater(r, 200)
+            self.assertLess(g, 50)
+            self.assertLess(b, 50)
+
+        # Run 2's file bumped to the next second rather than landing on it.
+        bumped_path = os.path.join(photos_dir, "2024.06.01.10.00.01.jpg")
+        self.assertTrue(
+            os.path.isfile(bumped_path),
+            f"run 2's file did not bump past the collision; photos/ has: "
+            f"{sorted(os.listdir(photos_dir))}",
+        )
+        with Image.open(bumped_path) as image:
+            r, g, b = image.convert("RGB").getpixel((0, 0))
+            self.assertLess(r, 50)
+            self.assertLess(g, 50)
+            self.assertGreater(b, 200)
+
+        # Mechanism-level, and the part that actually discriminates (see the
+        # docstring): the externally-placed path was never even ATTEMPTED,
+        # because a working re-seed means handle_duplicate_timestamp already
+        # knew that stem was taken before the first os.open call. A defeated
+        # re-seed would show exactly two attempts here: the collision first,
+        # then the bump.
+        self.assertNotIn(
+            external_path, opened_paths,
+            f"run 2 attempted the externally-placed path directly, meaning "
+            f"_used_timestamps was NOT reseeded from disk before reserving "
+            f"-- all attempts: {opened_paths}",
+        )
+        self.assertEqual(
+            opened_paths, [bumped_path],
+            "expected exactly one reservation attempt, landing directly on "
+            "the bumped path",
+        )
+
     def test_processing_state_cleanup(self):
         """clear_processing_state empties every piece of state the method owns.
 
-        A real run first populates all seven state containers -- ``processed_files``
-        and ``used_timestamps`` (a moved photo), ``conversion_log`` and the HEIC
+        A real run first populates all seven state containers -- ``_processed_files``
+        and ``_used_timestamps`` (a moved photo), ``_conversion_log`` and the HEIC
         converter's ``converted_files`` (a real HEIC), ``exif_handler``'s
-        ``missing_exif_files`` (a no-EXIF file), ``failed_files`` (a forced move
+        ``missing_exif_files`` (a no-EXIF file), ``_failed_files`` (a forced move
         failure), and the categorizer's per-category lists. Each is asserted
         NON-empty before clearing and empty afterward, so ``clear_processing_state``
         degrading to a no-op fails this test (it never inspected any of these
@@ -492,10 +768,10 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         # Precondition: every container the method clears is actually populated,
         # otherwise asserting emptiness afterward would be vacuous.
-        self.assertTrue(self.processor.processed_files)
-        self.assertTrue(self.processor.used_timestamps)
-        self.assertTrue(self.processor.failed_files)
-        self.assertTrue(self.processor.conversion_log)
+        self.assertTrue(self.processor._processed_files)
+        self.assertTrue(self.processor._used_timestamps)
+        self.assertTrue(self.processor._failed_files)
+        self.assertTrue(self.processor._conversion_log)
         self.assertTrue(self.processor.exif_handler.missing_exif_files)
         self.assertTrue(self.processor.heic_converter.converted_files)
         self.assertTrue(
@@ -505,10 +781,10 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.processor.clear_processing_state()
 
         # Every container is empty after the clear.
-        self.assertEqual(self.processor.processed_files, [])
-        self.assertEqual(self.processor.used_timestamps, {})
-        self.assertEqual(self.processor.failed_files, [])
-        self.assertEqual(self.processor.conversion_log, [])
+        self.assertEqual(self.processor._processed_files, [])
+        self.assertEqual(self.processor._used_timestamps, {})
+        self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._conversion_log, [])
         self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
         self.assertEqual(self.processor.heic_converter.converted_files, [])
         for category, files in self.processor.categorizer.categorized_files.items():

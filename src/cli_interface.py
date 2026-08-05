@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pathlib import Path
 
 import click
@@ -469,21 +469,43 @@ class CLIInterface:
 
         self.console.print(failure_table)
 
-    def display_missing_exif_warning(self, missing_files: List[str]):
+    def display_missing_exif_warning(self, missing_files: List[Dict[str, Optional[str]]]):
         """
         Display warning about files with missing EXIF data.
 
+        Each entry names a path the user can actually go look at (issue #35):
+        by the time this renders, a real run has already moved/renamed the
+        source file, so ``'original_path'`` alone would name something that no
+        longer exists. Entries carry ``'final_path'`` (the file's location in
+        ``backup/``) when the file was actually filed there, plus
+        ``'original_path'`` shown parenthetically for identification (e.g. "was
+        export/IMG_1234.jpg"). A dry run never moves anything, so its entries
+        carry ``'final_path': None`` and only the still-existing
+        ``'original_path'`` is shown.
+
         Args:
-            missing_files: List of files with missing EXIF data
+            missing_files: List of ``{'original_path', 'final_path'}`` dicts
+                for files with missing/invalid EXIF data.
         """
         warning_text = Text(f"Found {len(missing_files)} files with missing/invalid EXIF data.", style="bold yellow")
         warning_text.append("\nThese files were processed using filesystem timestamps.", style="dim")
         warning_text.append("\nConsider manually reviewing these files:", style="dim")
 
-        for file_path in missing_files[:5]:  # Show first 5
+        for record in missing_files[:5]:  # Show first 5
+            original_path = record.get('original_path', '')
+            final_path = record.get('final_path')
+            # Show the path that genuinely exists on disk right now: the
+            # backup/ destination once the file has landed there, or -- for a
+            # dry run, which moves nothing -- the still-in-place original. The
+            # original is included parenthetically either way as the one clue
+            # to the file's pre-backup identity (its export/ name).
+            if final_path:
+                line = f"{final_path}  (was {original_path})"
+            else:
+                line = original_path
             # ``Text.append`` renders its argument literally (no markup parsing),
             # so escaping would corrupt the name; only strip control sequences.
-            warning_text.append(f"\n  • {sanitize_for_display(file_path)}", style="yellow")
+            warning_text.append(f"\n  • {sanitize_for_display(line)}", style="yellow")
 
         if len(missing_files) > 5:
             warning_text.append(f"\n  ... and {len(missing_files) - 5} more", style="dim")

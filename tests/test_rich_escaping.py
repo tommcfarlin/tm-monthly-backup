@@ -203,10 +203,19 @@ class TestRenderBoundariesDoNotRaise(unittest.TestCase):
         self.assertIn("evilX.jpg", text)
 
     def test_display_missing_exif_warning_handles_markup_and_ansi(self):
-        """The EXIF warning panel renders hostile names literally and safely."""
-        self.cli.display_missing_exif_warning(
-            [HOSTILE_CLOSING, HOSTILE_MARKUP, HOSTILE_ANSI]
-        )
+        """The EXIF warning panel renders hostile names literally and safely.
+
+        Missing-EXIF entries are ``{'original_path', 'final_path'}`` dicts
+        (issue #35); the hostile strings are spread across both fields and
+        both record shapes (a final_path present, as a real run would produce,
+        and None, as a dry run would) so a hostile name reaches the render path
+        either way.
+        """
+        self.cli.display_missing_exif_warning([
+            {"original_path": HOSTILE_CLOSING, "final_path": None},
+            {"original_path": "export/ok.jpg", "final_path": HOSTILE_MARKUP},
+            {"original_path": HOSTILE_ANSI, "final_path": None},
+        ])
         text = self.cli.console.export_text()
         self.assertIn(HOSTILE_CLOSING, text)
         self.assertIn(HOSTILE_MARKUP, text)

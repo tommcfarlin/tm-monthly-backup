@@ -294,7 +294,7 @@ class FileProcessor:
 
         # Track processed files and timestamps.
         #
-        # ``used_timestamps`` maps a target directory to the set of formatted
+        # ``_used_timestamps`` maps a target directory to the set of formatted
         # timestamp stems already claimed *in that directory*. It is scoped per
         # directory rather than being a single process-global set (issue #21):
         # files written into different category directories share no collision
@@ -302,10 +302,25 @@ class FileProcessor:
         # longer bump each other. Each per-directory set is seeded lazily from
         # the directory's on-disk contents (issue #6) so collision resolution is
         # authoritative against what previous runs already filed in ``backup/``.
-        self.processed_files = []
-        self.used_timestamps: Dict[str, Set[str]] = {}
-        self.failed_files = []
-        self.conversion_log = []
+        #
+        # These four accumulators (plus ``_quarantined_files`` below) are
+        # per-run bookkeeping, not public API: they are private (issue #35) so
+        # ``_generate_summary`` is the only reader, and ``process_all_files``
+        # resets all of them -- via ``clear_processing_state`` -- at the start
+        # of every call, so a FileProcessor instance is safe to reuse across
+        # multiple runs (see the reuse-contract note on ``process_all_files``).
+        self._processed_files = []
+        self._used_timestamps: Dict[str, Set[str]] = {}
+        self._failed_files = []
+        self._conversion_log = []
+        # Files a run filed using a fallback (non-EXIF) timestamp, recorded with
+        # BOTH the original source path and the final backup/ path (issue #35).
+        # The final path is what the user can actually go look at by the time
+        # ``display_missing_exif_warning`` renders it -- the source path was
+        # already moved/renamed/deleted by then. Populated only when the file
+        # was actually filed successfully; a file that also failed to move is
+        # not double-reported here (it is already in ``_failed_files``).
+        self._missing_exif_records: List[Dict[str, Optional[str]]] = []
         # Pre-computed HEIC conversions from the parallel convert phase (issue
         # #42): maps a source ``.heic`` path to ``(output_path, error)``. It is
         # populated once, up front, only when a run has enough HEIC files to
@@ -318,7 +333,7 @@ class FileProcessor:
         # ``.png``). They are moved to ``backup/corrupt/`` under their original
         # name rather than archived as photographs, and reported as a distinct
         # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
-        self.quarantined_files: List[Dict[str, any]] = []
+        self._quarantined_files: List[Dict[str, any]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -379,6 +394,24 @@ class FileProcessor:
         sidecar deletion, and summary generation each happen exactly once per
         run, so no caller re-drives (or reaches into) the pipeline (issue #13).
 
+        Reuse contract (issue #35): a FileProcessor instance is explicitly
+        reusable -- calling this method a second (or Nth) time on the SAME
+        instance is legal and reports on that run alone. Every per-run
+        accumulator (the processed/failed/quarantined lists, the conversion
+        log, the per-directory timestamp-collision sets, and each
+        collaborator's own bookkeeping -- ``FileCategorizer``,
+        ``HeicConverter``, ``ExifHandler``) is reset at the top of this call via
+        :meth:`clear_processing_state`, so the dict this method returns can
+        never describe the union of this run and an earlier one on the same
+        instance. The one deliberate exception is *what* the per-directory
+        collision sets are reseeded WITH: they are not restored from a
+        snapshot of the previous run, but reseeded lazily, from each target
+        directory's actual on-disk contents, the next time a file is placed
+        there (issue #6). That is correct, not an oversight -- a second run
+        must see whatever this run's own destination, or a completely
+        different process, has since written to ``backup/``, not a stale
+        in-memory picture of it.
+
         Args:
             dry_run: If True, show what would be done without making changes.
             progress: Optional :class:`ProgressReporter` the run reports to at
@@ -386,13 +419,20 @@ class FileProcessor:
                 per-file notifications), exactly as before the seam existed.
 
         Returns:
-            Dictionary with processing results and statistics.
+            Dictionary with processing results and statistics for THIS run
+            only.
 
         Raises:
             ValueError: If the export and backup directories overlap (same
                 directory, or one nested inside the other), which would let a
                 run destroy its own inputs.
         """
+        # Reset every per-run accumulator -- including each collaborator's own
+        # bookkeeping -- before this run's first side effect. See the reuse
+        # contract note above: this is what makes calling this method more
+        # than once on the same instance safe.
+        self.clear_processing_state()
+
         logger.info("Starting file processing (dry_run=%s)", dry_run)
 
         # Refuse to run when the export and backup roots overlap: the export
@@ -461,7 +501,7 @@ class FileProcessor:
 
         # Phase B (sequential): timestamp, resolve collisions, move, and delete
         # originals in the SAME deterministic order as a fully sequential run,
-        # so ``used_timestamps`` resolution and landing paths are byte-for-byte
+        # so ``_used_timestamps`` resolution and landing paths are byte-for-byte
         # identical regardless of whether Phase A ran in a pool.
         for category, files in processable_files.items():
             if files:
@@ -544,7 +584,7 @@ class FileProcessor:
                     logger.info("Deleted sidecar file: %s", file_path)
                 except Exception as e:
                     logger.error("Failed to delete sidecar file %s: %s", file_path, e)
-                    self.failed_files.append(('delete_sidecar', file_path, str(e)))
+                    self._failed_files.append(('delete_sidecar', file_path, str(e)))
 
     def _process_category(
         self,
@@ -578,7 +618,7 @@ class FileProcessor:
                 self._process_single_file(file_path, category, target_dir, dry_run, progress)
             except Exception as e:
                 logger.error("Failed to process file %s: %s", file_path, e)
-                self.failed_files.append(('process_file', file_path, str(e)))
+                self._failed_files.append(('process_file', file_path, str(e)))
             # Notify after the file is handled -- whether it landed, was
             # quarantined, or was recorded as failed. Placed after the
             # ``except Exception`` (not in a ``finally``) so a propagating
@@ -918,24 +958,24 @@ class FileProcessor:
                             os.remove(converted_path)
                         except OSError:
                             pass
-                        self.failed_files.append(
+                        self._failed_files.append(
                             ('convert_heic', file_path, 'conversion verification failed')
                         )
                         return
 
-                    self.conversion_log.append((file_path, converted_path))
+                    self._conversion_log.append((file_path, converted_path))
                     current_path = converted_path
                     # Defer deletion of the original HEIC until after the JPEG has
                     # been moved into backup/ -- see Step 3.
                     heic_original_to_delete = file_path
                 else:
                     # Conversion returned no path: the file was not processed.
-                    # Record it so it lands in ``failed_files`` and increments
+                    # Record it so it lands in ``_failed_files`` and increments
                     # ``files_failed`` instead of being silently dropped, which
                     # would let the summary report success and the exit code
                     # read 0 for a run that left this file behind (issue #31).
                     logger.error("HEIC conversion failed for %s", file_path)
-                    self.failed_files.append(
+                    self._failed_files.append(
                         ('convert_heic', file_path, 'HEIC conversion failed')
                     )
                     return
@@ -951,6 +991,13 @@ class FileProcessor:
         timestamp = self.exif_handler.extract_timestamp(
             current_path, self.categorizer.get_image_metadata(file_path)
         )
+        # Recorded now, before ``timestamp`` is overwritten below, so the
+        # missing-EXIF record (issue #35) reflects whether a genuine capture
+        # timestamp was found for THIS file, independent of exif_handler's own
+        # path-keyed bookkeeping (which records whatever path it was called
+        # with -- the transient converted-JPEG path for a HEIC -- not a path
+        # useful to report to the user).
+        exif_was_missing = timestamp is None
         if timestamp is None:
             # Use fallback timestamp
             timestamp = self.exif_handler.get_fallback_timestamp(current_path)
@@ -975,6 +1022,16 @@ class FileProcessor:
                 target_dir, timestamp, file_extension
             )
             logger.info("[DRY RUN] Would move: %s -> %s", current_path, target_path)
+            if exif_was_missing:
+                # A dry run never moves anything, so ``original_path`` is the
+                # only path that actually exists on disk right now -- the
+                # planned ``target_path`` is a projection, not a real file.
+                # ``final_path`` is left ``None`` so the display layer shows
+                # only the path that genuinely exists (issue #35).
+                self._missing_exif_records.append({
+                    'original_path': original_path,
+                    'final_path': None,
+                })
         else:
             try:
                 # Ensure target directory exists before reserving within it.
@@ -1014,7 +1071,7 @@ class FileProcessor:
                     )
 
                 # Record successful processing
-                self.processed_files.append({
+                self._processed_files.append({
                     'original_path': original_path,
                     'final_path': target_path,
                     'category': category.value,
@@ -1022,9 +1079,20 @@ class FileProcessor:
                     'converted_from_heic': self.heic_converter.is_heic_file(original_path)
                 })
 
+                if exif_was_missing:
+                    # The file has now safely landed at ``target_path``; that
+                    # is the path the user can actually go look at, unlike the
+                    # source path (moved) or the transient converted-JPEG path
+                    # (renamed away), either of which is already gone by the
+                    # time the summary is displayed (issue #35).
+                    self._missing_exif_records.append({
+                        'original_path': original_path,
+                        'final_path': target_path,
+                    })
+
             except Exception as e:
                 logger.error("Failed to move file %s to %s: %s", current_path, target_path, e)
-                self.failed_files.append(('move_file', current_path, str(e)))
+                self._failed_files.append(('move_file', current_path, str(e)))
 
     def _process_unknown_file(
         self, file_path: str, target_dir: str, dry_run: bool
@@ -1039,7 +1107,7 @@ class FileProcessor:
         prior run (or an earlier file in this batch) already filed here is
         resolved without overwriting, by disambiguating the name. On success the
         move is recorded so ``files_processed`` reflects it and the export tree
-        is genuinely drained; on failure it is recorded in ``failed_files`` so
+        is genuinely drained; on failure it is recorded in ``_failed_files`` so
         the run is not reported as a clean success (issue #31).
 
         Args:
@@ -1074,7 +1142,7 @@ class FileProcessor:
                 raise
             logger.info("Moved unrecognized file: %s -> %s", file_path, target_path)
 
-            self.processed_files.append({
+            self._processed_files.append({
                 'original_path': file_path,
                 'final_path': target_path,
                 'category': FileCategory.UNKNOWN.value,
@@ -1085,7 +1153,7 @@ class FileProcessor:
             logger.error(
                 f"Failed to move unrecognized file {file_path} to {target_path}: {e}"
             )
-            self.failed_files.append(('move_file', file_path, str(e)))
+            self._failed_files.append(('move_file', file_path, str(e)))
 
     def get_quarantine_directory(self) -> str:
         """
@@ -1161,8 +1229,8 @@ class FileProcessor:
         ``name (1).ext`` rather than overwriting it, reusing the same atomic
         reservation the unknown/timestamped paths use. The original is never
         deleted from ``export/`` until it has safely landed here. On success the
-        move is recorded in ``quarantined_files``; on failure it is recorded in
-        ``failed_files`` so a botched quarantine cannot masquerade as a clean run.
+        move is recorded in ``_quarantined_files``; on failure it is recorded in
+        ``_failed_files`` so a botched quarantine cannot masquerade as a clean run.
 
         In a dry run nothing is moved, but the decision is still recorded and
         logged so ``--dry-run`` surfaces exactly which files a real run would
@@ -1184,7 +1252,7 @@ class FileProcessor:
                 file_path,
                 target_path,
             )
-            self.quarantined_files.append({
+            self._quarantined_files.append({
                 'original_path': file_path,
                 'final_path': target_path,
                 'reason': 'undecodable',
@@ -1209,7 +1277,7 @@ class FileProcessor:
                 "Quarantined undecodable file: %s -> %s", file_path, target_path
             )
 
-            self.quarantined_files.append({
+            self._quarantined_files.append({
                 'original_path': file_path,
                 'final_path': target_path,
                 'reason': 'undecodable',
@@ -1218,7 +1286,7 @@ class FileProcessor:
             logger.error(
                 "Failed to quarantine %s to %s: %s", file_path, target_path, error
             )
-            self.failed_files.append(('quarantine', file_path, str(error)))
+            self._failed_files.append(('quarantine', file_path, str(error)))
 
     def _reserve_named_destination(self, target_dir: str, filename: str) -> str:
         """
@@ -1302,7 +1370,7 @@ class FileProcessor:
         Returns:
             The mutable per-directory set of claimed formatted-timestamp stems.
         """
-        names = self.used_timestamps.get(target_dir)
+        names = self._used_timestamps.get(target_dir)
         if names is None:
             names = set()
             try:
@@ -1312,7 +1380,7 @@ class FileProcessor:
             except FileNotFoundError:
                 # The directory does not exist yet: nothing is claimed in it.
                 pass
-            self.used_timestamps[target_dir] = names
+            self._used_timestamps[target_dir] = names
         return names
 
     def _reserve_destination(
@@ -1456,39 +1524,76 @@ class FileProcessor:
         """
         Generate processing summary.
 
+        This is the ONLY reader of the four private per-run accumulators
+        (``_processed_files``, ``_used_timestamps``, ``_failed_files``,
+        ``_conversion_log``) and of ``_missing_exif_records`` (issue #35):
+        they are internal bookkeeping, not public API, so every count and
+        list below is derived here rather than read directly by a caller.
+
         Returns:
-            Dictionary with processing statistics and results
+            Dictionary with processing statistics and results for the run
+            that just completed -- never a previous run on the same instance
+            (see the reuse-contract note on :meth:`process_all_files`).
         """
         stats = self.categorizer.get_categorization_stats()
         heic_stats = self.heic_converter.get_conversion_stats()
-        missing_exif_files = self.exif_handler.get_missing_exif_files()
 
         return {
-            'files_processed': len(self.processed_files),
-            'files_failed': len(self.failed_files),
+            'files_processed': len(self._processed_files),
+            'files_failed': len(self._failed_files),
             # Undecodable image-typed files quarantined to backup/corrupt/. A
             # distinct outcome from processed (they were NOT filed as photos)
             # and from failed (nothing errored; they were handled deliberately
             # and safely), so the count is honest either way (issue #58).
-            'files_quarantined': len(self.quarantined_files),
+            'files_quarantined': len(self._quarantined_files),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
-            'missing_exif_files': len(missing_exif_files),
-            'processed_files': self.processed_files.copy(),
-            'failed_files': self.failed_files.copy(),
-            'quarantined_files': self.quarantined_files.copy(),
-            'conversion_log': self.conversion_log.copy(),
-            'missing_exif_list': missing_exif_files
+            'missing_exif_files': len(self._missing_exif_records),
+            'processed_files': self._processed_files.copy(),
+            'failed_files': self._failed_files.copy(),
+            'quarantined_files': self._quarantined_files.copy(),
+            'conversion_log': self._conversion_log.copy(),
+            # Each entry carries BOTH 'original_path' and 'final_path' so the
+            # display layer can show a path that genuinely exists on disk
+            # (issue #35) -- 'final_path' for a real run (the source is gone
+            # by the time this is rendered) or None for a dry run (nothing
+            # moved, so 'original_path' is the one that exists). A plain
+            # list comprehension of fresh dicts, not the internal list
+            # itself, so a caller mutating the result cannot corrupt
+            # ``_missing_exif_records`` (issue #37's no-aliasing precedent).
+            'missing_exif_list': [
+                record.copy() for record in self._missing_exif_records
+            ],
         }
 
     def clear_processing_state(self):
-        """Clear all processing state for a fresh run"""
-        self.processed_files.clear()
-        self.used_timestamps.clear()
-        self.failed_files.clear()
-        self.quarantined_files.clear()
-        self.conversion_log.clear()
+        """
+        Reset every per-run accumulator, including each collaborator's own.
+
+        Called automatically as the first statement of
+        :meth:`process_all_files` (issue #35), so a FileProcessor instance is
+        safe to reuse across multiple runs without a caller having to
+        remember to call this explicitly. It remains a public method -- kept,
+        not removed, per the issue's Option B -- so a caller with an unusual
+        need to reset mid-lifecycle (or a test asserting the reset is
+        complete) still has an explicit hook.
+
+        Resets this object's own four private accumulators and
+        ``_quarantined_files``, plus every collaborator's own bookkeeping
+        (``ExifHandler.missing_exif_files``, ``HeicConverter.converted_files``/
+        ``failed_conversions``, ``FileCategorizer.categorized_files``) -- a
+        reset that only cleared this object's attributes and left the
+        collaborators' stale would be a half-measure, since ``_generate_summary``
+        reads categorization and HEIC stats FROM those collaborators, not from
+        a local copy.
+        """
+        self._processed_files.clear()
+        self._used_timestamps.clear()
+        self._failed_files.clear()
+        self._quarantined_files.clear()
+        self._conversion_log.clear()
+        self._missing_exif_records.clear()
         self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()

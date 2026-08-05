@@ -239,7 +239,9 @@ class TestDisplayResults(unittest.TestCase):
             "heic_conversion_failures": 2,
             "missing_exif_files": 1,
             "failed_files": [("move_file", "/tmp/x.jpg", "disk full")],
-            "missing_exif_list": ["/tmp/x.jpg"],
+            "missing_exif_list": [
+                {"original_path": "export/x.jpg", "final_path": "/tmp/x.jpg"}
+            ],
             "categorization_stats": {
                 "photos": 1,
                 "videos": 0,
@@ -301,7 +303,10 @@ class TestDisplayMissingExifWarning(unittest.TestCase):
 
     def test_short_list_lists_each_file(self):
         """A short list renders each file and no truncation notice."""
-        self.cli.display_missing_exif_warning(["/tmp/a.jpg", "/tmp/b.jpg"])
+        self.cli.display_missing_exif_warning([
+            {"original_path": "export/a.jpg", "final_path": "/tmp/a.jpg"},
+            {"original_path": "export/b.jpg", "final_path": "/tmp/b.jpg"},
+        ])
         text = self.cli.console.export_text()
         self.assertIn("Missing EXIF Data Warning", text)
         self.assertIn("a.jpg", text)
@@ -309,7 +314,10 @@ class TestDisplayMissingExifWarning(unittest.TestCase):
 
     def test_long_list_truncates_with_more_notice(self):
         """More than five files renders the '...and N more' truncation line."""
-        files = [f"/tmp/file{i}.jpg" for i in range(8)]
+        files = [
+            {"original_path": f"export/file{i}.jpg", "final_path": f"/tmp/file{i}.jpg"}
+            for i in range(8)
+        ]
         self.cli.display_missing_exif_warning(files)
         text = self.cli.console.export_text()
         self.assertIn("and 3 more", text)

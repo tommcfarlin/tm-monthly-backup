@@ -70,7 +70,7 @@ class TestOverlapGuard(unittest.TestCase):
             os.path.exists(sentinel),
             "guard must fire before any file is touched",
         )
-        self.assertEqual(processor.processed_files, [])
+        self.assertEqual(processor._processed_files, [])
         return str(ctx.exception)
 
     def _assert_cli_rejects(self, export_dir: str, backup_dir: str):
