@@ -365,6 +365,61 @@ class TestWorkflowIntegration(unittest.TestCase):
             # and still be processed via the fallback timestamp.
             self.assertEqual(results['missing_exif_files'], 1)
 
+    def test_missing_exif_real_run_reports_final_path_that_exists(self):
+        """A real run's missing_exif_list names a FINAL path that exists.
+
+        Before issue #35, ``missing_exif_list`` carried the SOURCE path
+        recorded at EXIF-extraction time. By the time a summary is rendered,
+        a real run has already moved that source into ``backup/``, so the
+        reported path named nothing on disk -- the exact defect the issue's
+        "actual files moved : 2 / files_processed reported : 4" and
+        "do reported missing_exif paths still exist on disk? {...: False}"
+        findings describe. This asserts the reported path is the file's
+        genuine final backup/ location (which exists), the original path is
+        carried alongside for identification only, and the original no
+        longer exists (the file was moved away, as a real run does).
+        """
+        photo_path = self.create_test_image_without_exif("no_exif_real.jpg")
+
+        with patch.object(
+            self.processor.exif_handler, 'get_fallback_timestamp'
+        ) as mock_fallback:
+            mock_fallback.return_value = datetime(2024, 3, 1, 8, 0, 0)
+            results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(len(results['missing_exif_list']), 1)
+        record = results['missing_exif_list'][0]
+        self.assertEqual(record['original_path'], photo_path)
+        self.assertTrue(
+            os.path.isfile(record['final_path']),
+            f"reported final_path does not exist on disk: {record['final_path']}",
+        )
+        self.assertFalse(
+            os.path.exists(record['original_path']),
+            "original export/ path still exists after a real run moved it",
+        )
+
+    def test_missing_exif_dry_run_reports_existing_original_path(self):
+        """A dry run's missing_exif_list names the still-existing original.
+
+        A dry run moves nothing, so the ORIGINAL export/ path is the one that
+        genuinely exists on disk right now; ``final_path`` is ``None`` because
+        no destination was actually created for a dry run to report.
+        """
+        photo_path = self.create_test_image_without_exif("no_exif_dry.jpg")
+
+        with patch.object(
+            self.processor.exif_handler, 'get_fallback_timestamp'
+        ) as mock_fallback:
+            mock_fallback.return_value = datetime(2024, 3, 1, 8, 0, 0)
+            results = self.processor.process_all_files(dry_run=True)
+
+        self.assertEqual(len(results['missing_exif_list']), 1)
+        record = results['missing_exif_list'][0]
+        self.assertEqual(record['original_path'], photo_path)
+        self.assertIsNone(record['final_path'])
+        self.assertTrue(os.path.isfile(photo_path))
+
     def test_exif_helper_embeds_real_exif(self):
         """
         The EXIF helper embeds real EXIF: extract_timestamp returns the embedded
@@ -460,6 +515,53 @@ class TestWorkflowIntegration(unittest.TestCase):
             categorizer.get_files_by_category(FileCategory.SCREENSHOT),
         )
 
+    def test_second_run_on_same_instance_reports_only_that_run(self):
+        """Calling process_all_files twice on one instance never unions runs.
+
+        Issue #35: FileProcessor is reusable, and every per-run accumulator
+        is reset at the start of each call, so a second run's summary
+        describes ONLY that run's files -- never the union with an earlier
+        run on the same instance. Without the reset, this reproduces exactly
+        the issue's verified defect: two files in each of two runs, and the
+        second summary reporting files_processed=4 (the union) instead of 2.
+
+        This drives two REAL runs on the SAME ``FileProcessor`` instance,
+        each with two genuinely distinct files, and asserts the second
+        summary's counts and ``processed_files`` list name only run 2's
+        files.
+        """
+        self.create_test_image_with_exif("run1_a.jpg", "2024:01:15 14:30:45")
+        self.create_test_image_with_exif("run1_b.jpg", "2024:01:15 14:30:46")
+
+        results1 = self.processor.process_all_files(dry_run=False)
+        self.assertEqual(results1['files_processed'], 2)
+
+        # Second run: two DIFFERENT files land in export/ after run 1 already
+        # drained it. Same processor instance, same export/backup dirs.
+        self.create_test_image_with_exif("run2_c.jpg", "2024:02:20 09:00:00")
+        self.create_test_image_with_exif("run2_d.jpg", "2024:02:20 09:00:01")
+
+        results2 = self.processor.process_all_files(dry_run=False)
+
+        # The second summary describes ONLY the two files just processed --
+        # never the union with run 1's two files (would be 4 pre-fix).
+        self.assertEqual(results2['files_processed'], 2)
+        self.assertEqual(results2['files_failed'], 0)
+        self.assertEqual(len(results2['processed_files']), 2)
+        final_names = {
+            os.path.basename(entry['final_path'])
+            for entry in results2['processed_files']
+        }
+        self.assertEqual(
+            final_names,
+            {"2024.02.20.09.00.00.jpg", "2024.02.20.09.00.01.jpg"},
+        )
+
+        # Both runs' output is preserved on disk -- run 2 did not erase run
+        # 1's files -- but run 2's SUMMARY counts only its own work.
+        photos_dir = os.path.join(self.backup_dir, "photos")
+        self.assertEqual(len(os.listdir(photos_dir)), 4)
+
     def test_processing_state_cleanup(self):
         """clear_processing_state empties every piece of state the method owns.
 
@@ -492,10 +594,10 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         # Precondition: every container the method clears is actually populated,
         # otherwise asserting emptiness afterward would be vacuous.
-        self.assertTrue(self.processor.processed_files)
-        self.assertTrue(self.processor.used_timestamps)
-        self.assertTrue(self.processor.failed_files)
-        self.assertTrue(self.processor.conversion_log)
+        self.assertTrue(self.processor._processed_files)
+        self.assertTrue(self.processor._used_timestamps)
+        self.assertTrue(self.processor._failed_files)
+        self.assertTrue(self.processor._conversion_log)
         self.assertTrue(self.processor.exif_handler.missing_exif_files)
         self.assertTrue(self.processor.heic_converter.converted_files)
         self.assertTrue(
@@ -505,10 +607,10 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.processor.clear_processing_state()
 
         # Every container is empty after the clear.
-        self.assertEqual(self.processor.processed_files, [])
-        self.assertEqual(self.processor.used_timestamps, {})
-        self.assertEqual(self.processor.failed_files, [])
-        self.assertEqual(self.processor.conversion_log, [])
+        self.assertEqual(self.processor._processed_files, [])
+        self.assertEqual(self.processor._used_timestamps, {})
+        self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._conversion_log, [])
         self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
         self.assertEqual(self.processor.heic_converter.converted_files, [])
         for category, files in self.processor.categorizer.categorized_files.items():

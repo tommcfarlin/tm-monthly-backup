@@ -79,15 +79,15 @@ class TestSidecarDeletionFailure(unittest.TestCase):
         self.processor._delete_sidecar_files([sidecar], dry_run=True)
 
         self.assertTrue(os.path.exists(sidecar))
-        self.assertEqual(self.processor.failed_files, [])
+        self.assertEqual(self.processor._failed_files, [])
 
     def test_delete_failure_is_recorded(self):
         """An os.remove failure is recorded in failed_files."""
         with patch("os.remove", side_effect=OSError("locked")):
             self.processor._delete_sidecar_files(["/tmp/ghost.aae"], dry_run=False)
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "delete_sidecar")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "delete_sidecar")
 
 
 class TestMoveFailureRecording(unittest.TestCase):
@@ -119,8 +119,8 @@ class TestMoveFailureRecording(unittest.TestCase):
                 photo, FileCategory.PHOTO, target_dir, dry_run=False
             )
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "move_file")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "move_file")
         # The reserved placeholder must have been removed on the failed move.
         self.assertFalse(
             any(name.endswith(".jpg") for name in os.listdir(target_dir))
@@ -146,8 +146,8 @@ class TestMoveFailureRecording(unittest.TestCase):
                 heic, FileCategory.PHOTO, target_dir, dry_run=False
             )
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "convert_heic")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "convert_heic")
         # The original HEIC is preserved for the user.
         self.assertTrue(os.path.exists(heic))
 
@@ -166,7 +166,7 @@ class TestMoveFailureRecording(unittest.TestCase):
         )
 
         self.assertTrue(os.path.exists(heic))  # untouched
-        self.assertEqual(self.processor.processed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
 
     def test_heic_conversion_returns_none_records_failure(self):
         """A HEIC whose conversion returns no path is recorded as failed."""
@@ -184,8 +184,8 @@ class TestMoveFailureRecording(unittest.TestCase):
                 heic, FileCategory.PHOTO, target_dir, dry_run=False
             )
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "convert_heic")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "convert_heic")
 
     def test_dry_run_photo_reports_without_moving(self):
         """A dry-run photo reports its would-be path and moves nothing."""
@@ -201,7 +201,7 @@ class TestMoveFailureRecording(unittest.TestCase):
 
         self.assertTrue(os.path.exists(photo))  # untouched
         self.assertFalse(os.path.exists(target_dir))  # nothing created
-        self.assertEqual(self.processor.processed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
 
 
 class TestQuarantinePaths(unittest.TestCase):
@@ -229,7 +229,7 @@ class TestQuarantinePaths(unittest.TestCase):
         quarantine = os.path.join(self.backup, "corrupt", "broken.jpg")
         self.assertTrue(os.path.exists(quarantine))
         self.assertEqual(len(self.processor.quarantined_files), 1)
-        self.assertEqual(self.processor.processed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
 
     def test_dry_run_quarantine_records_decision_without_moving(self):
         """A dry-run quarantine records the decision but moves nothing."""
@@ -254,8 +254,8 @@ class TestQuarantinePaths(unittest.TestCase):
                 corrupt, FileCategory.PHOTO, target_dir, dry_run=False
             )
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "quarantine")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "quarantine")
         corrupt_dir = os.path.join(self.backup, "corrupt")
         self.assertFalse(
             any(name == "broken.jpg" for name in os.listdir(corrupt_dir))
@@ -303,7 +303,7 @@ class TestUnknownFilePaths(unittest.TestCase):
         self.assertTrue(
             os.path.exists(os.path.join(self.unknown_dir, "mystery.xyz"))
         )
-        self.assertEqual(len(self.processor.processed_files), 1)
+        self.assertEqual(len(self.processor._processed_files), 1)
 
     def test_unknown_dry_run_moves_nothing(self):
         """A dry-run unknown file logs the target and moves nothing."""
@@ -316,7 +316,7 @@ class TestUnknownFilePaths(unittest.TestCase):
 
         self.assertTrue(os.path.exists(mystery))
         self.assertFalse(os.path.exists(self.unknown_dir))
-        self.assertEqual(self.processor.processed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
 
     def test_unknown_name_collision_disambiguated(self):
         """A second same-named unknown file is filed as 'name (1).ext'."""
@@ -356,8 +356,8 @@ class TestUnknownFilePaths(unittest.TestCase):
                 mystery, self.unknown_dir, dry_run=False
             )
 
-        self.assertEqual(len(self.processor.failed_files), 1)
-        self.assertEqual(self.processor.failed_files[0][0], "move_file")
+        self.assertEqual(len(self.processor._failed_files), 1)
+        self.assertEqual(self.processor._failed_files[0][0], "move_file")
         self.assertEqual(os.listdir(self.unknown_dir), [])
 
 
@@ -441,15 +441,15 @@ class TestGenerateSummaryIndependence(unittest.TestCase):
 
     def test_returned_lists_do_not_alias_internal_state(self):
         processor = FileProcessor("export", "backup")
-        processor.processed_files.append({"path": "a.jpg"})
-        processor.failed_files.append(("move_file", "b.jpg", "boom"))
-        processor.conversion_log.append(("c.heic", "c.jpg"))
+        processor._processed_files.append({"path": "a.jpg"})
+        processor._failed_files.append(("move_file", "b.jpg", "boom"))
+        processor._conversion_log.append(("c.heic", "c.jpg"))
 
         summary = processor._generate_summary()
 
-        self.assertIsNot(summary['processed_files'], processor.processed_files)
-        self.assertIsNot(summary['failed_files'], processor.failed_files)
-        self.assertIsNot(summary['conversion_log'], processor.conversion_log)
+        self.assertIsNot(summary['processed_files'], processor._processed_files)
+        self.assertIsNot(summary['failed_files'], processor._failed_files)
+        self.assertIsNot(summary['conversion_log'], processor._conversion_log)
 
         # Caller mutates what it received back.
         summary['processed_files'].clear()
@@ -457,23 +457,23 @@ class TestGenerateSummaryIndependence(unittest.TestCase):
         summary['conversion_log'].clear()
 
         # The processor's own tracked state must be untouched.
-        self.assertEqual(processor.processed_files, [{"path": "a.jpg"}])
-        self.assertEqual(processor.failed_files, [("move_file", "b.jpg", "boom")])
-        self.assertEqual(processor.conversion_log, [("c.heic", "c.jpg")])
+        self.assertEqual(processor._processed_files, [{"path": "a.jpg"}])
+        self.assertEqual(processor._failed_files, [("move_file", "b.jpg", "boom")])
+        self.assertEqual(processor._conversion_log, [("c.heic", "c.jpg")])
 
     def test_later_internal_mutation_does_not_reach_earlier_summary(self):
         processor = FileProcessor("export", "backup")
-        processor.processed_files.append({"path": "a.jpg"})
+        processor._processed_files.append({"path": "a.jpg"})
 
         first_summary = processor._generate_summary()
 
         # Simulate a later run appending more processed files on the SAME
         # processor instance (no full clear_processing_state in between).
-        processor.processed_files.append({"path": "b.jpg"})
+        processor._processed_files.append({"path": "b.jpg"})
 
         self.assertEqual(
             first_summary['processed_files'], [{"path": "a.jpg"}],
-            "a later mutation of processor.processed_files leaked into an "
+            "a later mutation of processor._processed_files leaked into an "
             "already-returned summary",
         )
 
@@ -484,21 +484,25 @@ class TestClearProcessingState(unittest.TestCase):
     def test_clear_resets_all_state(self):
         """Every processing collection is emptied by clear_processing_state."""
         processor = FileProcessor("export", "backup")
-        processor.processed_files.append({"x": 1})
-        processor.failed_files.append(("op", "f", "e"))
+        processor._processed_files.append({"x": 1})
+        processor._failed_files.append(("op", "f", "e"))
         processor.quarantined_files.append({"x": 1})
-        processor.conversion_log.append(("a", "b"))
-        processor.used_timestamps["d"] = {"stem"}
+        processor._conversion_log.append(("a", "b"))
+        processor._used_timestamps["d"] = {"stem"}
+        processor._missing_exif_records.append(
+            {"original_path": "a.jpg", "final_path": "backup/photos/a.jpg"}
+        )
         processor.exif_handler.missing_exif_files.append("f")
         processor.heic_converter.converted_files.append(("a", "b"))
 
         processor.clear_processing_state()
 
-        self.assertEqual(processor.processed_files, [])
-        self.assertEqual(processor.failed_files, [])
+        self.assertEqual(processor._processed_files, [])
+        self.assertEqual(processor._failed_files, [])
         self.assertEqual(processor.quarantined_files, [])
-        self.assertEqual(processor.conversion_log, [])
-        self.assertEqual(processor.used_timestamps, {})
+        self.assertEqual(processor._conversion_log, [])
+        self.assertEqual(processor._used_timestamps, {})
+        self.assertEqual(processor._missing_exif_records, [])
         self.assertEqual(processor.exif_handler.missing_exif_files, [])
         self.assertEqual(processor.heic_converter.converted_files, [])
 

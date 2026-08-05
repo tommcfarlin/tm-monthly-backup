@@ -129,7 +129,7 @@ class TestKeyboardInterruptPropagation(unittest.TestCase):
 
         # The interrupt was NOT recorded as a per-file failure -- it escaped the
         # loop rather than being demoted to a swallowed skip.
-        self.assertEqual(self.processor.failed_files, [])
+        self.assertEqual(self.processor._failed_files, [])
 
     def test_interrupt_propagates_from_process_category_directly(self):
         """Driving ``_process_category`` alone still lets the interrupt escape.
@@ -162,7 +162,7 @@ class TestKeyboardInterruptPropagation(unittest.TestCase):
         # Only the first file's worker ran to completion; the loop stopped at
         # the interrupt rather than continuing through files three, four, five.
         self.assertEqual(call_count["n"], 2)
-        self.assertEqual(self.processor.failed_files, [])
+        self.assertEqual(self.processor._failed_files, [])
 
 
 class TestDiskFullKeepsTrying(unittest.TestCase):
