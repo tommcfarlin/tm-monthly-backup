@@ -29,10 +29,24 @@ def _stdin_is_interactive() -> bool:
     an object the runner immediately discards. Patching this function's
     return value instead is unaffected by that swap.
 
+    Guarded defensively: ``sys.stdin`` can be ``None`` (a detached or
+    GUI-launched process has no ``isatty`` attribute at all -- an
+    ``AttributeError`` on lookup) or a closed stream (``isatty()`` itself
+    raises ``ValueError`` rather than returning a bool). Either would
+    otherwise escape as a raw traceback in exactly the headless context this
+    flag exists to serve, which is the specific outcome the gate's actionable
+    message (acceptance criterion 3) is supposed to prevent -- so both are
+    treated as "not interactive" rather than left to propagate.
+
     Returns:
-        ``sys.stdin.isatty()``.
+        ``sys.stdin.isatty()``, or ``False`` if stdin is missing, closed, or
+        otherwise cannot answer the question.
     """
-    return sys.stdin.isatty()
+    try:
+        isatty = getattr(sys.stdin, "isatty", None)
+        return bool(isatty and isatty())
+    except (AttributeError, ValueError):
+        return False
 
 
 def determine_exit_code(results: dict) -> int:

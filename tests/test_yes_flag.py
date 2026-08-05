@@ -19,6 +19,7 @@ three levels:
   what exit code its outcome earns.
 """
 
+import io
 import os
 import shutil
 import tempfile
@@ -32,9 +33,35 @@ from src.main import (
     EXIT_PARTIAL_FAILURE,
     EXIT_PRECONDITION,
     EXIT_SUCCESS,
+    _stdin_is_interactive,
     main,
 )
 from tests.fixtures import make_exif_heic, make_exif_jpeg
+
+
+class TestStdinIsInteractiveGuard(unittest.TestCase):
+    """``_stdin_is_interactive`` must never raise, only ever answer False/True.
+
+    A detached or GUI-launched process can have ``sys.stdin`` set to ``None``
+    (no ``isatty`` attribute at all), and a closed stream raises ``ValueError``
+    from ``isatty()`` itself rather than returning a bool. Both are exactly
+    the headless-adjacent conditions this flag exists to serve, so either one
+    escaping as a raw traceback would defeat acceptance criterion 3's
+    actionable-message guarantee.
+    """
+
+    def test_stdin_none_returns_false_without_raising(self):
+        """A ``None`` stdin (no ``isatty`` attribute) is treated as non-tty."""
+        with patch("src.main.sys.stdin", None):
+            self.assertFalse(_stdin_is_interactive())
+
+    def test_closed_stdin_returns_false_without_raising(self):
+        """A closed stream's ``isatty()`` raises ValueError; still False."""
+        closed = io.StringIO()
+        closed.close()
+
+        with patch("src.main.sys.stdin", closed):
+            self.assertFalse(_stdin_is_interactive())
 
 
 class TestNonInteractiveGate(unittest.TestCase):
@@ -116,6 +143,43 @@ class TestNonInteractiveGate(unittest.TestCase):
 
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertNotIn("EOFError", result.output)
+
+    def test_yes_over_empty_export_end_to_end(self):
+        """--yes alone (no --dry-run) also skips the empty-export prompt and
+        completes over an empty export/, non-interactively, exiting 0.
+        """
+        result = self.runner.invoke(main, self._args("--yes"))
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("No files found", result.output)
+        self.assertNotIn("EOFError", result.output)
+        # check_directories still creates backup/ (unrelated to --yes), but
+        # nothing was processed into it.
+        self.assertFalse(
+            os.path.isdir(os.path.join(self.backup_dir, "photos"))
+        )
+
+    def test_yes_combined_with_dry_run_is_harmless(self):
+        """--yes plus --dry-run together is exactly as harmless as --dry-run
+        alone (docs/cli-usage.md promises this): exits 0, prompts for
+        nothing, and moves nothing -- --yes has nothing left to bypass once
+        --dry-run's own no-prompt behavior already applies.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        result = self.runner.invoke(main, self._args("--yes", "--dry-run"))
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("Dry run completed", result.output)
+        self.assertTrue(
+            os.path.exists(os.path.join(self.export_dir, "pic.jpg"))
+        )
+        self.assertFalse(
+            os.path.isdir(os.path.join(self.backup_dir, "photos"))
+        )
 
 
 class TestYesFlagSuppressesConfirmPrompt(unittest.TestCase):

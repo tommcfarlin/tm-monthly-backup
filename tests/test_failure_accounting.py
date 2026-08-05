@@ -223,27 +223,49 @@ class TestExitCodeTaxonomy(unittest.TestCase):
         self.assertEqual(len(codes), 4)
 
     def test_missing_export_dir_exits_precondition(self):
-        """A missing export directory is a precondition failure (code 2)."""
+        """A missing export directory is a precondition failure (code 2).
+
+        ``--yes`` is required so this reaches ``check_directories`` at all --
+        without it, the issue #33 non-interactive gate short-circuits with its
+        own exit ``2`` before the directory is ever inspected, which would
+        make this test pass for the wrong reason (it would keep passing even
+        if the missing-directory check were deleted outright). The
+        ``assertIn`` discriminates the two: only ``check_directories``'s
+        failure path prints "Cannot proceed".
+        """
         runner = CliRunner()
         missing = os.path.join(self.temp_dir, "does_not_exist")
 
         result = runner.invoke(
             main,
-            ["--export-dir", missing, "--backup-dir", self.backup_dir],
+            ["--export-dir", missing, "--backup-dir", self.backup_dir, "--yes"],
         )
 
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Cannot proceed", result.output)
 
     def test_overlapping_dirs_exit_precondition(self):
-        """An export/backup overlap (#52) is a precondition failure (code 2)."""
+        """An export/backup overlap (#52) is a precondition failure (code 2).
+
+        Same rationale as the missing-export-dir test above: ``--yes`` is
+        required so the run reaches the #52 overlap check inside
+        ``check_directories`` rather than being turned away earlier by the
+        issue #33 non-interactive gate, and the ``assertIn`` pins that this
+        specific failure -- not the gate's -- produced the exit code.
+        """
         runner = CliRunner()
 
         result = runner.invoke(
             main,
-            ["--export-dir", self.export_dir, "--backup-dir", self.export_dir],
+            [
+                "--export-dir", self.export_dir,
+                "--backup-dir", self.export_dir,
+                "--yes",
+            ],
         )
 
         self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Cannot proceed", result.output)
 
     def test_clean_run_exits_zero_end_to_end(self):
         """A real, --yes-confirmed run over a good file exits 0 through

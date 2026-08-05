@@ -536,10 +536,10 @@ class _CLIProgressReporter(ProgressReporter):
             self.cli.console.print(
                 "\n[bold blue]DRY RUN MODE[/bold blue] - No files will be modified"
             )
+        # ``not self.yes`` short-circuits the prompt entirely when --yes was
+        # passed (issue #33): the run proceeds exactly as an accepted prompt
+        # would, without ``Confirm.ask`` ever being called.
         elif not self.yes and not Confirm.ask(f"\nProceed with processing {total} files?"):
-            # ``self.yes`` short-circuits the prompt entirely when --yes was
-            # passed (issue #33): the run proceeds exactly as an accepted
-            # prompt would, without ever calling ``Confirm.ask``.
             self.cli.console.print("[yellow]Processing cancelled[/yellow]")
             self.cancelled = True
             return False

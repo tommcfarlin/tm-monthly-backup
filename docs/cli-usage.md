@@ -133,6 +133,20 @@ an actionable message instead of the raw `EOFError`:
 Error: No terminal available for confirmation. Re-run with --yes or --dry-run.
 ```
 
+This check runs before anything is scanned, so it cannot know in advance
+whether a prompt would actually have been reached — it requires `--yes` (or
+`--dry-run`) for *any* non-interactive invocation, unconditionally. **This is
+a behavior change worth knowing about if you already have a cron job
+running**: previously, a run over an `export/` directory that was not
+technically empty (e.g. it contained only a stray subdirectory, with no files
+anywhere inside it) never hit either prompt at all — the empty-directory check
+only looks at the top level, and the scan finding zero files further down
+short-circuits to a clean, silent success. That invocation exited `0` with no
+prompt before this flag existed; without `--yes` it now exits `2` with the
+message above, since the tool cannot tell the two cases apart without a
+terminal to ask from. Adding `--yes` to an existing scheduled job (as shown
+above) restores the old behavior for that case and every other one.
+
 This exits with the precondition code (`2`, see Exit Codes below) before
 anything is scanned, categorized, or touched.
 
@@ -470,7 +484,7 @@ Each code carries exactly one meaning:
 |------|---------|-------------|
 | `0` | Success | Every discovered file was processed; zero failures (also returned for a dry run and for an empty export directory) |
 | `1` | Partial failure | Processing ran but one or more files failed; the failures are listed in the summary |
-| `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, or an unexpected error. Nothing was processed |
+| `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, no terminal available for confirmation without `--yes`/`--dry-run`, or an unexpected error. Nothing was processed |
 | `130` | Cancelled | The user declined the confirmation prompt or interrupted the run with `SIGINT` (Ctrl-C); follows the POSIX `128 + signal` convention |
 
 A `0` means the run is done and no file was left behind, so a script can safely

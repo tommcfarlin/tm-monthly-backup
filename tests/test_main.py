@@ -87,6 +87,14 @@ class TestMainCli(unittest.TestCase):
         self.assertIn("tm-monthly-backup", result.output)
         self.assertIn("1.0.0", result.output)
 
+    def test_help_documents_yes_flag(self):
+        """--help lists --yes: the issue's safety framing rests on the flag
+        being discoverable, not just present (issue #33)."""
+        result = self.runner.invoke(main, ["--help"])
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("--yes", result.output)
+
     def test_console_entry_point_target_resolves(self):
         """The ``src.main:main`` console entry point (pyproject.toml) resolves.
 
@@ -165,6 +173,29 @@ class TestMainCli(unittest.TestCase):
             result = self.runner.invoke(main, self._args(), input="n\n")
 
         self.assertEqual(result.exit_code, EXIT_CANCELLED)
+
+    def test_accepting_real_prompt_completes_run_and_exits_zero(self):
+        """Answering yes to the *real* prompt (no --yes) still works end to
+        end -- the accept-side counterpart of ``test_declining_prompt_is_cancelled``
+        above. ``test_successful_run_exits_zero`` now covers the ``--yes``
+        bypass instead of the real prompt, so this restores coverage of
+        actually driving ``Confirm.ask`` to a genuine accepted answer (fix
+        round 1 on issue #33): nothing else in the suite exercises "prompt
+        appears, user says yes, run completes" as one path.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "pic.jpg"),
+            date_time_original="2024:01:15 14:30:45",
+        )
+
+        with patch("src.main._stdin_is_interactive", return_value=True):
+            result = self.runner.invoke(main, self._args(), input="y\n")
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("All files processed successfully", result.output)
+        self.assertTrue(
+            os.path.exists(os.path.join(self.backup_dir, "photos"))
+        )
 
     def test_partial_failure_exit_code_and_message(self):
         """A completed run reporting failures exits 1 with a summary line."""
