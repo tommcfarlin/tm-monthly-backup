@@ -7,6 +7,7 @@ import sys
 import click
 
 from src.cli_interface import CLIInterface, setup_logging
+from src.file_processor import Settings
 
 
 # Exit code taxonomy. Each code carries exactly one meaning so a caller can act
@@ -84,7 +85,7 @@ def determine_exit_code(results: dict) -> int:
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose logging')
 @click.option('--export-dir', default='export', help='Directory containing exported files (default: export)')
 @click.option('--backup-dir', default='backup', help='Directory for organized output (default: backup)')
-@click.option('--jpeg-quality', type=click.IntRange(1, 100), default=95,
+@click.option('--jpeg-quality', type=click.IntRange(1, 100), default=Settings().jpeg_quality,
               show_default=True, help='JPEG quality for HEIC conversion')
 @click.option('--keep-heic', is_flag=True,
               help='Keep original HEIC files after conversion')

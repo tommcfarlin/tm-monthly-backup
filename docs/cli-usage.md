@@ -195,8 +195,13 @@ tm-monthly-backup --jpeg-quality 90 --keep-heic
 `--keep-heic` is useful when you want a lossless fallback beside the archived
 JPEG, or simply are not ready to trust the conversion yet — but it means
 `export/` keeps growing with every HEIC-heavy run rather than being fully
-drained, so plan for that disk usage (or clean up `export/` yourself once
-you have verified the backups).
+drained. **More importantly, a retained original is invisible to this tool
+as "already archived": the next run will re-convert it and re-file it under
+a new, bumped timestamp that is not its capture time, producing a duplicate
+copy in `backup/`.** This repeats every run for as long as the original
+remains in `export/`. Move or delete retained originals out of `export/`
+once you have verified the backup, or run without `--keep-heic` again for a
+subsequent pass over the same directory.
 
 ### Verbose Logging
 
@@ -308,8 +313,9 @@ HEIC files are automatically converted to JPEG:
   (1-100). This is visually excellent but **lossy** — it is not a lossless
   format, at any quality setting. The encode does not run libjpeg's extra
   Huffman-optimization pass by default (`optimize=False`, issue #40): that
-  pass buys only ~2% smaller files for roughly double the encode time, a poor
-  trade for an archive tool.
+  pass buys only ~2% smaller files for roughly 2.5x the encode time (+152% on
+  the encode step, measured in the issue #40 audit), a poor trade for an
+  archive tool.
 - **EXIF Preservation**: All metadata preserved
 - **Retention**: The original HEIC is deleted after a verified conversion by
   default, so no lossless copy remains once the run completes. Pass
@@ -317,7 +323,19 @@ HEIC files are automatically converted to JPEG:
   `export/` alongside the converted JPEG in `backup/`. With `--keep-heic`,
   `export/` is **not** fully drained by a HEIC-heavy run — the retained
   originals remain — even though every file is still correctly counted as
-  processed and filed.
+  processed and filed. **This has a real consequence, not just a disk-usage
+  one: nothing in this tool recognizes a retained original as
+  already-archived.** A file left in `export/` is scanned, categorized, and
+  processed again exactly like a new file on every subsequent run. The next
+  run re-converts it, reads the same EXIF capture timestamp, finds
+  `backup/photos/<that timestamp>.jpg` already occupied by the copy the
+  previous run filed, and the collision-resolution logic bumps the new
+  landing name forward by one second — so the retained photo gets a
+  **second, duplicate copy in the archive**, filed under a timestamp that is
+  **not** its actual capture time. This repeats on every run for as long as
+  the original stays in `export/`. If you use `--keep-heic`, move or delete
+  the retained originals out of `export/` before the next run, or expect
+  growing duplication in `backup/`.
 - **Verify Before Delete**: The original `.heic` is deleted only after the
   converted JPEG is verified on disk (it exists, decodes, matches the source
   dimensions, and preserves EXIF) and has landed in `backup/photos/`. If

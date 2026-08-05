@@ -33,9 +33,11 @@ from pathlib import Path
 from typing import Dict
 from unittest import mock
 
+import click
 from click.testing import CliRunner
 from PIL import Image
 
+from src.cli_interface import CLIInterface
 from src.file_processor import FileProcessor, Settings
 from src.main import main
 from tests.fixtures import make_exif_heic
@@ -182,6 +184,36 @@ class TestKeepHeicRetention(unittest.TestCase):
         self.assertEqual(summary["files_failed"], 0)
         self.assertFalse(os.path.exists(heic))
 
+    def test_keep_heic_true_dry_run_touches_nothing(self):
+        """
+        --keep-heic + --dry-run: dry-run parity (#10) holds for the new flag.
+
+        A dry run never converts or deletes anything regardless of
+        ``keep_heic`` -- the HEIC branch of ``_process_single_file`` never
+        reaches ``_convert_heic`` or the retention gate on the dry-run
+        branch at all -- so retention is a no-op here, but this is a new
+        flag entering the dry-run/real-run parity surface and deserves its
+        own assertion rather than relying on that being true by inference.
+        """
+        heic = make_exif_heic(
+            os.path.join(self.export_dir, "IMG_0102.heic"),
+            date_time_original="2024:02:02 08:02:00",
+        )
+        original_bytes = Path(heic).read_bytes()
+        processor = FileProcessor(
+            self.export_dir, self.backup_dir, settings=Settings(keep_heic=True)
+        )
+
+        summary = processor.process_all_files(dry_run=True)
+
+        # Nothing converted, moved, or deleted; the plan reports zero
+        # processed/failed files (dry runs are side-effect free, issue #10).
+        self.assertEqual(summary["files_processed"], 0)
+        self.assertEqual(summary["files_failed"], 0)
+        self.assertTrue(os.path.exists(heic))
+        self.assertEqual(Path(heic).read_bytes(), original_bytes)
+        self.assertFalse(os.path.exists(os.path.join(self.backup_dir, "photos")))
+
 
 class TestKeepHeicVerifyStillRuns(unittest.TestCase):
     """
@@ -280,22 +312,49 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
             )
 
     def _run(self, tag: str, force_sequential: bool, settings: Settings):
+        """
+        Run one batch and report which HEIC conversion path actually executed.
+
+        Spies on ``_convert_heic_files_parallel`` (via ``autospec`` +
+        ``side_effect=`` the real, unbound method, so the run's behavior is
+        completely unchanged) rather than trusting the batch size alone: 10
+        files clears ``HEIC_PARALLEL_THRESHOLD`` (8) *today*, but a test that
+        only ever inspects the resulting summary would stay green even if that
+        threshold were later raised above 10 -- both "paths" would silently
+        become sequential and the equivalence assertions would prove nothing
+        about the pool at all.
+
+        Returns:
+            ``(summary, export_dir, backup_dir, pool_was_used)``.
+        """
         export_dir = os.path.join(self.root, f"{tag}_export")
         backup_dir = os.path.join(self.root, f"{tag}_backup")
         self._build_export(export_dir)
         processor = FileProcessor(export_dir, backup_dir, settings=settings)
-        if force_sequential:
-            with mock.patch.object(FileProcessor, "HEIC_PARALLEL_THRESHOLD", 10 ** 9):
+        original_parallel = FileProcessor._convert_heic_files_parallel
+        with mock.patch.object(
+            FileProcessor, "_convert_heic_files_parallel", autospec=True
+        ) as spy:
+            spy.side_effect = original_parallel
+            if force_sequential:
+                with mock.patch.object(FileProcessor, "HEIC_PARALLEL_THRESHOLD", 10 ** 9):
+                    summary = processor.process_all_files(dry_run=False)
+            else:
                 summary = processor.process_all_files(dry_run=False)
-        else:
-            summary = processor.process_all_files(dry_run=False)
-        return summary, export_dir, backup_dir
+            pool_was_used = spy.called
+        return summary, export_dir, backup_dir, pool_was_used
 
     def test_keep_heic_retains_originals_on_both_paths(self):
         settings = Settings(jpeg_quality=60, keep_heic=True)
 
-        seq_summary, seq_export, seq_backup = self._run("seq", True, settings)
-        par_summary, par_export, par_backup = self._run("par", False, settings)
+        seq_summary, seq_export, seq_backup, seq_pool_used = self._run("seq", True, settings)
+        par_summary, par_export, par_backup, par_pool_used = self._run("par", False, settings)
+
+        # Confirm the two runs actually exercised different code paths --
+        # otherwise every equivalence assertion below would be comparing a
+        # run against itself.
+        self.assertFalse(seq_pool_used, "forced-sequential run unexpectedly used the pool")
+        self.assertTrue(par_pool_used, "unforced 10-file run should have used the pool")
 
         # Every original survives on both paths.
         self.assertEqual(len(os.listdir(seq_export)), 10)
@@ -322,9 +381,11 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
     def test_default_keep_heic_false_still_deletes_on_both_paths(self):
         settings = Settings()  # keep_heic=False
 
-        seq_summary, seq_export, _ = self._run("seqdel", True, settings)
-        par_summary, par_export, _ = self._run("pardel", False, settings)
+        seq_summary, seq_export, _, seq_pool_used = self._run("seqdel", True, settings)
+        par_summary, par_export, _, par_pool_used = self._run("pardel", False, settings)
 
+        self.assertFalse(seq_pool_used)
+        self.assertTrue(par_pool_used)
         self.assertEqual(os.listdir(seq_export), [])
         self.assertEqual(os.listdir(par_export), [])
         self.assertEqual(seq_summary["files_processed"], par_summary["files_processed"])
@@ -350,17 +411,42 @@ class TestCliOptions(unittest.TestCase):
         self.assertIn("--jpeg-quality", result.output)
         self.assertIn("--keep-heic", result.output)
 
-    def test_jpeg_quality_out_of_range_is_rejected(self):
-        result = self.runner.invoke(
+    def _invoke_with_quality(self, value: str):
+        return self.runner.invoke(
             main,
             [
                 "--export-dir", self.export_dir,
                 "--backup-dir", self.backup_dir,
-                "--jpeg-quality", "101",
+                "--jpeg-quality", value,
                 "--yes",
             ],
         )
-        self.assertNotEqual(result.exit_code, 0)
+
+    def test_jpeg_quality_above_range_is_rejected_with_clear_message(self):
+        result = self._invoke_with_quality("101")
+
+        # click.UsageError.exit_code is the documented exit code for a
+        # command-line parsing failure -- distinct from this tool's own
+        # EXIT_PRECONDITION (2, coincidentally the same value, but decided by
+        # click before main()'s body ever runs, not by this tool's taxonomy).
+        self.assertEqual(result.exit_code, click.UsageError.exit_code)
+        self.assertIn("--jpeg-quality", result.output)
+        # The message must actually name the valid range, not just reject.
+        self.assertIn("1<=x<=100", result.output)
+
+    def test_jpeg_quality_below_range_is_rejected(self):
+        result = self._invoke_with_quality("0")
+
+        self.assertEqual(result.exit_code, click.UsageError.exit_code)
+        self.assertIn("--jpeg-quality", result.output)
+        self.assertIn("1<=x<=100", result.output)
+
+    def test_jpeg_quality_non_integer_is_rejected(self):
+        result = self._invoke_with_quality("abc")
+
+        self.assertEqual(result.exit_code, click.UsageError.exit_code)
+        self.assertIn("--jpeg-quality", result.output)
+        self.assertIn("not a valid integer", result.output)
 
     def test_keep_heic_flag_leaves_original_after_a_real_run(self):
         heic = make_exif_heic(
@@ -411,6 +497,70 @@ class TestCliOptions(unittest.TestCase):
         high_size = _run_with_quality("95")
 
         self.assertLess(low_size, high_size)
+
+
+class TestRetentionBanner(unittest.TestCase):
+    """
+    --keep-heic surfaces retained originals in the results banner.
+
+    A retained original is invisible to this tool as "already archived" (see
+    the "HEIC Originals Retained" documentation in ``docs/cli-usage.md``) --
+    the next run re-converts and re-files it as a duplicate. A user who does
+    not realize a run retained anything is exactly the audience for a visible
+    row at the moment it happens, the same way ``files_quarantined`` already
+    gets a distinct row and title (issue #58). These tests drive
+    ``CLIInterface.display_results`` directly against a real processed
+    summary, capturing the actual rendered console output rather than
+    inspecting the results dict, since the finding is specifically about what
+    the user *sees*.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.temp_dir, "export")
+        self.backup_dir = os.path.join(self.temp_dir, "backup")
+        os.makedirs(self.export_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _render(self, cli: CLIInterface, results: Dict) -> str:
+        results = {**results, "status": "completed"}
+        with cli.console.capture() as capture:
+            cli.display_results(results, dry_run=False)
+        return capture.get()
+
+    def test_keep_heic_run_reports_retained_count_in_banner(self):
+        make_exif_heic(
+            os.path.join(self.export_dir, "IMG_0500.heic"),
+            date_time_original="2024:02:02 11:00:00",
+        )
+        cli = CLIInterface(self.export_dir, self.backup_dir, keep_heic=True)
+
+        results = cli.processor.process_all_files(dry_run=False)
+        self.assertEqual(results["files_failed"], 0)
+
+        rendered = self._render(cli, results)
+
+        self.assertIn("HEIC Originals Retained", rendered)
+        # The row's count cell must reflect the real retained count (1),
+        # not just the row's presence.
+        self.assertRegex(rendered, r"HEIC Originals Retained\s*\S*\s*1")
+
+    def test_default_run_does_not_mention_retention(self):
+        """No row at all when nothing was retained (the default, keep_heic=False)."""
+        make_exif_heic(
+            os.path.join(self.export_dir, "IMG_0501.heic"),
+            date_time_original="2024:02:02 11:01:00",
+        )
+        cli = CLIInterface(self.export_dir, self.backup_dir)
+
+        results = cli.processor.process_all_files(dry_run=False)
+        self.assertEqual(results["files_failed"], 0)
+
+        rendered = self._render(cli, results)
+
+        self.assertNotIn("HEIC Originals Retained", rendered)
 
 
 if __name__ == "__main__":
