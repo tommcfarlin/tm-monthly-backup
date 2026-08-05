@@ -272,24 +272,56 @@ def _hachoir_creation_date(metadata) -> Optional[datetime]:
     return None
 
 
+def ifd0_tag_names(exif) -> dict:
+    """
+    Resolve a single IFD's tag ids to a tag-name -> value mapping.
+
+    Despite the name this works on any single IFD-shaped mapping (IFD0 or a
+    sub-IFD); it is named for its primary caller, which always passes IFD0.
+    Kept separate from :func:`merge_exif_ifds` so a caller that must NOT see
+    sub-IFD tags -- see :meth:`FileCategorizer._exif_shows_synthetic_edit`,
+    issue #24's fix-round-1 finding 1 below -- has a way to get an IFD0-only
+    view without re-implementing the tag-id -> tag-name resolution.
+
+    Args:
+        exif: An ``Image.Exif`` (or sub-IFD) mapping of tag id -> raw value.
+
+    Returns:
+        Mapping of resolved tag name -> raw tag value, for this IFD only.
+    """
+    resolved = {}
+    for tag_id, value in exif.items():
+        resolved.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+    return resolved
+
+
 def merge_exif_ifds(exif, file_path: str = "") -> dict:
     """
     Flatten IFD0 and the Exif sub-IFD of a PIL ``Image.Exif`` into one
     tag-name -> value mapping.
 
     ``Image.getexif()`` exposes IFD0 only. The preferred ``DateTimeOriginal``
-    (0x9003) and ``DateTimeDigitized`` (0x9004) tags -- and the ``Software``
-    tag some EXIF writers place there instead of IFD0 -- can live in the Exif
-    sub-IFD behind pointer tag ``0x8769``, reachable only via
-    ``Image.Exif.get_ifd()`` (issue #25). This is the single place that merge
-    happens: used by :meth:`ExifHandler._timestamp_candidates` (the standalone
-    open path) and, since issue #24, by :class:`FileCategorizer`'s
-    once-per-file metadata read -- both used to build this same view from
-    their own separate ``Image.open`` of the same file.
+    (0x9003) and ``DateTimeDigitized`` (0x9004) tags live in the Exif sub-IFD
+    behind pointer tag ``0x8769``, reachable only via ``Image.Exif.get_ifd()``
+    (issue #25). This is the single place that merge happens: used by
+    :meth:`ExifHandler._timestamp_candidates` (the standalone open path) and,
+    since issue #24, by :class:`FileCategorizer`'s once-per-file metadata read
+    -- both used to build this same view from their own separate
+    ``Image.open`` of the same file.
 
-    IFD0 values win over sub-IFD values for any shared tag id (setdefault),
-    though in practice the tags either caller cares about do not overlap
-    between the two directories.
+    IFD0 values win over sub-IFD values for any shared tag id (setdefault).
+
+    CAUTION: this merged view is for **timestamp** lookups only (issue #25's
+    concern). Do NOT use it to look up ``Software`` or any other tag whose
+    presence is meant to be scoped to IFD0 -- issue #24's fix-round-1 finding
+    1 found that feeding this merged view to the editing-software heuristic
+    (:meth:`FileCategorizer._exif_shows_synthetic_edit`) let a ``Software``
+    tag written only in the Exif sub-IFD flip an ordinary photo to
+    ``GENERATED``, strictly widening issue #8's detection surface beyond what
+    the old, IFD0-only code ever matched. That heuristic now takes
+    :func:`ifd0_tag_names` for its ``Software`` check and this merged view
+    only for the capture-timestamp check, which #25 does intend to span both
+    directories.
 
     Args:
         exif: The ``Image.Exif`` mapping returned by ``Image.getexif()``.
@@ -299,9 +331,7 @@ def merge_exif_ifds(exif, file_path: str = "") -> dict:
     Returns:
         Mapping of resolved tag name -> raw tag value.
     """
-    merged = {}
-    for tag_id, value in exif.items():
-        merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
+    merged = ifd0_tag_names(exif)
 
     # get_ifd returns {} when the sub-IFD is absent. The guard also covers
     # exif objects that predate the sub-IFD API (e.g. plain-dict test doubles
@@ -654,12 +684,20 @@ class ExifHandler:
             self.missing_exif_files.append(file_path)
             return None
 
-    def _parse_exif_datetime(self, datetime_str: str, file_path: str) -> Optional[datetime]:
+    def _parse_exif_datetime(self, datetime_str, file_path: str) -> Optional[datetime]:
         """
         Parse EXIF datetime string to datetime object.
 
         Args:
-            datetime_str: EXIF datetime string (format: "YYYY:MM:DD HH:MM:SS")
+            datetime_str: EXIF datetime value (format: "YYYY:MM:DD HH:MM:SS").
+                Declared as ``str`` in the EXIF spec, but a corrupt or hostile
+                blob can hand this a non-str value (e.g. ``bytes``, an int) --
+                ``datetime.strptime`` raises ``TypeError`` for those, not
+                ``ValueError``, which fix-round-1 (issue #24 review, finding
+                2) found propagated straight through the metadata-provided
+                branch of ``extract_timestamp`` uncaught, failing the file
+                instead of falling back to the filesystem timestamp the way
+                every other malformed-tag case does.
             file_path: File path for logging
 
         Returns:
@@ -668,7 +706,7 @@ class ExifHandler:
         try:
             # EXIF datetime format: "YYYY:MM:DD HH:MM:SS"
             return datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
-        except ValueError as e:
+        except (ValueError, TypeError) as e:
             logger.error("Invalid EXIF datetime format in %s: %s - %s", file_path, datetime_str, e)
             self.missing_exif_files.append(file_path)
             return None

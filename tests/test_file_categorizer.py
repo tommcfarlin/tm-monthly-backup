@@ -16,14 +16,15 @@ def _is_generated(categorizer, file_path):
     """
     Test helper: read a file's metadata once, then call the no-I/O
     ``_is_generated_content`` (issue #24 changed its signature from a path
-    to pre-read ``(exif, png_info)``). Mirrors exactly what
+    to pre-read ``(exif, ifd0, png_info)`` -- the ``ifd0`` split is
+    fix-round-1 finding 1). Mirrors exactly what
     ``FileCategorizer._categorize_image_or_generated`` does internally.
     """
     metadata = categorizer._read_image_metadata(file_path)
     if metadata is None:
         return False
-    exif, png_info = metadata
-    return categorizer._is_generated_content(file_path, exif, png_info)
+    exif, ifd0, png_info = metadata
+    return categorizer._is_generated_content(file_path, exif, ifd0, png_info)
 
 
 class TestFileCategory(unittest.TestCase):
@@ -678,6 +679,49 @@ class TestGeneratedContentPrecision(unittest.TestCase):
         self.assertFalse(
             _is_generated(self.categorizer, path),
             "an edited photo that kept its capture timestamp was misfiled",
+        )
+
+    def test_software_tag_in_sub_ifd_only_does_not_flag_as_generated(self):
+        """A ``Software`` tag written ONLY in the Exif sub-IFD must NOT flag (#24 fix-round-1, finding 1 -- CRITICAL).
+
+        ``merge_exif_ifds`` merges IFD0 and the Exif sub-IFD for the
+        capture-timestamp check issue #25 needs, but some EXIF writers place
+        ``Software`` in the sub-IFD rather than IFD0. Feeding that merged
+        view to the editing-software heuristic let such a tag flip an
+        ordinary, undated photo to GENERATED -- something the pre-#24 code
+        (which read only ``img.getexif()``, i.e. IFD0) never did, strictly
+        widening issue #8's detection surface. The heuristic must see
+        ``Software`` in IFD0 only; a sub-IFD-only ``Software`` tag, with no
+        capture timestamp anywhere, must categorize as PHOTO.
+        """
+        from PIL import Image
+        from PIL.ExifTags import Base
+
+        path = os.path.join(self.temp_dir, "sub_ifd_software.jpg")
+        image = Image.new('RGB', (10, 10), color='red')
+        exif = image.getexif()
+        # Software written ONLY into the Exif sub-IFD (0x8769), never IFD0.
+        sub_ifd = exif.get_ifd(0x8769)
+        sub_ifd[Base.Software.value] = "Adobe Photoshop 2024"
+        image.save(path, exif=exif)
+
+        # Confirm the fixture's layout matches the claim before asserting on
+        # behavior: Software must be absent from IFD0 and present in the
+        # sub-IFD, and no capture timestamp anywhere.
+        with Image.open(path) as reopened:
+            top = reopened.getexif()
+            sub = top.get_ifd(0x8769)
+        self.assertNotIn(Base.Software.value, top, "fixture leaked Software into IFD0")
+        self.assertIn(Base.Software.value, sub, "fixture did not write Software into the sub-IFD")
+
+        self.assertFalse(
+            _is_generated(self.categorizer, path),
+            "a Software tag written only in the Exif sub-IFD was misfiled as GENERATED",
+        )
+        self.assertEqual(
+            self.categorizer.categorize_file(path),
+            FileCategory.PHOTO,
+            "a Software tag written only in the Exif sub-IFD was misfiled as GENERATED",
         )
 
     # ------------------------------------------------------------------ #

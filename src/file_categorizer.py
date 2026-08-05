@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
 
-from .exif_handler import merge_exif_ifds
+from .exif_handler import ifd0_tag_names, merge_exif_ifds
 
 logger = logging.getLogger(__name__)
 
@@ -197,10 +197,10 @@ class FileCategorizer:
             # try/except-swallows-and-returns-False behavior.
             return FileCategory.PHOTO
 
-        exif, png_info = metadata
+        exif, ifd0, png_info = metadata
         category = (
             FileCategory.GENERATED
-            if self._is_generated_content(file_path, exif, png_info)
+            if self._is_generated_content(file_path, exif, ifd0, png_info)
             else FileCategory.PHOTO
         )
         self.image_metadata[file_path] = ImageMetadata(
@@ -208,7 +208,9 @@ class FileCategorizer:
         )
         return category
 
-    def _read_image_metadata(self, file_path: str) -> Optional[Tuple[dict, dict]]:
+    def _read_image_metadata(
+        self, file_path: str
+    ) -> Optional[Tuple[dict, dict, dict]]:
         """
         Open ``file_path`` once and capture its EXIF + PNG-text metadata.
 
@@ -220,25 +222,50 @@ class FileCategorizer:
         trusting an undecodable-image-typed file (issue #58) is untouched by
         this change and still performs its own decode later, exactly once.
 
+        Returns BOTH an IFD0-only view and the merged (IFD0 + Exif sub-IFD)
+        view of the same already-read ``Image.Exif`` object -- no extra I/O,
+        since it is the identical in-memory object read twice with different
+        tag-name resolution. This is fix-round-1 finding 1 (issue #24 review):
+        the merged view must never feed the ``Software`` editing-detection
+        heuristic (see :func:`exif_handler.merge_exif_ifds`'s docstring), only
+        the capture-timestamp checks issue #25 actually intends to span both
+        IFDs.
+
+        ``png_info`` is captured only for ``.png`` files (the only extension
+        :meth:`_is_generated_content` ever consults it for) and filtered to
+        ``str``-valued entries -- the only entries
+        :meth:`_png_info_has_ai_provenance` ever examines -- to avoid
+        retaining large binary ancillary chunks (``icc_profile``, raw
+        ``exif`` bytes, etc.) that are never read (fix-round-1 finding 5).
+
         Args:
             file_path: Path to the candidate image file.
 
         Returns:
-            ``(exif, png_info)`` on success, or ``None`` if the file cannot be
-            opened as an image at all (corrupt, zero-byte, or a format Pillow
-            has no codec for -- e.g. RAW).
+            ``(exif, ifd0, png_info)`` on success, or ``None`` if the file
+            cannot be opened as an image at all (corrupt, zero-byte, or a
+            format Pillow has no codec for -- e.g. RAW).
         """
         from PIL import Image
 
         try:
             with Image.open(file_path) as img:
-                png_info = dict(getattr(img, 'info', None) or {})
-                exif = merge_exif_ifds(img.getexif(), file_path)
+                if file_path.lower().endswith('.png'):
+                    png_info = {
+                        key: value
+                        for key, value in (getattr(img, 'info', None) or {}).items()
+                        if isinstance(value, str)
+                    }
+                else:
+                    png_info = {}
+                raw_exif = img.getexif()
+                ifd0 = ifd0_tag_names(raw_exif)
+                exif = merge_exif_ifds(raw_exif, file_path)
         except Exception as e:
             logger.debug("Error reading image metadata for %s: %s", file_path, e)
             return None
 
-        return exif, png_info
+        return exif, ifd0, png_info
 
     def get_image_metadata(self, file_path: str) -> Optional[ImageMetadata]:
         """
@@ -289,28 +316,39 @@ class FileCategorizer:
         return any(pattern in filename for pattern in screenshot_patterns)
 
     def _is_generated_content(
-        self, file_path: str, exif: Dict[str, Any], png_info: Dict[str, Any]
+        self,
+        file_path: str,
+        exif: Dict[str, Any],
+        ifd0: Dict[str, Any],
+        png_info: Dict[str, Any],
     ) -> bool:
         """
         Detect AI-generated or heavily edited content from pre-read metadata.
 
-        Performs no I/O of its own (issue #24): ``exif`` and ``png_info`` are
-        read once by the caller (:meth:`_read_image_metadata`) rather than
-        this method opening ``file_path`` itself, which -- combined with
-        ``ExifHandler.extract_timestamp``'s own open later in the same pass --
-        used to open every candidate image file twice just for metadata.
+        Performs no I/O of its own (issue #24): ``exif``, ``ifd0``, and
+        ``png_info`` are read once by the caller (:meth:`_read_image_metadata`)
+        rather than this method opening ``file_path`` itself, which --
+        combined with ``ExifHandler.extract_timestamp``'s own open later in
+        the same pass -- used to open every candidate image file twice just
+        for metadata.
 
         Detection is deliberately precise rather than broad (issue #8): PNG
         provenance is matched against identifiable text-chunk keys and
         word-boundary tool markers, EXIF editing software is only treated as
-        generated when a genuine capture timestamp is absent, and UUID-style
-        stems are validated by parsing rather than by counting characters.
+        generated when a genuine capture timestamp is absent (and that
+        software check is scoped to IFD0 only -- fix-round-1 finding 1, see
+        ``_exif_shows_synthetic_edit``), and UUID-style stems are validated
+        by parsing rather than by counting characters.
 
         Args:
             file_path: Path to file (used only for its suffix and stem --
                 neither touches the filesystem).
             exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
-                :func:`exif_handler.merge_exif_ifds`).
+                :func:`exif_handler.merge_exif_ifds`), used only for the
+                capture-timestamp check.
+            ifd0: IFD0-only tag-name -> value mapping (see
+                :func:`exif_handler.ifd0_tag_names`), used only for the
+                ``Software`` check.
             png_info: The PNG's ``Image.info`` dict (irrelevant for non-PNG).
 
         Returns:
@@ -323,7 +361,7 @@ class FileCategorizer:
                 return True
 
         # Editing software present with no genuine capture timestamp.
-        if self._exif_shows_synthetic_edit(exif):
+        if self._exif_shows_synthetic_edit(exif, ifd0):
             logger.info("Detected heavily edited content: %s", file_path)
             return True
 
@@ -407,7 +445,9 @@ class FileCategorizer:
 
         return False
 
-    def _exif_shows_synthetic_edit(self, exif: Dict[str, Any]) -> bool:
+    def _exif_shows_synthetic_edit(
+        self, exif: Dict[str, Any], ifd0: Dict[str, Any]
+    ) -> bool:
         """
         Report whether EXIF signals a synthetic edit (software, no capture time).
 
@@ -416,24 +456,34 @@ class FileCategorizer:
         software *combined with* the absence of any genuine capture timestamp,
         which fits a graphic composed in software rather than captured.
 
-        ``exif`` is already the merged IFD0 + Exif sub-IFD tag-name -> value
-        mapping (see :func:`exif_handler.merge_exif_ifds`), built once by the
-        caller (issue #24) rather than a live ``Image`` this method walked
-        itself. Since issue #25, that merge itself is what makes
-        ``DateTimeOriginal``/``DateTimeDigitized`` visible at all -- they live
-        in the sub-IFD, not IFD0 -- so the AND condition below still can't
-        silently collapse into "any edited image".
+        The ``Software`` check below reads ``ifd0`` -- the IFD0-only view --
+        NOT the merged ``exif`` view, and this is deliberate (fix-round-1,
+        issue #24 review, finding 1 -- CRITICAL). Before this fix,
+        ``exif.get('Software')`` read the merged IFD0 + Exif sub-IFD view, so
+        a ``Software`` tag written ONLY in the sub-IFD (which some EXIF
+        writers do) flipped an ordinary, unedited photo to ``GENERATED`` --
+        strictly widening issue #8's detection surface beyond anything the
+        pre-#24 code (which read only ``img.getexif()``, i.e. IFD0) ever
+        matched. The capture-timestamp check on the next line is the one
+        part of this method issue #25 *does* intend to span both IFDs
+        (``DateTimeOriginal``/``DateTimeDigitized`` live in the sub-IFD), so
+        it still takes the merged ``exif`` view.
 
         Args:
-            exif: Merged tag-name -> value mapping.
+            exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
+                :func:`exif_handler.merge_exif_ifds`) -- used only for the
+                capture-timestamp check.
+            ifd0: IFD0-only tag-name -> value mapping (see
+                :func:`exif_handler.ifd0_tag_names`) -- used only for the
+                ``Software`` check.
 
         Returns:
             True if editing software is present and no capture timestamp exists.
         """
-        if not exif:
+        if not ifd0:
             return False
 
-        software = str(exif.get('Software', '')).lower()
+        software = str(ifd0.get('Software', '')).lower()
         has_editing_software = any(editor in software for editor in self.EDITING_SOFTWARE)
         if not has_editing_software:
             return False
