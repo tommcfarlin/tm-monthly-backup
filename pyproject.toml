@@ -7,7 +7,7 @@ name = "tm-monthly-backup"
 version = "1.0.0"
 description = "CLI utility for organizing Apple Photos exports by type and EXIF timestamp"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "Tom McFarlin", email = "tom@tommcfarlin.com" },
