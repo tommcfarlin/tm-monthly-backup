@@ -166,7 +166,10 @@ class TestProgressReporterSeam(unittest.TestCase):
         )
         for _path, category, action in reporter.files:
             self.assertEqual(category, "photos")
-            self.assertEqual(action, "process")
+            # Neither file is HEIC, so both go through the move-only phase
+            # (issue #14 refined this from the #13 placeholder "process" into
+            # "convert"/"move").
+            self.assertEqual(action, "move")
 
     def test_no_files_fires_on_no_files_only(self):
         """An empty export fires on_no_files and neither of the other hooks."""

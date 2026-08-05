@@ -702,10 +702,10 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
         original_process = self.processor._process_single_file
 
-        def failing_process(file_path, category, target_dir, dry_run):
+        def failing_process(file_path, category, target_dir, dry_run, progress=None):
             if "IMG_1001" in file_path:
                 raise Exception("Simulated processing error")
-            return original_process(file_path, category, target_dir, dry_run)
+            return original_process(file_path, category, target_dir, dry_run, progress)
 
         with patch.object(self.processor, '_process_single_file',
                           side_effect=failing_process):

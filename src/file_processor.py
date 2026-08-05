@@ -97,9 +97,27 @@ class ProgressReporter:
        categorization pass, with the scanned-file total and the categorization
        stats. Returning ``False`` aborts the run before any file is touched or
        any sidecar is deleted (the confirmation seam); the default proceeds.
-    3. :meth:`on_file` -- fired once per processable file as it is handled
+    3. :meth:`on_heic_converted` -- fired once per HEIC file as its conversion
+       attempt (success or failure) completes, interleaved with the other two
+       hooks below depending on batch size (see its docstring).
+    4. :meth:`on_file` -- fired once per processable file as it is handled
        (moved / converted / quarantined / routed). Never fired for sidecar
        files, which are deleted rather than processed.
+
+    Issue #14 extension: ``stats`` passed to :meth:`on_categorized` carries an
+    additional ``'heic'`` key -- the count of processable files that are HEIC
+    -- beyond the keys documented on
+    :meth:`FileCategorizer.get_categorization_stats`, so a reporter can size a
+    conversion-specific total (a HEIC file is not its own categorization
+    category; it is a photo/screenshot/generated file that happens to carry a
+    ``.heic``/``.heif`` extension). :meth:`on_heic_converted` is a new hook
+    added for the same reason: the HEIC conversion phase can run entirely
+    *before* the per-file loop that fires :meth:`on_file` (issue #42's
+    parallel pool, used above ``HEIC_PARALLEL_THRESHOLD`` files), so a reporter
+    that only implemented :meth:`on_file` would see the expensive conversion
+    phase produce no progress at all and then watch :meth:`on_file` catch up
+    all at once once placement starts -- the exact "stalled bar, then a snap
+    to 100%" defect this hook exists to fix.
     """
 
     def on_no_files(self) -> None:
@@ -113,13 +131,45 @@ class ProgressReporter:
             total: Number of files the scan discovered (sidecars included) --
                 the count a "process N files?" prompt should quote.
             stats: The categorization breakdown from
-                :meth:`FileCategorizer.get_categorization_stats`.
+                :meth:`FileCategorizer.get_categorization_stats`, plus one key
+                that method does not provide: ``'heic'``, the count of
+                processable files that will go through HEIC conversion (issue
+                #14) -- enough for a reporter to size a conversion-specific
+                progress total independent of the move/organize total.
 
         Returns:
             ``True`` to proceed with processing, ``False`` to abort the run
             before any file is touched or any sidecar deleted. Default ``True``.
         """
         return True
+
+    def on_heic_converted(self, path: str) -> None:
+        """
+        Called once per HEIC file as its conversion attempt completes.
+
+        Fires right after the decode+encode(+write) attempt for ``path``
+        finishes -- success or failure -- and strictly before :meth:`on_file`
+        fires for that same file (the move/place step happens afterward).
+
+        Timing depends on batch size: for a batch at or above
+        ``HEIC_PARALLEL_THRESHOLD`` every HEIC file is converted in the
+        parallel pool (issue #42) as a dedicated up-front phase, so every
+        ``on_heic_converted`` call for that run fires before any
+        :meth:`on_file` call. Below the threshold each HEIC file is converted
+        inline as it is reached, so ``on_heic_converted`` for that file fires
+        immediately before the matching :meth:`on_file` call. Either way it
+        fires exactly once per HEIC file -- never for a non-HEIC file, and
+        never twice for the same file (a pool-converted file's cached result is
+        merely looked up later; that lookup does not re-fire this hook).
+
+        Args:
+            path: The source ``.heic``/``.heif`` path whose conversion just
+                completed (success or failure -- the hook does not carry the
+                outcome; :meth:`on_file`'s eventual action, or the run's
+                failure list, reflects that).
+
+        Default: no-op.
+        """
 
     def on_file(self, path: str, category: str, action: str) -> None:
         """
@@ -128,8 +178,12 @@ class ProgressReporter:
         Args:
             path: The source path of the file just handled.
             category: The file's category value (e.g. ``"photo"``).
-            action: A coarse label for what happened (currently ``"process"``);
-                reserved for issue #14 to refine into convert/move/quarantine.
+            action: A coarse label for the phase this file went through:
+                ``"convert"`` for a HEIC file (which was also converted, and
+                whose :meth:`on_heic_converted` already fired for it), or
+                ``"move"`` for every other file (moved, quarantined, or routed
+                to ``backup/unknown/`` with no conversion). Determined from the
+                file's own extension, independent of success or failure.
 
         Default: no-op.
         """
@@ -318,6 +372,15 @@ class FileProcessor:
         categorized = self.categorizer.batch_categorize(all_files)
         logger.info(f"Categorization complete:\n{self.categorizer.get_file_summary()}")
 
+        # Compute the processable set now -- before the confirmation gate --
+        # so its HEIC count can ride along on the ``on_categorized`` report
+        # below (issue #14: a reporter needs this to size a conversion-total
+        # progress bar). This is a pure read of the categorization already
+        # collected above (``get_processable_files`` only filters
+        # ``self.categorized_files`` in memory), so moving it earlier changes
+        # nothing about sidecar deletion or processing order.
+        processable_files = self.categorizer.get_processable_files()
+
         # Report the categorized total to the presentation layer and let it gate
         # the run. This is the confirmation seam: a reporter that declines
         # (returns False) aborts BEFORE any sidecar is deleted or any file is
@@ -325,15 +388,19 @@ class FileProcessor:
         # permissive default both proceed, preserving headless behaviour.
         if progress is not None:
             stats = self.categorizer.get_categorization_stats()
+            # Issue #14 addition: the count of processable files that are HEIC
+            # -- not a categorization category of its own, so it is not among
+            # the keys ``get_categorization_stats`` already returns. Uses the
+            # SAME selection ``_prepare_heic_conversions`` uses below, so the
+            # conversion bar's total can never drift from the set of files
+            # that actually go through ``on_heic_converted``.
+            stats['heic'] = len(self._collect_heic_files(processable_files))
             if not progress.on_categorized(len(all_files), stats):
                 logger.info("Processing aborted by progress reporter")
                 return self._generate_summary()
 
         # Delete sidecar files immediately
         self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
-
-        # Process files by category
-        processable_files = self.categorizer.get_processable_files()
 
         # Create target directories
         if not dry_run:
@@ -345,7 +412,7 @@ class FileProcessor:
         # below. A dry run converts nothing, so it never enters here and never
         # spawns a pool (#10 parity preserved).
         if not dry_run:
-            self._prepare_heic_conversions(processable_files)
+            self._prepare_heic_conversions(processable_files, progress)
 
         # Phase B (sequential): timestamp, resolve collisions, move, and delete
         # originals in the SAME deterministic order as a fully sequential run,
@@ -456,8 +523,14 @@ class FileProcessor:
         target_dir = self.categorizer.get_target_directory(category, self.backup_dir)
 
         for file_path in files:
+            # Determined from the file's own extension, independent of
+            # success/failure below -- a HEIC always goes through the convert
+            # phase (whose own completion was already reported via
+            # ``on_heic_converted``, in the pool or inline); everything else
+            # (including quarantined and unknown files) only moves (issue #14).
+            action = 'convert' if self.heic_converter.is_heic_file(file_path) else 'move'
             try:
-                self._process_single_file(file_path, category, target_dir, dry_run)
+                self._process_single_file(file_path, category, target_dir, dry_run, progress)
             except Exception as e:
                 logger.error("Failed to process file %s: %s", file_path, e)
                 self.failed_files.append(('process_file', file_path, str(e)))
@@ -466,18 +539,53 @@ class FileProcessor:
             # ``except Exception`` (not in a ``finally``) so a propagating
             # ``KeyboardInterrupt`` is not reported as a completed file.
             if progress is not None:
-                progress.on_file(file_path, category.value, 'process')
+                progress.on_file(file_path, category.value, action)
 
-    def _prepare_heic_conversions(self, processable_files: Dict[FileCategory, List[str]]) -> None:
+    def _collect_heic_files(
+        self, processable_files: Dict[FileCategory, List[str]]
+    ) -> List[str]:
+        """
+        Return every HEIC/HEIF file across all processable categories.
+
+        Single source of truth for "which files are HEIC" among the
+        processable set, shared by :meth:`process_all_files` (to size the
+        issue #14 conversion-bar total) and :meth:`_prepare_heic_conversions`
+        (to select the pool's input). The conversion bar's correctness IS the
+        equality of those two counts: if the selection changed independently
+        in each place, the bar would drift from what ``on_heic_converted``
+        actually reports -- hanging short of its total or overshooting it,
+        since ``rich`` does not clamp ``completed`` to ``total``.
+
+        Args:
+            processable_files: The per-category file lists about to be placed.
+
+        Returns:
+            Every HEIC/HEIF source path among ``processable_files``, in
+            per-category-then-scan order (the same order
+            ``processable_files`` itself iterates in).
+        """
+        return [
+            path
+            for files in processable_files.values()
+            for path in files
+            if self.heic_converter.is_heic_file(path)
+        ]
+
+    def _prepare_heic_conversions(
+        self,
+        processable_files: Dict[FileCategory, List[str]],
+        progress: Optional[ProgressReporter] = None,
+    ) -> None:
         """
         Run the parallel HEIC convert phase, populating ``_converted_heic``.
 
-        Collects every HEIC file across all processable categories and, only
-        when there are enough of them to amortize pool startup
-        (``HEIC_PARALLEL_THRESHOLD``), converts them in a bounded process pool.
-        Below the threshold nothing is done: ``_converted_heic`` stays empty and
-        each HEIC is converted inline in the sequential place phase, exactly as
-        before issue #42. Non-HEIC files never enter here.
+        Collects every HEIC file across all processable categories (via
+        :meth:`_collect_heic_files`) and, only when there are enough of them
+        to amortize pool startup (``HEIC_PARALLEL_THRESHOLD``), converts them
+        in a bounded process pool. Below the threshold nothing is done:
+        ``_converted_heic`` stays empty and each HEIC is converted inline in
+        the sequential place phase, exactly as before issue #42. Non-HEIC
+        files never enter here.
 
         This method performs conversions only; it assigns no timestamps, moves
         nothing, and deletes nothing. All of that stays in the sequential place
@@ -485,18 +593,18 @@ class FileProcessor:
 
         Args:
             processable_files: The per-category file lists about to be placed.
+            progress: Optional reporter whose ``on_heic_converted`` fires once
+                per HEIC file converted here (issue #14). Below the threshold
+                this method converts nothing, so no callback fires from here --
+                the sequential place phase reports those files itself, inline,
+                as each is actually converted.
         """
-        heic_files = [
-            path
-            for files in processable_files.values()
-            for path in files
-            if self.heic_converter.is_heic_file(path)
-        ]
+        heic_files = self._collect_heic_files(processable_files)
         if len(heic_files) < self.HEIC_PARALLEL_THRESHOLD:
             # Not worth a pool: leave the map empty so the place phase converts
             # these inline (sequentially), matching pre-#42 behaviour exactly.
             return
-        self._converted_heic = self._convert_heic_files_parallel(heic_files)
+        self._converted_heic = self._convert_heic_files_parallel(heic_files, progress)
 
     def _heic_worker_count(self, num_files: int) -> int:
         """
@@ -518,7 +626,9 @@ class FileProcessor:
         return max(1, min(capped, num_files))
 
     def _convert_heic_files_parallel(
-        self, heic_files: List[str]
+        self,
+        heic_files: List[str],
+        progress: Optional[ProgressReporter] = None,
     ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
         """
         Convert HEIC files in a bounded process pool; return per-file results.
@@ -526,9 +636,20 @@ class FileProcessor:
         Maps :func:`_convert_heic_worker` across ``heic_files`` in a
         :class:`concurrent.futures.ProcessPoolExecutor` sized by
         :meth:`_heic_worker_count`. Results are consumed via
-        :func:`concurrent.futures.as_completed` so a future per-file progress
-        callback (issue #14) drops in without restructuring, and so a single
-        failing file is recorded rather than aborting the batch.
+        :func:`concurrent.futures.as_completed`, which is also where the
+        per-file progress callback (issue #14) fires: as each future completes
+        -- in whatever order workers happen to finish, not submission order --
+        ``progress.on_heic_converted`` is called for that file. This reports
+        real, live progress during the expensive parallel phase itself, rather
+        than only after the (unrelated, cheap) sequential place phase that
+        follows it. It does not touch the #42 equivalence guarantee: the
+        ``results`` dict this method returns is keyed by path, not by
+        completion order, and the sequential place phase iterates
+        ``processable_files`` in its own fixed order regardless of which
+        worker happened to finish first -- so the callback firing order is a
+        pure side channel with no effect on landing paths, collision
+        resolution, or failure accounting. A single failing file is recorded
+        rather than aborting the batch.
 
         Robustness guarantees:
 
@@ -542,6 +663,8 @@ class FileProcessor:
 
         Args:
             heic_files: Source ``.heic`` paths to convert.
+            progress: Optional reporter whose ``on_heic_converted`` fires once
+                per file as its conversion (pooled or backfilled) completes.
 
         Returns:
             A dict mapping each source path to ``(output_path, error)``.
@@ -567,7 +690,10 @@ class FileProcessor:
                 try:
                     for future in as_completed(futures):
                         _src, output_path, error = future.result()
-                        results[futures[future]] = (output_path, error)
+                        path = futures[future]
+                        results[path] = (output_path, error)
+                        if progress is not None:
+                            progress.on_heic_converted(path)
                 except KeyboardInterrupt:
                     # Do not wait on in-flight work; cancel what has not started
                     # and tear the pool down before re-raising so no worker is
@@ -585,17 +711,22 @@ class FileProcessor:
 
         # Backfill any file the pool did not resolve -- a broken pool, or a
         # future cancelled on interrupt that we nonetheless reached here for --
-        # by converting it inline. Guarantees every input has a result.
+        # by converting it inline. Guarantees every input has a result, and
+        # each backfilled file still reports exactly once.
         for path in heic_files:
             if path not in results:
                 _src, output_path, error = _convert_heic_worker(
                     path, quality, optimize
                 )
                 results[path] = (output_path, error)
+                if progress is not None:
+                    progress.on_heic_converted(path)
 
         return results
 
-    def _convert_heic(self, file_path: str) -> Optional[str]:
+    def _convert_heic(
+        self, file_path: str, progress: Optional[ProgressReporter] = None
+    ) -> Optional[str]:
         """
         Return the converted-JPEG path for a HEIC, or ``None`` on failure.
 
@@ -610,6 +741,12 @@ class FileProcessor:
 
         Args:
             file_path: Source ``.heic`` path.
+            progress: Optional reporter whose ``on_heic_converted`` fires once
+                the conversion performed *here* completes (issue #14). Fired
+                only on the inline branch: a cached (pool) result was already
+                reported when the pool produced it, in
+                :meth:`_convert_heic_files_parallel`, so reporting it again
+                here would double-count that file.
 
         Returns:
             The transient JPEG path on success, or ``None`` on conversion
@@ -627,9 +764,19 @@ class FileProcessor:
             )
             return None
         # No pooled result: convert inline, exactly as the pre-#42 code did.
-        return self.heic_converter.convert_heic_to_jpeg(file_path)
+        result = self.heic_converter.convert_heic_to_jpeg(file_path)
+        if progress is not None:
+            progress.on_heic_converted(file_path)
+        return result
 
-    def _process_single_file(self, file_path: str, category: FileCategory, target_dir: str, dry_run: bool):
+    def _process_single_file(
+        self,
+        file_path: str,
+        category: FileCategory,
+        target_dir: str,
+        dry_run: bool,
+        progress: Optional[ProgressReporter] = None,
+    ):
         """
         Process a single file: convert if needed, rename with timestamp, move to target.
 
@@ -638,6 +785,9 @@ class FileProcessor:
             category: FileCategory
             target_dir: Target directory path
             dry_run: If True, only show what would be done
+            progress: Optional reporter passed through to :meth:`_convert_heic`
+                so an inline (below-threshold) HEIC conversion can report its
+                own completion (issue #14).
         """
         # Unrecognized files carry no photo/video metadata to derive a
         # timestamp from, so renaming them to a fabricated timestamp would erase
@@ -702,7 +852,7 @@ class FileProcessor:
                 # preserves EXIF), so the timestamp read below matches a real run
                 # without performing -- or writing -- any conversion.
             else:
-                converted_path = self._convert_heic(file_path)
+                converted_path = self._convert_heic(file_path, progress)
                 if converted_path:
                     # Verify the conversion is genuinely valid BEFORE the original
                     # -- the only copy of the photo -- becomes eligible for
