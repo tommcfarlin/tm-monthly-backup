@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pathlib import Path
 
 import click
@@ -421,7 +421,7 @@ class CLIInterface:
 
         self.console.print(failure_table)
 
-    def display_missing_exif_warning(self, missing_files: List[Dict[str, str]]):
+    def display_missing_exif_warning(self, missing_files: List[Dict[str, Optional[str]]]):
         """
         Display warning about files with missing EXIF data.
 

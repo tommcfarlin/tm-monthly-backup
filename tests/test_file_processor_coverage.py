@@ -228,7 +228,7 @@ class TestQuarantinePaths(unittest.TestCase):
 
         quarantine = os.path.join(self.backup, "corrupt", "broken.jpg")
         self.assertTrue(os.path.exists(quarantine))
-        self.assertEqual(len(self.processor.quarantined_files), 1)
+        self.assertEqual(len(self.processor._quarantined_files), 1)
         self.assertEqual(self.processor._processed_files, [])
 
     def test_dry_run_quarantine_records_decision_without_moving(self):
@@ -242,7 +242,7 @@ class TestQuarantinePaths(unittest.TestCase):
 
         self.assertTrue(os.path.exists(corrupt))
         self.assertFalse(os.path.exists(os.path.join(self.backup, "corrupt")))
-        self.assertEqual(len(self.processor.quarantined_files), 1)
+        self.assertEqual(len(self.processor._quarantined_files), 1)
 
     def test_quarantine_move_failure_is_recorded(self):
         """A failed quarantine move is recorded and the placeholder discarded."""
@@ -486,7 +486,7 @@ class TestClearProcessingState(unittest.TestCase):
         processor = FileProcessor("export", "backup")
         processor._processed_files.append({"x": 1})
         processor._failed_files.append(("op", "f", "e"))
-        processor.quarantined_files.append({"x": 1})
+        processor._quarantined_files.append({"x": 1})
         processor._conversion_log.append(("a", "b"))
         processor._used_timestamps["d"] = {"stem"}
         processor._missing_exif_records.append(
@@ -499,7 +499,7 @@ class TestClearProcessingState(unittest.TestCase):
 
         self.assertEqual(processor._processed_files, [])
         self.assertEqual(processor._failed_files, [])
-        self.assertEqual(processor.quarantined_files, [])
+        self.assertEqual(processor._quarantined_files, [])
         self.assertEqual(processor._conversion_log, [])
         self.assertEqual(processor._used_timestamps, {})
         self.assertEqual(processor._missing_exif_records, [])

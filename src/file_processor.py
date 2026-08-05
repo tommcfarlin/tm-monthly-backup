@@ -258,7 +258,7 @@ class FileProcessor:
         # the directory's on-disk contents (issue #6) so collision resolution is
         # authoritative against what previous runs already filed in ``backup/``.
         #
-        # These four accumulators (plus ``quarantined_files`` below) are
+        # These four accumulators (plus ``_quarantined_files`` below) are
         # per-run bookkeeping, not public API: they are private (issue #35) so
         # ``_generate_summary`` is the only reader, and ``process_all_files``
         # resets all of them -- via ``clear_processing_state`` -- at the start
@@ -275,7 +275,7 @@ class FileProcessor:
         # already moved/renamed/deleted by then. Populated only when the file
         # was actually filed successfully; a file that also failed to move is
         # not double-reported here (it is already in ``_failed_files``).
-        self._missing_exif_records: List[Dict[str, str]] = []
+        self._missing_exif_records: List[Dict[str, Optional[str]]] = []
         # Pre-computed HEIC conversions from the parallel convert phase (issue
         # #42): maps a source ``.heic`` path to ``(output_path, error)``. It is
         # populated once, up front, only when a run has enough HEIC files to
@@ -288,7 +288,7 @@ class FileProcessor:
         # ``.png``). They are moved to ``backup/corrupt/`` under their original
         # name rather than archived as photographs, and reported as a distinct
         # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
-        self.quarantined_files: List[Dict[str, any]] = []
+        self._quarantined_files: List[Dict[str, any]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -1171,7 +1171,7 @@ class FileProcessor:
         ``name (1).ext`` rather than overwriting it, reusing the same atomic
         reservation the unknown/timestamped paths use. The original is never
         deleted from ``export/`` until it has safely landed here. On success the
-        move is recorded in ``quarantined_files``; on failure it is recorded in
+        move is recorded in ``_quarantined_files``; on failure it is recorded in
         ``_failed_files`` so a botched quarantine cannot masquerade as a clean run.
 
         In a dry run nothing is moved, but the decision is still recorded and
@@ -1194,7 +1194,7 @@ class FileProcessor:
                 file_path,
                 target_path,
             )
-            self.quarantined_files.append({
+            self._quarantined_files.append({
                 'original_path': file_path,
                 'final_path': target_path,
                 'reason': 'undecodable',
@@ -1219,7 +1219,7 @@ class FileProcessor:
                 "Quarantined undecodable file: %s -> %s", file_path, target_path
             )
 
-            self.quarantined_files.append({
+            self._quarantined_files.append({
                 'original_path': file_path,
                 'final_path': target_path,
                 'reason': 'undecodable',
@@ -1487,14 +1487,14 @@ class FileProcessor:
             # distinct outcome from processed (they were NOT filed as photos)
             # and from failed (nothing errored; they were handled deliberately
             # and safely), so the count is honest either way (issue #58).
-            'files_quarantined': len(self.quarantined_files),
+            'files_quarantined': len(self._quarantined_files),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
             'missing_exif_files': len(self._missing_exif_records),
             'processed_files': self._processed_files.copy(),
             'failed_files': self._failed_files.copy(),
-            'quarantined_files': self.quarantined_files.copy(),
+            'quarantined_files': self._quarantined_files.copy(),
             'conversion_log': self._conversion_log.copy(),
             # Each entry carries BOTH 'original_path' and 'final_path' so the
             # display layer can show a path that genuinely exists on disk
@@ -1522,7 +1522,7 @@ class FileProcessor:
         complete) still has an explicit hook.
 
         Resets this object's own four private accumulators and
-        ``quarantined_files``, plus every collaborator's own bookkeeping
+        ``_quarantined_files``, plus every collaborator's own bookkeeping
         (``ExifHandler.missing_exif_files``, ``HeicConverter.converted_files``/
         ``failed_conversions``, ``FileCategorizer.categorized_files``) -- a
         reset that only cleared this object's attributes and left the
@@ -1533,7 +1533,7 @@ class FileProcessor:
         self._processed_files.clear()
         self._used_timestamps.clear()
         self._failed_files.clear()
-        self.quarantined_files.clear()
+        self._quarantined_files.clear()
         self._conversion_log.clear()
         self._missing_exif_records.clear()
         self._converted_heic = {}
