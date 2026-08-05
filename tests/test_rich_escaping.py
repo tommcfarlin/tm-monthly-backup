@@ -164,6 +164,43 @@ class TestLoggingNeutralizesHostileNames(unittest.TestCase):
         self.assertNotIn("31m", text)
         self.assertIn("evilX.zzz", text)
 
+    def test_exception_traceback_is_sanitized_of_ansi(self):
+        """A logged exception's traceback cannot smuggle ANSI through logger.exception.
+
+        Issue #39 adds a top-level ``logger.exception`` call in ``main.py`` so
+        an unexpected error's traceback is always recorded. ``Formatter.format``
+        appends the formatted traceback (``record.exc_text``, built from
+        ``record.exc_info``) to the message AFTER handler filters run -- so,
+        unlike ``record.msg``, it was never touched by
+        ``_SanitizingLogFilter`` before this fix. An exception whose own
+        ``str()`` embeds a raw ANSI sequence (e.g. from an untrusted filename
+        interpolated into an f-string, rather than passed as a lazy ``%s``
+        argument) would otherwise reach the terminal unsanitized from inside
+        the traceback text even though the same value in the log message
+        itself is already safe.
+
+        Fails against the old filter: it never inspects ``record.exc_info``/
+        ``record.exc_text`` at all, so the raw ``\\x1b[31m`` sequence below
+        survives into the rendered output.
+        """
+        # Built at runtime, not as a source-literal escape, so the traceback's
+        # own rendering of the ``raise`` source line does not itself contain
+        # the literal text "31m" -- only the exception's *runtime* str(),
+        # which is what must be sanitized, carries the raw ESC byte.
+        hostile_name = "evil" + chr(0x1B) + "[31mX.jpg"
+        with _capture_logger("src.rich_escaping_test") as console:
+            logger = logging.getLogger("src.rich_escaping_test")
+            try:
+                raise ValueError(hostile_name)
+            except ValueError:
+                logger.exception("boom")
+            text = console.export_text()
+
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("31m", text)
+        self.assertIn("evilX.jpg", text)  # literal, not swallowed
+        self.assertIn("boom", text)
+
 
 class TestRenderBoundariesDoNotRaise(unittest.TestCase):
     """Every display path escapes hostile filenames rather than choking."""

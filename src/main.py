@@ -3,11 +3,14 @@
 tm-monthly-backup: CLI utility for organizing Apple Photos exports
 """
 
+import logging
 import sys
 import click
 
 from src.cli_interface import CLIInterface, setup_logging
 from src.file_processor import Settings
+
+logger = logging.getLogger(__name__)
 
 
 # Exit code taxonomy. Each code carries exactly one meaning so a caller can act
@@ -131,18 +134,33 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
     # Display welcome banner
     cli.display_welcome()
 
-    # Check directories and prerequisites. A directory problem (missing export
-    # dir, unwritable backup dir, or the #52 overlap rejection) is a
-    # precondition failure -- nothing was attempted -- so it exits distinctly
-    # from a partial processing failure. ``auto_confirm`` skips the
-    # empty-export "Continue anyway?" prompt: --yes is the explicit
-    # non-interactive opt-out, and --dry-run touches nothing, so that prompt
-    # guards no risk on a dry run either (issue #33).
-    if not cli.check_directories(auto_confirm=yes or dry_run):
-        cli.console.print("[red]Cannot proceed due to directory issues.[/red]")
-        sys.exit(EXIT_PRECONDITION)
-
     try:
+        # Check directories and prerequisites. A directory problem (missing
+        # export dir, unwritable backup dir, or the #52 overlap rejection) is
+        # a precondition failure -- nothing was attempted -- so it exits
+        # distinctly from a partial processing failure. ``auto_confirm`` skips
+        # the empty-export "Continue anyway?" prompt: --yes is the explicit
+        # non-interactive opt-out, and --dry-run touches nothing, so that
+        # prompt guards no risk on a dry run either (issue #33).
+        #
+        # This call is now INSIDE the try (issue #39 fix round 1): narrowing
+        # check_directories' own mkdir catch from Exception to OSError means a
+        # non-OSError bug (a malformed --backup-dir producing a TypeError, for
+        # instance) propagates out of check_directories rather than being
+        # mislabeled and swallowed there. Before this move, check_directories
+        # was called BEFORE this try block even started, so that propagating
+        # exception would have gone straight past main() uncaught -- a raw,
+        # unsanitized crash with exit code 1 (colliding with
+        # EXIT_PARTIAL_FAILURE's documented meaning) and no logger.exception,
+        # no traceback recorded, no "Unexpected error" message. Moving the
+        # call inside the try is what makes the iterdir()/mkdir narrowing
+        # actually deliver on its promise that the real exception type
+        # propagates and is reported, instead of only being true up to the
+        # boundary of this function.
+        if not cli.check_directories(auto_confirm=yes or dry_run):
+            cli.console.print("[red]Cannot proceed due to directory issues.[/red]")
+            sys.exit(EXIT_PRECONDITION)
+
         # Process files with beautiful progress indicators
         results = cli.process_with_progress(dry_run=dry_run, yes=yes)
 
@@ -176,9 +194,18 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
         sys.exit(EXIT_CANCELLED)
     except Exception as e:
         cli.console.print(f"\n[red]Unexpected error: {e}[/red]")
-        if verbose:
-            import traceback
-            cli.console.print(traceback.format_exc())
+        # logger.exception records the traceback at ERROR regardless of
+        # --verbose (issue #39): before this, the traceback was discarded
+        # unless --verbose happened to be passed, and by the time a user
+        # realizes they needed it the only way to recover it is to reproduce
+        # the failure. The one-line message above stays -- it is what a
+        # user reads first -- while this guarantees the detail needed to
+        # actually diagnose the failure is never silently lost. Routed
+        # through the logger (not a second console.print) so it passes
+        # through setup_logging's sanitizing filter (issue #9): an
+        # unexpected exception's own str() can embed an untrusted filename,
+        # and that text must not reach the terminal unsanitized.
+        logger.exception("Unexpected error: %s", e)
         sys.exit(EXIT_PRECONDITION)
 
 

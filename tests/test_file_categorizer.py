@@ -1061,5 +1061,109 @@ class TestFileCategorization_EdgeCases(unittest.TestCase):
             )
 
 
+class TestReadImageMetadataExceptionNarrowing(unittest.TestCase):
+    """``_read_image_metadata``'s except clause is narrowed, not bare (issue #39).
+
+    ``batch_categorize``'s loop has no try/except of its own, so
+    ``_read_image_metadata`` is the only guard between one bad file and the
+    whole categorization pass. Before this fix it caught bare ``Exception``,
+    which also caught -- and silently discarded at DEBUG -- a bug in a
+    caller-supplied mock (e.g. an ``AssertionError``), making a test double's
+    own mistake indistinguishable from a genuinely unreadable file. Narrowing
+    to the specific exceptions ``Image.open``/``getexif`` actually raise lets
+    a real bug propagate instead of vanishing.
+    """
+
+    def setUp(self):
+        self.categorizer = FileCategorizer()
+
+    def test_non_pillow_exception_is_not_swallowed(self):
+        """A bug surfacing as AssertionError now propagates instead of vanishing.
+
+        Fails against the old code: its bare ``except Exception`` caught this
+        AssertionError and returned ``None``, so nothing ever reached
+        ``assertRaises`` and the context manager itself raised
+        "AssertionError not raised".
+        """
+        with patch("PIL.Image.open", side_effect=AssertionError("mock misconfigured")):
+            with self.assertRaises(AssertionError):
+                self.categorizer._read_image_metadata("/tmp/whatever.jpg")
+
+    def test_decompression_bomb_is_still_caught(self):
+        """An oversized-image failure still fails this one file, not the batch.
+
+        ``Image.open`` raises ``PIL.Image.DecompressionBombError`` -- a plain
+        ``Exception`` subclass, not an ``OSError`` -- for an image whose
+        declared pixel count exceeds Pillow's safety limit. Regression
+        coverage for the narrowed except clause: pins that this specific type
+        is still included even though it is not an ``OSError``.
+        """
+        from PIL import Image
+
+        with patch(
+            "PIL.Image.open",
+            side_effect=Image.DecompressionBombError("image too large"),
+        ):
+            result = self.categorizer._read_image_metadata("/tmp/huge.jpg")
+        self.assertIsNone(result)
+
+    def test_permission_error_returns_none_without_raising(self):
+        """A permission-denied file is reported as unreadable, not raised.
+
+        Regression coverage: ``OSError`` (and its ``PermissionError``
+        subclass) was already covered by the old bare ``except Exception``;
+        this pins that the narrowed clause still covers it.
+        """
+        with patch(
+            "PIL.Image.open", side_effect=PermissionError(13, "Permission denied")
+        ):
+            result = self.categorizer._read_image_metadata("/tmp/locked.jpg")
+        self.assertIsNone(result)
+
+    def test_open_failure_logs_debug_message_naming_exception_type(self):
+        """The open-failure message fires at DEBUG and names the exception type.
+
+        Pins the actual claim behind the deliberate DEBUG-not-WARNING
+        decision (documented inline and in the task report): the message
+        still exists, still names the file and the exception type, just at a
+        level that does not duplicate issue #58's own WARNING for the
+        extensions where that gate independently re-checks and reports. A
+        test that only asserts the return value (``None``) proves nothing
+        about whether anything was logged at all -- this uses ``assertLogs``
+        so a regression that silently drops the message (or moves it to a
+        level ``assertLogs(level="DEBUG")`` would not even capture) fails
+        here instead of only being caught by eye.
+
+        Fails against the pre-#39 code too, in the opposite direction it
+        might seem: the old bare ``except Exception`` DID log at DEBUG, but
+        with a message of ``"Error reading image metadata for %s: %s"`` that
+        never names the exception TYPE (only ``str(e)``) -- so the
+        type-name assertion below fails against it.
+        """
+        with self.assertLogs("src.file_categorizer", level="DEBUG") as captured:
+            with patch(
+                "PIL.Image.open",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                result = self.categorizer._read_image_metadata("/tmp/locked.jpg")
+
+        self.assertIsNone(result)
+        debug_records = [
+            r for r in captured.records if r.name == "src.file_categorizer"
+        ]
+        self.assertTrue(debug_records, "expected a log record from file_categorizer")
+        record = debug_records[0]
+        # Deliberately DEBUG, not WARNING (see the inline comment on
+        # _read_image_metadata and the task report's "Deviation" section):
+        # issue #58's _is_decodable_image already independently WARNs and
+        # quarantines for every extension where this is a real, actionable
+        # failure, so warning again here would be redundant there and a
+        # false alarm for every valid RAW file elsewhere.
+        self.assertEqual(record.levelname, "DEBUG")
+        message = record.getMessage()
+        self.assertIn("/tmp/locked.jpg", message)
+        self.assertIn("PermissionError", message)
+
+
 if __name__ == '__main__':
     unittest.main()
