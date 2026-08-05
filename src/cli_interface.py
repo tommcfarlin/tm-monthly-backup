@@ -19,7 +19,7 @@ from rich.markup import escape
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from .file_processor import FileProcessor, ProgressReporter
+from .file_processor import FileProcessor, ProgressReporter, Settings
 
 # Initialize rich console
 console = Console()
@@ -141,15 +141,30 @@ def setup_logging(verbose: bool = False):
 class CLIInterface:
     """Rich CLI interface for the file processor"""
 
-    def __init__(self, export_dir: str = "export", backup_dir: str = "backup"):
+    def __init__(
+        self,
+        export_dir: str = "export",
+        backup_dir: str = "backup",
+        jpeg_quality: int = Settings().jpeg_quality,
+        keep_heic: bool = False,
+    ):
         """
         Initialize CLI interface.
 
         Args:
             export_dir: Export directory path
             backup_dir: Backup directory path
+            jpeg_quality: JPEG quality (1-100) for HEIC conversion (issue
+                #41), forwarded to ``FileProcessor`` via a ``Settings``
+                record. Defaults to ``Settings().jpeg_quality`` -- read off
+                ``Settings`` rather than restated as a literal ``95`` -- so
+                this default and ``Settings``'s own default cannot drift
+                apart silently.
+            keep_heic: Keep original HEIC files after a verified conversion
+                instead of deleting them (issue #41), forwarded the same way.
         """
-        self.processor = FileProcessor(export_dir, backup_dir)
+        settings = Settings(jpeg_quality=jpeg_quality, keep_heic=keep_heic)
+        self.processor = FileProcessor(export_dir, backup_dir, settings=settings)
         self.console = console
 
     def display_welcome(self):
@@ -329,6 +344,23 @@ class CLIInterface:
         success_count = results.get('files_processed', 0)
         failure_count = results.get('files_failed', 0)
         quarantine_count = results.get('files_quarantined', 0)
+        # Count of HEIC originals left in export/ by --keep-heic (issue #41).
+        # ``converted_from_heic`` is set on every successfully processed record
+        # whose source was HEIC, independent of retention; but the delete step
+        # is skipped for ALL of them together whenever ``keep_heic`` is set for
+        # the run (see ``FileProcessor._process_single_file``), so gating this
+        # count on the run-wide setting -- rather than tracking per-file
+        # retention state that does not exist -- is exact, not an approximation.
+        # Surfaced here (not silently) because a retained original is rescanned
+        # and re-filed as a duplicate on the NEXT run -- the user needs to see
+        # this at the moment it happens, the same way quarantine is surfaced.
+        heic_retained_count = 0
+        if self.processor.settings.keep_heic:
+            heic_retained_count = sum(
+                1
+                for record in results.get('processed_files', [])
+                if record.get('converted_from_heic')
+            )
 
         if dry_run:
             title = "Dry Run Results"
@@ -354,6 +386,11 @@ class CLIInterface:
         table.add_row("Files Processed", str(success_count))
         table.add_row("HEIC Conversions", str(results.get('heic_conversions', 0)))
         table.add_row("Missing EXIF Files", str(results.get('missing_exif_files', 0)))
+
+        if heic_retained_count > 0:
+            table.add_row(
+                "HEIC Originals Retained", str(heic_retained_count), style="yellow"
+            )
 
         if quarantine_count > 0:
             table.add_row(

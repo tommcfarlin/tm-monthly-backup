@@ -5,6 +5,7 @@ File processing module for timestamp-based renaming and organization
 import os
 import shutil
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
@@ -18,6 +19,40 @@ from .heic_converter import HeicConverter
 from .file_categorizer import FileCategorizer, FileCategory
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Settings:
+    """
+    Immutable, run-scoped tunables for :class:`FileProcessor` (issue #41).
+
+    Before this existed, every knob `HeicConverter` bothered to expose --
+    `jpeg_quality`, `optimize` -- was unreachable from the CLI: `FileProcessor`
+    constructed `HeicConverter()` with no arguments, so a value a user actually
+    wanted to change could only be edited into the source. Bundling the
+    tunables this issue makes user-facing into a single frozen record, rather
+    than adding each as its own `FileProcessor.__init__` parameter, keeps the
+    constructor stable as more tunables arrive later -- they extend this
+    dataclass instead of the parameter list. `frozen=True` guarantees no code
+    path can mutate configuration mid-run: every stage of a run reads the same
+    values from the initial scan through the final summary.
+
+    Args:
+        jpeg_quality: JPEG quality (1-100) passed to
+            :class:`HeicConverter` for HEIC->JPEG conversion. Default 95
+            matches `HeicConverter`'s own default (issue #40).
+        keep_heic: When True, a successfully verified HEIC conversion leaves
+            the original `.heic`/`.heif` file in place in `export/` instead of
+            deleting it. This affects ONLY the delete step -- the
+            verify-before-delete gate (issue #7) still runs unconditionally,
+            so a conversion that fails verification is still recorded as a
+            failure regardless of this flag. Default False preserves the
+            tool's pre-#41 behavior (originals are deleted after a verified
+            conversion).
+    """
+
+    jpeg_quality: int = 95
+    keep_heic: bool = False
 
 
 def _convert_heic_worker(
@@ -229,22 +264,32 @@ class FileProcessor:
     # sequential inline path is faster. Below this threshold no pool is created.
     HEIC_PARALLEL_THRESHOLD = 8
 
-    def __init__(self, export_dir: str = "export", backup_dir: str = "backup"):
+    def __init__(
+        self,
+        export_dir: str = "export",
+        backup_dir: str = "backup",
+        settings: Optional[Settings] = None,
+    ):
         """
         Initialize file processor.
 
         Args:
             export_dir: Directory containing exported files
             backup_dir: Directory for organized output files
+            settings: Immutable HEIC conversion/retention tunables (issue
+                #41) -- see :class:`Settings`. Defaults to ``Settings()``
+                (quality 95, originals deleted) when omitted, so every
+                existing caller is unaffected.
         """
         self.export_dir = export_dir
         self.backup_dir = backup_dir
+        self.settings = settings if settings is not None else Settings()
 
         # Initialize component handlers
         # (overlap is validated lazily at process time; see
         # ``directory_overlap_error`` and ``process_all_files``)
         self.exif_handler = ExifHandler()
-        self.heic_converter = HeicConverter()
+        self.heic_converter = HeicConverter(jpeg_quality=self.settings.jpeg_quality)
         self.categorizer = FileCategorizer()
 
         # Track processed files and timestamps.
@@ -950,7 +995,11 @@ class FileProcessor:
                 # finally safe to delete the original HEIC. Route through the
                 # single safe-delete implementation; verification already happened
                 # pre-move (the JPEG has since moved out of reach), so skip it here.
-                if heic_original_to_delete is not None:
+                # ``settings.keep_heic`` (issue #41) gates ONLY this delete -- the
+                # verify-before-delete check above already ran unconditionally, so
+                # a conversion that failed verification is recorded as a failure
+                # above and never reaches this line regardless of retention.
+                if heic_original_to_delete is not None and not self.settings.keep_heic:
                     self.heic_converter.cleanup_original_heic(
                         heic_original_to_delete, verify_first=False
                     )
