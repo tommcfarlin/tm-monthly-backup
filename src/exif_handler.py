@@ -612,8 +612,12 @@ class ExifHandler:
 
         import re
 
-        # Pattern 1: IMG_YYYY-MM-DD-HH-MM-SS or similar
-        pattern1 = r'(\d{4})[_-](\d{2})[_-](\d{2})[_-](\d{2})[_-](\d{2})[_-](\d{2})'
+        # Pattern 1: IMG_YYYY-MM-DD-HH-MM-SS or similar. The date/time
+        # separator also accepts whitespace (`\s`) alongside `_`/`-`, which
+        # covers the standard macOS screenshot/export shape
+        # "2011-03-09 18-20-30.jpg.jpeg" (issue #51) where a space, not a
+        # dash, joins the date and the time.
+        pattern1 = r'(\d{4})[_\-\s](\d{2})[_\-\s](\d{2})[_\-\s](\d{2})[_\-\s](\d{2})[_\-\s](\d{2})'
         match = re.search(pattern1, filename)
         if match:
             try:
@@ -638,8 +642,38 @@ class ExifHandler:
             except ValueError:
                 pass
 
-        # Pattern 3: IMG_XXXX with iOS patterns (these don't contain dates)
-        # Pattern 4: Attachment-1, FullSizeRender, etc. (no dates)
+        # Pattern 3: DD-MM-YYYY-HH-MM-SS, e.g. Facetune's
+        # "Facetune_09-02-2024-11-22-33.heic" (issue #51). The two leading
+        # two-digit fields are ambiguous with MM-DD-YYYY whenever both are
+        # <= 12 (04-07 could be day=4/month=7 or month=4/day=7), so both
+        # readings are tried -- day-first first, since that is this pattern's
+        # documented convention -- and only a reading that produces a real
+        # calendar date is accepted. A filename where NEITHER reading (nor
+        # the other way around) produces a valid date returns None rather
+        # than guessing, preserving the fail-closed contract of this whole
+        # fallback chain. Whichever reading is used is logged at INFO so a
+        # wrong guess on a genuinely ambiguous name is auditable, not silent.
+        pattern3 = r'(\d{2})[_\-\s](\d{2})[_\-\s](\d{4})[_\-\s](\d{2})[_\-\s](\d{2})[_\-\s](\d{2})'
+        match = re.search(pattern3, filename)
+        if match:
+            first_field, second_field, year, hour, minute, second = map(int, match.groups())
+            candidate_readings = (
+                ('day-first (DD-MM-YYYY)', first_field, second_field),
+                ('month-first (MM-DD-YYYY)', second_field, first_field),
+            )
+            for reading, day, month in candidate_readings:
+                try:
+                    parsed = datetime(year, month, day, hour, minute, second)
+                except ValueError:
+                    continue
+                logger.info(
+                    "Extracted timestamp from filename using %s interpretation: %s -> %s",
+                    reading, filename, parsed,
+                )
+                return parsed
+
+        # Pattern 4: IMG_XXXX with iOS patterns (these don't contain dates)
+        # Pattern 5: Attachment-1, FullSizeRender, etc. (no dates)
 
         return None
 
