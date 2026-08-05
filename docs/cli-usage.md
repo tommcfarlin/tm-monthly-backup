@@ -59,6 +59,20 @@ tm-monthly-backup --verbose
 | `--export-dir` | Directory containing exported files | `export` |
 | `--backup-dir` | Directory for organized output files | `backup` |
 
+### HEIC Conversion Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--jpeg-quality` | JPEG quality (1-100) for HEIC->JPEG conversion | `95` |
+| `--keep-heic` | Keep original HEIC/HEIF files after a verified conversion instead of deleting them | `False` (originals deleted) |
+
+`--jpeg-quality` is validated at the command line (`click.IntRange(1, 100)`); a
+value outside that range is rejected before any file is touched.
+`--keep-heic` affects only the delete step — a conversion that fails
+verification (see "Verify Before Delete" below) is always recorded as a
+failure and the original is always left in place, whether or not
+`--keep-heic` was passed.
+
 ## Usage Examples
 
 ### Basic Processing
@@ -165,6 +179,25 @@ as `--export-dir`, or one is nested inside the other, the tool refuses to run an
 exits with a precondition error (code `2`) before touching anything — an
 overlapping destination would let a run re-ingest and destroy its own inputs.
 
+### HEIC Conversion Tuning
+
+```bash
+# Smaller JPEGs at the cost of some visible compression artifacting
+tm-monthly-backup --jpeg-quality 80
+
+# Keep every original HEIC in export/ alongside the converted JPEG in backup/
+tm-monthly-backup --keep-heic
+
+# Both together
+tm-monthly-backup --jpeg-quality 90 --keep-heic
+```
+
+`--keep-heic` is useful when you want a lossless fallback beside the archived
+JPEG, or simply are not ready to trust the conversion yet — but it means
+`export/` keeps growing with every HEIC-heavy run rather than being fully
+drained, so plan for that disk usage (or clean up `export/` yourself once
+you have verified the backups).
+
 ### Verbose Logging
 
 ```bash
@@ -269,18 +302,29 @@ Unknown files have no metadata to derive a timestamp from, so they keep their **
 
 ### HEIC Conversion
 
-HEIC files are automatically converted to high-quality JPEG:
+HEIC files are automatically converted to JPEG:
 
-- **Quality**: high quality (JPEG q95 with `optimize=True`). This is visually
-  excellent but **lossy** — it is not a lossless format. The original HEIC is
-  **not retained** after conversion, so no lossless copy remains once the run
-  completes.
+- **Quality**: JPEG quality 95 by default, configurable with `--jpeg-quality`
+  (1-100). This is visually excellent but **lossy** — it is not a lossless
+  format, at any quality setting. The encode does not run libjpeg's extra
+  Huffman-optimization pass by default (`optimize=False`, issue #40): that
+  pass buys only ~2% smaller files for roughly double the encode time, a poor
+  trade for an archive tool.
 - **EXIF Preservation**: All metadata preserved
+- **Retention**: The original HEIC is deleted after a verified conversion by
+  default, so no lossless copy remains once the run completes. Pass
+  `--keep-heic` to leave the original `.heic`/`.heif` file in place in
+  `export/` alongside the converted JPEG in `backup/`. With `--keep-heic`,
+  `export/` is **not** fully drained by a HEIC-heavy run — the retained
+  originals remain — even though every file is still correctly counted as
+  processed and filed.
 - **Verify Before Delete**: The original `.heic` is deleted only after the
   converted JPEG is verified on disk (it exists, decodes, matches the source
   dimensions, and preserves EXIF) and has landed in `backup/photos/`. If
   verification fails, the original is left in `export/` and the run records a
-  failure.
+  failure — this verification step always runs, regardless of `--keep-heic`;
+  the flag changes only whether a *successful* conversion's original is
+  deleted afterward.
 
 ### Generated / AI-Detected Content
 
@@ -455,25 +499,27 @@ Failed Files (3):
 
 ## Configuration
 
-### Environment Variables
+All configuration is via command-line options — there is no environment
+variable support and no configuration file, and none is planned. This is a
+small, personal tool; the options below are the complete, closed set:
 
-Currently, all configuration is done via command-line options. Future versions may support:
+| Option | Controls |
+|--------|----------|
+| `--export-dir` / `--backup-dir` | Source and destination directories |
+| `--jpeg-quality` | HEIC->JPEG encode quality (1-100, default `95`) |
+| `--keep-heic` | Whether a converted HEIC's original is deleted or kept |
+| `--dry-run` / `--yes` / `--verbose` | Run behavior — see "Command Options" above |
 
-- `TM_BACKUP_EXPORT_DIR` - Default export directory
-- `TM_BACKUP_BACKUP_DIR` - Default backup directory
-- `TM_BACKUP_QUALITY` - JPEG conversion quality (1-100)
-
-### Configuration File
-
-Future versions may support a configuration file:
-
-```yaml
-# ~/.tm-monthly-backup.yml
-export_dir: ~/Downloads/icloud-export
-backup_dir: ~/Photos/organized
-jpeg_quality: 95
-keep_heic_originals: false
-```
+Several other things this tool hardcodes are **deliberately not**
+configurable, so a heuristic bug report becomes a precision fix rather than a
+new knob to support forever: the photo/video/screenshot/sidecar extension
+sets, the screenshot filename patterns, the AI-provenance markers, and the
+editing-software list (`src/file_categorizer.py`) are all class constants.
+Each is a heuristic with known edge cases (see the false-positive notes in the
+"Screenshot Detection" and "Generated / AI-Detected Content" sections above);
+the answer to a false positive is a targeted precision fix to that heuristic,
+not a configuration flag letting every user carry their own copy of the rule.
+The timestamp filename format (`YYYY.MM.DD.HH.MM.SS`) is likewise fixed.
 
 ## Exit Codes
 

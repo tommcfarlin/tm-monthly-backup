@@ -19,7 +19,7 @@ from rich.markup import escape
 from rich.logging import RichHandler
 from rich.prompt import Confirm
 
-from .file_processor import FileProcessor, ProgressReporter
+from .file_processor import FileProcessor, ProgressReporter, Settings
 
 # Initialize rich console
 console = Console()
@@ -141,15 +141,27 @@ def setup_logging(verbose: bool = False):
 class CLIInterface:
     """Rich CLI interface for the file processor"""
 
-    def __init__(self, export_dir: str = "export", backup_dir: str = "backup"):
+    def __init__(
+        self,
+        export_dir: str = "export",
+        backup_dir: str = "backup",
+        jpeg_quality: int = 95,
+        keep_heic: bool = False,
+    ):
         """
         Initialize CLI interface.
 
         Args:
             export_dir: Export directory path
             backup_dir: Backup directory path
+            jpeg_quality: JPEG quality (1-100) for HEIC conversion (issue
+                #41), forwarded to ``FileProcessor`` via a ``Settings``
+                record.
+            keep_heic: Keep original HEIC files after a verified conversion
+                instead of deleting them (issue #41), forwarded the same way.
         """
-        self.processor = FileProcessor(export_dir, backup_dir)
+        settings = Settings(jpeg_quality=jpeg_quality, keep_heic=keep_heic)
+        self.processor = FileProcessor(export_dir, backup_dir, settings=settings)
         self.console = console
 
     def display_welcome(self):
