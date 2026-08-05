@@ -91,9 +91,13 @@ class TestGeneratedContentProbedOnce(unittest.TestCase):
         call_counts = Counter()
         original = categorizer._is_generated_content
 
-        def counting(file_path):
+        # Issue #24 gave _is_generated_content the pre-read metadata
+        # (exif, ifd0, png_info) as arguments. Forward whatever it is called
+        # with rather than pinning an arity, so counting the probe stays
+        # independent of the probe's signature.
+        def counting(file_path, *args, **kwargs):
             call_counts[file_path] += 1
-            return original(file_path)
+            return original(file_path, *args, **kwargs)
 
         with patch.object(categorizer, "_is_generated_content", side_effect=counting), \
                 patch("src.cli_interface.Confirm.ask", return_value=True):
