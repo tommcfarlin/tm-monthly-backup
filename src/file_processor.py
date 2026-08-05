@@ -1033,9 +1033,39 @@ class FileProcessor:
                     'final_path': None,
                 })
         else:
+            # Bound up front, mirroring _process_unknown_file/_quarantine_file,
+            # so the ``except`` below can always reference it even if
+            # _reserve_destination raises before ever assigning it -- e.g. when
+            # target_dir does not exist (see the trade-off note in the ``try``
+            # below). Without this, that failure mode raised UnboundLocalError
+            # out of the ``except`` handler itself, masking the real
+            # FileNotFoundError behind a Python-internals message instead of
+            # reporting the actual cause (issue #23 fix round 1).
+            target_path = None
             try:
-                # Ensure target directory exists before reserving within it.
-                os.makedirs(target_dir, exist_ok=True)
+                # No os.makedirs here (issue #23): target_dir is always one of
+                # the four directories process_all_files already created via
+                # ensure_target_directories(self.backup_dir) before this loop
+                # started -- every category reaching this branch is PHOTO,
+                # VIDEO, SCREENSHOT, or GENERATED (UNKNOWN returned above, at
+                # the top of this method). A per-file exist_ok=True call here
+                # was therefore always a no-op syscall repeated once per file
+                # instead of once per run. This is NOT the same situation as
+                # backup/unknown/ or backup/corrupt/ (_process_unknown_file,
+                # _quarantine_file), which are deliberately excluded from
+                # ensure_target_directories and created lazily on first use so
+                # they are never an empty phantom implying handling that never
+                # happened (issues #29, #58) -- those per-file calls stay.
+                #
+                # Trade-off: before this fix, a category directory deleted out
+                # from under a run (e.g. someone rm -rf's backup/photos/ mid-run,
+                # or a volume hiccup) was silently recreated before every
+                # subsequent file in that category. Now it is not -- every
+                # subsequent file in that category fails, with the real cause
+                # recorded, until the directory is restored outside the tool.
+                # Fail-loud-with-the-real-reason was judged the better trade for
+                # a tool whose failures the user must act on, but it IS a real
+                # behavior change from the old self-healing-by-accident path.
 
                 # Atomically claim a free destination path, then move onto it.
                 adjusted_timestamp, target_path = self._reserve_destination(

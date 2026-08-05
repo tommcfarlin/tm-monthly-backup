@@ -140,6 +140,11 @@ class TestKeyboardInterruptPropagation(unittest.TestCase):
         raises; files after it are never attempted.
         """
         target_dir = os.path.join(self.backup_dir, "photos")
+        # process_all_files ensures this via ensure_target_directories before
+        # any file is placed (issue #23 removed the redundant per-file
+        # os.makedirs that used to paper over its absence here, since
+        # _process_category is being driven directly, bypassing that step).
+        os.makedirs(target_dir)
         files = [os.path.join(self.export_dir, name) for name in self.photo_names]
 
         real_process_single_file = self.processor._process_single_file

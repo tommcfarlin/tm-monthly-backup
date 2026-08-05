@@ -113,6 +113,10 @@ class TestMoveFailureRecording(unittest.TestCase):
             date_time_original="2024:01:15 14:30:45",
         )
         target_dir = os.path.join(self.backup, "photos")
+        # process_all_files ensures this via ensure_target_directories before
+        # any file is placed (issue #23 removed the redundant per-file
+        # os.makedirs that used to paper over its absence here).
+        os.makedirs(target_dir)
 
         with patch("shutil.move", side_effect=OSError("disk full")):
             self.processor._process_single_file(
