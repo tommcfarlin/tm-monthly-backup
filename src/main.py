@@ -108,7 +108,7 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
     yes for all of them (needed for cron, CI, or any other non-interactive
     invocation); --dry-run never prompts, since it makes no changes to confirm.
 
-    --jpeg-quality controls the HEIC->JPEG encode quality (1-100, default 95).
+    --jpeg-quality controls the HEIC->JPEG encode quality (1-100, default 98).
     --keep-heic leaves the original .heic/.heif file in export/ after a
     verified-good conversion instead of deleting it; a conversion that fails
     verification is still recorded as a failure either way.

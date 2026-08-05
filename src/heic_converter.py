@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 class HeicConverter:
     """Handles HEIC to JPEG conversion with EXIF preservation"""
 
-    def __init__(self, jpeg_quality: int = 95, optimize: bool = False):
+    def __init__(self, jpeg_quality: int = 98, optimize: bool = False):
         """
         Initialize HEIC converter.
 
         Args:
-            jpeg_quality: JPEG quality (1-100, default 95 for high quality)
+            jpeg_quality: JPEG quality (1-100, default 98 for high quality)
             optimize: Whether to run libjpeg's extra Huffman-optimization pass
                 on encode. Defaults to False. At quality 95 that second pass
                 costs +152% on the encode step (+71.5 ms per real HEIC in the

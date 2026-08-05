@@ -63,7 +63,7 @@ tm-monthly-backup --verbose
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--jpeg-quality` | JPEG quality (1-100) for HEIC->JPEG conversion | `95` |
+| `--jpeg-quality` | JPEG quality (1-100) for HEIC->JPEG conversion | `98` |
 | `--keep-heic` | Keep original HEIC/HEIF files after a verified conversion instead of deleting them | `False` (originals deleted) |
 
 `--jpeg-quality` is validated at the command line (`click.IntRange(1, 100)`); a
@@ -309,7 +309,7 @@ Unknown files have no metadata to derive a timestamp from, so they keep their **
 
 HEIC files are automatically converted to JPEG:
 
-- **Quality**: JPEG quality 95 by default, configurable with `--jpeg-quality`
+- **Quality**: JPEG quality 98 by default, configurable with `--jpeg-quality`
   (1-100). This is visually excellent but **lossy** — it is not a lossless
   format, at any quality setting. The encode does not run libjpeg's extra
   Huffman-optimization pass by default (`optimize=False`, issue #40): that
@@ -524,7 +524,7 @@ small, personal tool; the options below are the complete, closed set:
 | Option | Controls |
 |--------|----------|
 | `--export-dir` / `--backup-dir` | Source and destination directories |
-| `--jpeg-quality` | HEIC->JPEG encode quality (1-100, default `95`) |
+| `--jpeg-quality` | HEIC->JPEG encode quality (1-100, default `98`) |
 | `--keep-heic` | Whether a converted HEIC's original is deleted or kept |
 | `--dry-run` / `--yes` / `--verbose` | Run behavior — see "Command Options" above |
 

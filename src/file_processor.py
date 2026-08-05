@@ -39,7 +39,7 @@ class Settings:
 
     Args:
         jpeg_quality: JPEG quality (1-100) passed to
-            :class:`HeicConverter` for HEIC->JPEG conversion. Default 95
+            :class:`HeicConverter` for HEIC->JPEG conversion. Default 98
             matches `HeicConverter`'s own default (issue #40).
         keep_heic: When True, a successfully verified HEIC conversion leaves
             the original `.heic`/`.heif` file in place in `export/` instead of
@@ -51,7 +51,7 @@ class Settings:
             conversion).
     """
 
-    jpeg_quality: int = 95
+    jpeg_quality: int = 98
     keep_heic: bool = False
 
 
@@ -278,7 +278,7 @@ class FileProcessor:
             backup_dir: Directory for organized output files
             settings: Immutable HEIC conversion/retention tunables (issue
                 #41) -- see :class:`Settings`. Defaults to ``Settings()``
-                (quality 95, originals deleted) when omitted, so every
+                (quality 98, originals deleted) when omitted, so every
                 existing caller is unaffected.
         """
         self.export_dir = export_dir

@@ -39,6 +39,7 @@ from PIL import Image
 
 from src.cli_interface import CLIInterface
 from src.file_processor import FileProcessor, Settings
+from src.heic_converter import HeicConverter
 from src.main import main
 from tests.fixtures import make_exif_heic
 
@@ -85,11 +86,31 @@ class TestSettingsImmutable(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             settings.jpeg_quality = 10
 
-    def test_settings_defaults_match_pre_41_behavior(self):
-        """Omitting settings entirely reproduces the old, unconfigurable defaults."""
+    def test_settings_defaults(self):
+        """Omitting settings entirely yields the documented defaults.
+
+        The quality default was deliberately raised from 95 to 98: the HEIC
+        original is deleted after a verified conversion, so the archived JPEG
+        is the only surviving copy, and 98 roughly halves the per-channel
+        quantization error (0.420 -> 0.238 of 255, measured over real HEIC
+        exports) for ~1.34x the bytes. Going on to 100 buys less than half
+        that improvement again for ~1.96x, so 98 is the knee of the curve.
+        """
         settings = Settings()
-        self.assertEqual(settings.jpeg_quality, 95)
+        self.assertEqual(settings.jpeg_quality, 98)
         self.assertFalse(settings.keep_heic)
+
+    def test_settings_default_agrees_with_heic_converter_default(self):
+        """The two independent default literals must not drift apart.
+
+        ``Settings.jpeg_quality`` and ``HeicConverter.__init__``'s own default
+        are separate literals -- collapsing them needs ``Settings`` moved to a
+        neutral module to avoid a circular import (issue #67). Until then this
+        assertion is what makes a drift between them visible: a caller that
+        builds a bare ``HeicConverter()`` would otherwise silently encode at a
+        different quality than a caller going through ``Settings``.
+        """
+        self.assertEqual(HeicConverter().jpeg_quality, Settings().jpeg_quality)
 
 
 class TestJpegQualityReachesConverter(unittest.TestCase):
@@ -130,12 +151,12 @@ class TestJpegQualityReachesConverter(unittest.TestCase):
             "reaching the encoder",
         )
 
-    def test_constructor_default_still_matches_heic_converter_default(self):
-        """Omitting jpeg_quality from Settings still yields the historical q95."""
+    def test_constructor_default_reaches_the_converter(self):
+        """Omitting jpeg_quality from Settings still reaches HeicConverter."""
         export_dir = os.path.join(self.temp_dir, "export_default")
         os.makedirs(export_dir)
         processor = FileProcessor(export_dir, os.path.join(self.temp_dir, "backup_default"))
-        self.assertEqual(processor.heic_converter.jpeg_quality, 95)
+        self.assertEqual(processor.heic_converter.jpeg_quality, 98)
 
 
 class TestKeepHeicRetention(unittest.TestCase):
