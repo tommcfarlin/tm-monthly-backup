@@ -104,6 +104,49 @@ class TestCheckDirectories(unittest.TestCase):
         self.assertFalse(cli.check_directories())
         self.assertIn("Cannot create backup directory", cli.console.export_text())
 
+    def test_unreadable_export_directory_is_reported_not_raised(self):
+        """A PermissionError from iterdir() is reported, not left to escape.
+
+        Issue #39: before this fix, ``any(export_path.iterdir())`` was the one
+        call in ``check_directories`` with no guard of its own, so a directory
+        that exists but cannot be listed raised straight out of this method,
+        past the caller in ``main.py``, as a raw traceback. Fails against the
+        old code: patching ``iterdir`` to raise lets the ``PermissionError``
+        propagate out of ``check_directories()`` itself, so ``assertFalse``
+        never runs -- the test errors on the exception instead of failing the
+        assertion.
+        """
+        export, backup = self._dirs()
+        os.makedirs(export)
+        cli = _recording_cli(export, backup)
+
+        with patch(
+            "pathlib.Path.iterdir",
+            side_effect=PermissionError(13, "Permission denied"),
+        ):
+            self.assertFalse(cli.check_directories())
+        self.assertIn("Cannot read export directory", cli.console.export_text())
+
+    def test_mkdir_bug_is_not_mislabeled_as_a_directory_error(self):
+        """A non-OSError bug from mkdir propagates instead of being mislabeled.
+
+        Issue #39: the old ``except Exception`` around ``backup_path.mkdir``
+        additionally caught a ``TypeError``/``AttributeError`` from a
+        malformed ``--backup-dir`` value and reported it as "cannot create
+        backup directory", which is not what actually happened. Narrowed to
+        ``OSError`` so a genuine bug surfaces with its real type instead.
+        Fails against the old code: it swallows the ``TypeError`` and returns
+        ``False``, so ``assertRaises`` never observes an exception.
+        """
+        export, backup = self._dirs()
+        os.makedirs(export)
+        open(os.path.join(export, "a.jpg"), "wb").close()
+        cli = _recording_cli(export, backup)
+
+        with patch("pathlib.Path.mkdir", side_effect=TypeError("not a real bug, a test one")):
+            with self.assertRaises(TypeError):
+                cli.check_directories()
+
 
 class TestDisplayFileScanResults(unittest.TestCase):
     """display_file_scan_results: empty and unknown-row branches."""
@@ -286,6 +329,40 @@ class TestDisplayFailures(unittest.TestCase):
         self.assertIn("convert_heic", text)
         self.assertIn("a.heic", text)
         self.assertIn("verification failed", text)
+
+    def test_failure_carrying_an_exception_shows_its_type(self):
+        """An exception-object error cell names the exception's type (issue #39).
+
+        ``FileProcessor`` now stores the caught exception object itself,
+        rather than ``str(exc)``, so the type is not discarded before it
+        reaches the Error column -- ``str(exc)`` alone (e.g. "[Errno 2] No
+        such file or directory: '...'") gives no indication of which
+        exception class produced it.
+
+        Fails against the old ``display_failures``: it renders
+        ``safe_markup(error)``, i.e. ``str(error)``, with no type name, so
+        "FileNotFoundError" never appears in the output.
+        """
+        self.cli.display_failures(
+            [("move_file", "/tmp/a.jpg", FileNotFoundError(2, "No such file or directory"))]
+        )
+        text = self.cli.console.export_text()
+        self.assertIn("FileNotFoundError", text)
+        self.assertIn("No such file or directory", text)
+
+    def test_failure_carrying_a_plain_string_renders_unchanged(self):
+        """A non-exception error string still renders exactly as before.
+
+        Regression coverage: a descriptive string that was never a caught
+        exception (e.g. "HEIC conversion failed") must not grow a spurious
+        type prefix.
+        """
+        self.cli.display_failures(
+            [("convert_heic", "/tmp/a.heic", "HEIC conversion failed")]
+        )
+        text = self.cli.console.export_text()
+        self.assertIn("HEIC conversion failed", text)
+        self.assertNotIn("str:", text)
 
 
 class TestDisplayMissingExifWarning(unittest.TestCase):

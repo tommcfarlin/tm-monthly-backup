@@ -94,11 +94,30 @@ class _SanitizingLogFilter(logging.Filter):
     an untrusted filename in a log message cannot drive the terminal. Combined
     with ``markup=False`` on the handler, it makes the entire logging path safe
     at a single boundary regardless of how individual call sites format.
+
+    Also sanitizes a record's formatted exception traceback, if any (issue
+    #39). ``logging.Filter`` instances run before ``Handler.emit`` calls
+    ``Formatter.format``, so pre-computing ``record.exc_text`` here -- rather
+    than leaving it for ``Formatter.format`` to fill in later from
+    ``record.exc_info`` -- lets this same boundary neutralize it too: an
+    unexpected exception's own ``str()`` can embed an untrusted filename
+    (e.g. ``main.py``'s top-level ``logger.exception`` call), and that text is
+    NOT covered by the ``record.msg`` rewrite above, since it is appended by
+    the formatter after filters have already run. This assumes the handler
+    renders tracebacks through the standard ``Formatter`` path (``markup=False``,
+    no ``rich_tracebacks``) -- the configuration ``setup_logging`` installs;
+    enabling ``RichHandler(rich_tracebacks=True)`` would render straight from
+    ``record.exc_info`` instead and would need its own sanitization.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = sanitize_for_display(record.getMessage())
         record.args = ()
+        if record.exc_info:
+            exc_text = record.exc_text or logging.Formatter().formatException(
+                record.exc_info
+            )
+            record.exc_text = sanitize_for_display(exc_text)
         return True
 
 
@@ -217,16 +236,38 @@ class CLIInterface:
             self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {safe_export}/[/dim]")
             return False
 
-        if not any(export_path.iterdir()):
+        # ``iterdir()`` raises ``OSError`` (e.g. ``PermissionError``) on a
+        # directory that exists but cannot be listed. Before this guard that
+        # propagated straight past this method to ``main.py:48``, outside its
+        # own try block, as a raw traceback -- the inverse of the mkdir check
+        # three lines below, which already caught its own failure (issue #39).
+        try:
+            export_is_empty = not any(export_path.iterdir())
+        except OSError as e:
+            self.console.print(
+                f"[red]Error: Cannot read export directory {safe_export}: {safe_markup(e)}[/red]"
+            )
+            return False
+
+        if export_is_empty:
             self.console.print(f"[yellow]Warning: Export directory is empty: {safe_export}[/yellow]")
             if not auto_confirm and not Confirm.ask("Continue anyway?"):
                 return False
 
-        # Create backup directory if needed
+        # Create backup directory if needed. Narrowed from ``Exception`` to
+        # ``OSError`` (issue #39): ``mkdir`` raises ``OSError`` and its
+        # subclasses (``PermissionError``, ``FileExistsError``,
+        # ``NotADirectoryError``, ``OSError(ENOSPC)``) for every real
+        # directory-creation failure. A broader catch here additionally
+        # swallowed a ``TypeError``/``AttributeError`` from a malformed
+        # ``--backup-dir`` value and reported it as "cannot create backup
+        # directory", which is not what actually happened; such a bug now
+        # propagates to main.py's top-level handler with its real type and a
+        # recorded traceback instead of being mislabeled.
         try:
             backup_path.mkdir(parents=True, exist_ok=True)
             self.console.print(f"[green]✓[/green] Backup directory ready: {safe_markup(backup_path)}")
-        except Exception as e:
+        except OSError as e:
             self.console.print(f"[red]Error: Cannot create backup directory {safe_markup(backup_path)}: {safe_markup(e)}[/red]")
             return False
 
@@ -445,7 +486,13 @@ class CLIInterface:
         Display failed files in a table.
 
         Args:
-            failed_files: List of failed file tuples
+            failed_files: List of ``(operation, file_path, error)`` tuples.
+                ``error`` is the caught exception object itself for a
+                genuine per-file failure (issue #39 -- ``FileProcessor``
+                stores the exception rather than ``str(exc)`` so the type is
+                not discarded before it reaches here), or a plain descriptive
+                string for outcomes that were never an exception (e.g. "HEIC
+                conversion failed").
         """
         if not failed_files:
             return
@@ -458,13 +505,23 @@ class CLIInterface:
         failure_table.add_column("Error", style="yellow")
 
         for operation, file_path, error in failed_files:
+            # Render the exception's type alongside its message (issue #39):
+            # ``str(error)`` alone -- e.g. "[Errno 2] No such file or
+            # directory: '...'" -- gives no indication of which exception
+            # class produced it. A plain descriptive string (not derived from
+            # a caught exception) renders exactly as before.
+            error_text = (
+                f"{type(error).__name__}: {error}"
+                if isinstance(error, BaseException)
+                else str(error)
+            )
             # ``Table`` parses markup in string cells, so every untrusted value
             # (the path, and errors that embed a path) must be escaped and
             # stripped of control sequences before it becomes a row.
             failure_table.add_row(
                 safe_markup(operation),
                 safe_markup(file_path),
-                safe_markup(error),
+                safe_markup(error_text),
             )
 
         self.console.print(failure_table)

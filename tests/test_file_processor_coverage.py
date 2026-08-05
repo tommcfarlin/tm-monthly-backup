@@ -89,6 +89,22 @@ class TestSidecarDeletionFailure(unittest.TestCase):
         self.assertEqual(len(self.processor._failed_files), 1)
         self.assertEqual(self.processor._failed_files[0][0], "delete_sidecar")
 
+    def test_delete_failure_stores_exception_object_not_str(self):
+        """The caught exception object is stored, not its stringified form.
+
+        Issue #39: ``str(exc)`` discards the exception's type before it ever
+        reaches ``failed_files``, so a render-time formatter can no longer
+        show which exception class produced the failure. Fails against the
+        old code, where ``self._failed_files[0][2]`` is the plain string
+        ``"locked"``, not an ``OSError`` instance.
+        """
+        with patch("os.remove", side_effect=OSError("locked")):
+            self.processor._delete_sidecar_files(["/tmp/ghost.aae"], dry_run=False)
+
+        error = self.processor._failed_files[0][2]
+        self.assertIsInstance(error, OSError)
+        self.assertEqual(str(error), "locked")
+
 
 class TestMoveFailureRecording(unittest.TestCase):
     """A move failure during _process_single_file is recorded, not raised."""

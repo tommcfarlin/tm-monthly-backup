@@ -3,11 +3,14 @@
 tm-monthly-backup: CLI utility for organizing Apple Photos exports
 """
 
+import logging
 import sys
 import click
 
 from src.cli_interface import CLIInterface, setup_logging
 from src.file_processor import Settings
+
+logger = logging.getLogger(__name__)
 
 
 # Exit code taxonomy. Each code carries exactly one meaning so a caller can act
@@ -176,9 +179,18 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
         sys.exit(EXIT_CANCELLED)
     except Exception as e:
         cli.console.print(f"\n[red]Unexpected error: {e}[/red]")
-        if verbose:
-            import traceback
-            cli.console.print(traceback.format_exc())
+        # logger.exception records the traceback at ERROR regardless of
+        # --verbose (issue #39): before this, the traceback was discarded
+        # unless --verbose happened to be passed, and by the time a user
+        # realizes they needed it the only way to recover it is to reproduce
+        # the failure. The one-line message above stays -- it is what a
+        # user reads first -- while this guarantees the detail needed to
+        # actually diagnose the failure is never silently lost. Routed
+        # through the logger (not a second console.print) so it passes
+        # through setup_logging's sanitizing filter (issue #9): an
+        # unexpected exception's own str() can embed an untrusted filename,
+        # and that text must not reach the terminal unsanitized.
+        logger.exception("Unexpected error: %s", e)
         sys.exit(EXIT_PRECONDITION)
 
 

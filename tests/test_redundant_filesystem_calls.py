@@ -201,11 +201,15 @@ class TestAbsentTargetDirectoryRecordsRealCause(unittest.TestCase):
         processor._process_category(FileCategory.PHOTO, [photo], dry_run=False)
 
         self.assertEqual(len(processor._failed_files), 1)
-        kind, path, message = processor._failed_files[0]
+        kind, path, error = processor._failed_files[0]
         self.assertEqual(kind, "move_file")
         self.assertEqual(path, photo)
+        # The exception object itself is stored, not a stringified message
+        # (issue #39), so the type survives to render time.
+        self.assertIsInstance(error, FileNotFoundError)
         # The real cause -- not the UnboundLocalError that leaked out of the
         # except handler itself before this fix.
+        message = str(error)
         self.assertIn("No such file or directory", message)
         self.assertNotIn("target_path", message)
         self.assertNotIn("cannot access local variable", message)
@@ -257,9 +261,11 @@ class TestAbsentTargetDirectoryRecordsRealCause(unittest.TestCase):
         self.assertEqual(call_count["n"], 2)
         self.assertEqual(results["files_processed"], 1)
         self.assertEqual(results["files_failed"], 1)
-        kind, failed_path, message = processor._failed_files[0]
+        kind, failed_path, error = processor._failed_files[0]
         self.assertEqual(kind, "move_file")
         self.assertIn(failed_path, {photo_a, photo_b})
+        self.assertIsInstance(error, FileNotFoundError)
+        message = str(error)
         self.assertIn("No such file or directory", message)
         self.assertNotIn("cannot access local variable", message)
 

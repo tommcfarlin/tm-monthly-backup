@@ -584,7 +584,10 @@ class FileProcessor:
                     logger.info("Deleted sidecar file: %s", file_path)
                 except Exception as e:
                     logger.error("Failed to delete sidecar file %s: %s", file_path, e)
-                    self._failed_files.append(('delete_sidecar', file_path, str(e)))
+                    # The exception object itself, not str(e) (issue #39): a
+                    # render-time formatter can still name the exception type
+                    # this way, which a stringified message discards for good.
+                    self._failed_files.append(('delete_sidecar', file_path, e))
 
     def _process_category(
         self,
@@ -615,10 +618,17 @@ class FileProcessor:
             # (including quarantined and unknown files) only moves (issue #14).
             action = 'convert' if self.heic_converter.is_heic_file(file_path) else 'move'
             try:
+                # A broad ``except Exception`` is deliberate and correct HERE
+                # (issue #39's general rule): this is the per-file batch loop
+                # -- one bad file among hundreds must not abort the run -- and
+                # it satisfies the rule's other half too, logging at ERROR
+                # with the path and the exception before recording it below.
                 self._process_single_file(file_path, category, target_dir, dry_run, progress)
             except Exception as e:
                 logger.error("Failed to process file %s: %s", file_path, e)
-                self._failed_files.append(('process_file', file_path, str(e)))
+                # The exception object itself, not str(e) -- see the
+                # _delete_sidecar_files comment above for why.
+                self._failed_files.append(('process_file', file_path, e))
             # Notify after the file is handled -- whether it landed, was
             # quarantined, or was recorded as failed. Placed after the
             # ``except Exception`` (not in a ``finally``) so a propagating
@@ -1122,7 +1132,9 @@ class FileProcessor:
 
             except Exception as e:
                 logger.error("Failed to move file %s to %s: %s", current_path, target_path, e)
-                self._failed_files.append(('move_file', current_path, str(e)))
+                # The exception object itself, not str(e) -- see the
+                # _delete_sidecar_files comment above for why.
+                self._failed_files.append(('move_file', current_path, e))
 
     def _process_unknown_file(
         self, file_path: str, target_dir: str, dry_run: bool
@@ -1180,10 +1192,17 @@ class FileProcessor:
                 'converted_from_heic': False,
             })
         except Exception as e:
+            # Lazy %s (issue #39, in the spirit of #9): file_path is an
+            # untrusted filename, and keeping it a logging parameter rather
+            # than interpolating it into the format string matches every
+            # other per-file log call site.
             logger.error(
-                f"Failed to move unrecognized file {file_path} to {target_path}: {e}"
+                "Failed to move unrecognized file %s to %s: %s",
+                file_path, target_path, e,
             )
-            self._failed_files.append(('move_file', file_path, str(e)))
+            # The exception object itself, not str(e) -- see the
+            # _delete_sidecar_files comment above for why.
+            self._failed_files.append(('move_file', file_path, e))
 
     def get_quarantine_directory(self) -> str:
         """
@@ -1316,7 +1335,9 @@ class FileProcessor:
             logger.error(
                 "Failed to quarantine %s to %s: %s", file_path, target_path, error
             )
-            self._failed_files.append(('quarantine', file_path, str(error)))
+            # The exception object itself, not str(error) -- see the
+            # _delete_sidecar_files comment above for why.
+            self._failed_files.append(('quarantine', file_path, error))
 
     def _reserve_named_destination(self, target_dir: str, filename: str) -> str:
         """

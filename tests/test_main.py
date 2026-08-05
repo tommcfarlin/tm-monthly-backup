@@ -261,6 +261,30 @@ class TestMainCli(unittest.TestCase):
         # --verbose prints the traceback frames.
         self.assertIn("RuntimeError", result.output)
 
+    def test_unexpected_exception_traceback_shown_without_verbose(self):
+        """The traceback is recorded even when --verbose was not passed.
+
+        Issue #39: the old handler only ever printed the traceback inside
+        ``if verbose:`` -- by the time a user without --verbose realizes they
+        needed it, the only way to recover it is to reproduce the failure.
+        ``logger.exception`` now records it at ERROR unconditionally.
+
+        Fails against the old code: without --verbose, the old handler prints
+        only "Unexpected error: boom" and never reaches the
+        ``traceback.format_exc()`` branch, so "RuntimeError" never appears in
+        the output.
+        """
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            side_effect=RuntimeError("boom"),
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args("--yes"))
+
+        self.assertEqual(result.exit_code, EXIT_PRECONDITION)
+        self.assertIn("Unexpected error", result.output)
+        self.assertIn("RuntimeError", result.output)
+        self.assertIn("Traceback", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

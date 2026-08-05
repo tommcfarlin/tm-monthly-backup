@@ -1061,5 +1061,65 @@ class TestFileCategorization_EdgeCases(unittest.TestCase):
             )
 
 
+class TestReadImageMetadataExceptionNarrowing(unittest.TestCase):
+    """``_read_image_metadata``'s except clause is narrowed, not bare (issue #39).
+
+    ``batch_categorize``'s loop has no try/except of its own, so
+    ``_read_image_metadata`` is the only guard between one bad file and the
+    whole categorization pass. Before this fix it caught bare ``Exception``,
+    which also caught -- and silently discarded at DEBUG -- a bug in a
+    caller-supplied mock (e.g. an ``AssertionError``), making a test double's
+    own mistake indistinguishable from a genuinely unreadable file. Narrowing
+    to the specific exceptions ``Image.open``/``getexif`` actually raise lets
+    a real bug propagate instead of vanishing.
+    """
+
+    def setUp(self):
+        self.categorizer = FileCategorizer()
+
+    def test_non_pillow_exception_is_not_swallowed(self):
+        """A bug surfacing as AssertionError now propagates instead of vanishing.
+
+        Fails against the old code: its bare ``except Exception`` caught this
+        AssertionError and returned ``None``, so nothing ever reached
+        ``assertRaises`` and the context manager itself raised
+        "AssertionError not raised".
+        """
+        with patch("PIL.Image.open", side_effect=AssertionError("mock misconfigured")):
+            with self.assertRaises(AssertionError):
+                self.categorizer._read_image_metadata("/tmp/whatever.jpg")
+
+    def test_decompression_bomb_is_still_caught(self):
+        """An oversized-image failure still fails this one file, not the batch.
+
+        ``Image.open`` raises ``PIL.Image.DecompressionBombError`` -- a plain
+        ``Exception`` subclass, not an ``OSError`` -- for an image whose
+        declared pixel count exceeds Pillow's safety limit. Regression
+        coverage for the narrowed except clause: pins that this specific type
+        is still included even though it is not an ``OSError``.
+        """
+        from PIL import Image
+
+        with patch(
+            "PIL.Image.open",
+            side_effect=Image.DecompressionBombError("image too large"),
+        ):
+            result = self.categorizer._read_image_metadata("/tmp/huge.jpg")
+        self.assertIsNone(result)
+
+    def test_permission_error_returns_none_without_raising(self):
+        """A permission-denied file is reported as unreadable, not raised.
+
+        Regression coverage: ``OSError`` (and its ``PermissionError``
+        subclass) was already covered by the old bare ``except Exception``;
+        this pins that the narrowed clause still covers it.
+        """
+        with patch(
+            "PIL.Image.open", side_effect=PermissionError(13, "Permission denied")
+        ):
+            result = self.categorizer._read_image_metadata("/tmp/locked.jpg")
+        self.assertIsNone(result)
+
+
 if __name__ == '__main__':
     unittest.main()

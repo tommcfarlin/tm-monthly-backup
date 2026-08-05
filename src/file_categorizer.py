@@ -246,8 +246,23 @@ class FileCategorizer:
             cannot be opened as an image at all (corrupt, zero-byte, or a
             format Pillow has no codec for -- e.g. RAW).
         """
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
 
+        # This is the only guard between a single bad file and the rest of
+        # ``batch_categorize``'s loop, which has no try/except of its own
+        # (issue #39): a permission error, a truncated/corrupt image, or a
+        # decompression-bomb-sized header must fail THIS file, not the whole
+        # categorization pass. The catch is narrowed to the exceptions
+        # ``Image.open``/``getexif`` actually raise for those cases --
+        # ``UnidentifiedImageError`` (itself an ``OSError`` subclass, listed
+        # for clarity) covers "not an image"/"no codec"; ``OSError`` covers
+        # permission and truncated-read failures; ``ValueError``/``SyntaxError``
+        # cover malformed-but-openable files some Pillow plugins raise for;
+        # ``Image.DecompressionBombError`` covers an image whose declared
+        # pixel count exceeds Pillow's safety limit, raised by ``open()``
+        # itself before any pixel is decoded. A previous bare ``except
+        # Exception`` here also caught -- and discarded -- caller bugs (e.g.
+        # a test double's ``AssertionError``); narrowing lets those propagate.
         try:
             with Image.open(file_path) as img:
                 if file_path.lower().endswith('.png'):
@@ -261,8 +276,37 @@ class FileCategorizer:
                 raw_exif = img.getexif()
                 ifd0 = ifd0_tag_names(raw_exif)
                 exif = merge_exif_ifds(raw_exif, file_path)
-        except Exception as e:
-            logger.debug("Error reading image metadata for %s: %s", file_path, e)
+        except (
+            UnidentifiedImageError,
+            OSError,
+            ValueError,
+            SyntaxError,
+            Image.DecompressionBombError,
+        ) as e:
+            # Deliberately still DEBUG, not WARNING (issue #39 was filed
+            # against an earlier shape of this code, before issue #58 added
+            # FileProcessor._is_decodable_image; that gate is now the one that
+            # matters for user-visible reporting). Every extension where "this
+            # file did not open" is an actionable problem --
+            # DECODABLE_IMAGE_EXTENSIONS: .jpg/.jpeg/.png/.gif/.tiff/.tif/
+            # .bmp/.webp -- gets independently re-opened by
+            # ``_is_decodable_image`` before the file would ever be filed,
+            # which ALREADY logs a WARNING naming the file and the exception
+            # type and reroutes it to ``backup/corrupt/`` instead of
+            # ``backup/photos/``, for every real or dry run. Warning again
+            # here would be a second, redundant alarm for the exact same
+            # failure. For a RAW extension (``.dng``/``.cr2``/``.nef``/...)
+            # that gate deliberately does not apply -- Pillow has no codec
+            # for RAW at all, so EVERY valid RAW file would raise
+            # ``UnidentifiedImageError`` here on every run, and a WARNING
+            # would be a constant false alarm for a library's entire RAW
+            # collection, not a diagnosable failure. The exception type is
+            # still named in the message for anyone running with
+            # ``--verbose``.
+            logger.debug(
+                "Cannot read image metadata for %s: %s: %s",
+                file_path, type(e).__name__, e,
+            )
             return None
 
         return exif, ifd0, png_info
