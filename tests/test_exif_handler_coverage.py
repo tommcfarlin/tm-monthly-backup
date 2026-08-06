@@ -575,6 +575,47 @@ class TestHachoirFastPathRealBoundary(unittest.TestCase):
         """Seconds from 1904-01-01 to a UTC datetime, for building mvhd fixtures."""
         return int((dt_utc - datetime(1904, 1, 1)).total_seconds())
 
+    def test_zeroed_mvhd_is_rejected_not_named_1904(self):
+        """
+        Issue #62, acceptance criterion 3: a real, unmocked mvhd whose
+        creation_time is the QuickTime epoch (0 -> 1904-01-01) is exactly the
+        defect found on the project owner's real export -- two AI-generated
+        mp4s with no Apple creationdate key and a zeroed mvhd were archived as
+        ``1904.01.01.00.00.00.mp4`` / ``...00.01.mp4``. hachoir's ``get()``
+        genuinely returns ``datetime(1904, 1, 1)`` here (this is not mocked),
+        so the rejection must happen in this module, not in hachoir. The
+        plaintext last-resort scan is exercised too (via the real
+        ``exportPlaintext``) and also finds nothing plausible, so the overall
+        result is None -- never 1904.
+        """
+        path = os.path.join(self.temp_dir, "zeroed_mvhd.mov")
+        _write_minimal_mp4(path, _mvhd_only_moov(0))
+
+        result = self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertIsNone(result)
+        self.assertNotEqual(result, datetime(1904, 1, 1))
+        self.assertIn(path, self.handler.missing_exif_files)
+
+    def test_zeroed_mvhd_end_to_end_falls_through_to_filesystem_time(self):
+        """
+        The full chain the real defect exercised: extract_timestamp resolves
+        to None for a zeroed-mvhd video (not 1904), and get_fallback_timestamp
+        -- which is what FileProcessor calls next -- names the file from the
+        filesystem instead, closing the path that produced
+        ``backup/videos/1904.01.01.00.00.0{0,1}.mp4`` on the real export.
+        """
+        path = os.path.join(self.temp_dir, "zeroed_end_to_end.mov")
+        _write_minimal_mp4(path, _mvhd_only_moov(0))
+
+        extracted = self.handler.extract_timestamp(path)
+        fallback = self.handler.get_fallback_timestamp(path)
+
+        self.assertIsNone(extracted)
+        self.assertNotEqual(fallback.year, 1904)
+        # A file just written to disk has an mtime in the present, not 1904.
+        self.assertGreater(fallback.year, 2000)
+
 
 class TestTimestampCandidatesGuard(unittest.TestCase):
     """_timestamp_candidates tolerates an exif object whose get_ifd raises."""

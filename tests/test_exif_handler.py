@@ -5,7 +5,7 @@ Test suite for EXIF timestamp extraction functionality
 import unittest
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 from PIL import Image, ExifTags
 
@@ -460,6 +460,158 @@ class TestBoundaryTimestampFixtures(unittest.TestCase):
         self.assertIn(path, self.handler.get_missing_exif_files())
 
 
+class TestPlausibleCaptureTime(unittest.TestCase):
+    """
+    ExifHandler._is_plausible_capture_time: the single bound shared by every
+    timestamp source (issue #62).
+
+    ``now`` is injectable specifically so these boundary tests are
+    deterministic -- pinning both edges against a fixed reference time
+    instead of racing ``datetime.now()`` -- while callers in production code
+    simply omit it and get the live clock.
+    """
+
+    def test_min_bound_is_inclusive(self):
+        self.assertTrue(
+            ExifHandler._is_plausible_capture_time(datetime(1970, 1, 1))
+        )
+
+    def test_just_before_min_bound_is_rejected(self):
+        self.assertFalse(
+            ExifHandler._is_plausible_capture_time(
+                datetime(1969, 12, 31, 23, 59, 59)
+            )
+        )
+
+    def test_quicktime_epoch_sentinel_is_rejected(self):
+        """
+        Acceptance criterion 3, isolated at the predicate level: the QuickTime
+        ``mvhd`` zero-epoch (1904-01-01) -- LATER than the 1826 floor the
+        issue's own sketch suggested, so a naive port of that constant would
+        NOT have caught this -- is rejected by the actual floor chosen here.
+        """
+        self.assertFalse(
+            ExifHandler._is_plausible_capture_time(datetime(1904, 1, 1))
+        )
+
+    def test_one_hour_in_the_future_is_accepted(self):
+        """Acceptance criterion 4: timezone skew is not treated as hostile."""
+        now = datetime(2026, 1, 1, 12, 0, 0)
+        self.assertTrue(
+            ExifHandler._is_plausible_capture_time(
+                now + timedelta(hours=1), now=now
+            )
+        )
+
+    def test_exactly_one_day_ahead_is_accepted(self):
+        now = datetime(2026, 1, 1, 12, 0, 0)
+        self.assertTrue(
+            ExifHandler._is_plausible_capture_time(
+                now + timedelta(days=1), now=now
+            )
+        )
+
+    def test_just_past_one_day_ahead_is_rejected(self):
+        now = datetime(2026, 1, 1, 12, 0, 0)
+        self.assertFalse(
+            ExifHandler._is_plausible_capture_time(
+                now + timedelta(days=1, seconds=1), now=now
+            )
+        )
+
+    def test_omitting_now_uses_the_live_clock(self):
+        """The default (no injected ``now``) still accepts the actual present."""
+        self.assertTrue(ExifHandler._is_plausible_capture_time(datetime.now()))
+
+
+class TestImplausibleExifTimestamps(unittest.TestCase):
+    """
+    ExifHandler._parse_exif_datetime: the plausibility bound applied to the
+    EXIF source (issue #62, acceptance criteria 1, 2, 4, 5).
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_year_9999_is_rejected_and_falls_through(self):
+        """Acceptance criterion 1."""
+        result = self.handler._parse_exif_datetime(
+            "9999:12:31 23:59:59", "test.jpg"
+        )
+        self.assertIsNone(result)
+        self.assertIn("test.jpg", self.handler.missing_exif_files)
+
+    def test_year_0001_is_rejected_and_falls_through(self):
+        """Acceptance criterion 2."""
+        result = self.handler._parse_exif_datetime(
+            "0001:01:01 00:00:00", "test.jpg"
+        )
+        self.assertIsNone(result)
+        self.assertIn("test.jpg", self.handler.missing_exif_files)
+
+    def test_one_hour_in_the_future_is_accepted(self):
+        """
+        Acceptance criterion 4: a timestamp derived from ``datetime.now()``
+        (not a hardcoded date, so this cannot rot) one hour ahead must be
+        accepted, not treated as hostile.
+        """
+        future = (datetime.now() + timedelta(hours=1)).strftime(
+            "%Y:%m:%d %H:%M:%S"
+        )
+        result = self.handler._parse_exif_datetime(future, "test.jpg")
+        self.assertIsNotNone(result)
+
+    def test_implausible_datetimeoriginal_falls_through_to_datetime_tag(self):
+        """
+        End-to-end: a crafted DateTimeOriginal (Exif sub-IFD) does not abort
+        the search -- the lower-priority DateTime tag (IFD0) is still used,
+        exactly as a missing/malformed DateTimeOriginal already behaves.
+        """
+        path = make_exif_jpeg(
+            os.path.join(self.temp_dir, "crafted.jpg"),
+            date_time_original="9999:12:31 23:59:59",
+            date_time="2024:01:15 14:30:45",
+        )
+        result = self.handler.extract_timestamp(path)
+        self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
+
+    # --- Regression: the pre-existing malformed-string rejections (issue #62
+    # asks these be pinned as tests, not just exercised by ad hoc scripts). ---
+
+    def test_empty_string_returns_none(self):
+        result = self.handler._parse_exif_datetime("", "test.jpg")
+        self.assertIsNone(result)
+
+    def test_nul_padded_string_returns_none(self):
+        result = self.handler._parse_exif_datetime(
+            "2024:01:15 14:30:45\x00\x00\x00", "test.jpg"
+        )
+        self.assertIsNone(result)
+
+    def test_oversized_string_returns_none(self):
+        result = self.handler._parse_exif_datetime("2024" * 1000, "test.jpg")
+        self.assertIsNone(result)
+
+    def test_ansi_bearing_string_returns_none(self):
+        result = self.handler._parse_exif_datetime(
+            "\x1b[31m2020:01:01 00:00:00", "test.jpg"
+        )
+        self.assertIsNone(result)
+
+    def test_non_str_value_returns_none(self):
+        result = self.handler._parse_exif_datetime(12345, "test.jpg")
+        self.assertIsNone(result)
+
+    def test_negative_year_returns_none(self):
+        result = self.handler._parse_exif_datetime("-001:01:01 00:00:00", "test.jpg")
+        self.assertIsNone(result)
+
+
 class TestVideoTimestampExtraction(unittest.TestCase):
     """Test cases for ExifHandler._extract_video_timestamp"""
 
@@ -645,6 +797,22 @@ class TestVideoLocalCreationDate(unittest.TestCase):
             datetime(2026, 1, 15, 21, 33, 3),
         )
 
+    def test_implausible_apple_creationdate_falls_back_to_mvhd(self):
+        """
+        Issue #62: #28's local-time preference does not exempt the Apple key
+        from the plausibility bound -- a crafted creationdate falls through
+        to hachoir's mvhd exactly as a missing key would, rather than naming
+        the file from it.
+        """
+        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        path = self._mov(
+            "IMG_CRAFTED.MOV",
+            "9999-12-31T23:59:59-0400",
+            mvhd_creation_1904=utc_1904,
+        )
+        result = self.handler.extract_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 5, 1, 33, 3))
+
     def test_local_key_preferred_even_without_hachoir(self):
         """The Apple key path works even when hachoir is unavailable"""
         path = self._mov("nohachoir.mov", "2024-06-15T21:33:03-0400")
@@ -756,6 +924,45 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
             "2024-13-45-99-99-99.jpg"
         )
         self.assertIsNone(result)
+
+    def test_pattern1_implausible_year_falls_through(self):
+        """
+        Issue #62: pattern 1's bare ``\\d{4}`` year field admits 0000-9999, so
+        it can produce the same implausible date a crafted EXIF value can;
+        it must be bounded the same way and not returned.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "IMG_9999-12-31-23-59-59.jpg"
+        )
+        self.assertIsNone(result)
+
+    def test_pattern2_implausible_year_falls_through(self):
+        """Issue #62: pattern 2 (YYYYMMDD_HHMMSS) is bounded the same way."""
+        result = self.handler._extract_timestamp_from_filename(
+            "VID_00010101_000000.mov"
+        )
+        self.assertIsNone(result)
+
+    def test_pattern3_day_first_implausible_year_falls_through(self):
+        """
+        Issue #62: the day-first/month-first pattern shares the same
+        implausible year under both ambiguity readings, so neither reading
+        is returned.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Facetune_04-07-9999-13-32-17.heic"
+        )
+        self.assertIsNone(result)
+
+    def test_filename_one_hour_in_the_future_is_accepted(self):
+        """
+        Acceptance criterion 4 applies to the filename fallback too: a
+        timestamp derived from ``datetime.now()`` one hour ahead is accepted.
+        """
+        future = datetime.now() + timedelta(hours=1)
+        name = "IMG_{}.jpg".format(future.strftime("%Y-%m-%d-%H-%M-%S"))
+        result = self.handler._extract_timestamp_from_filename(name)
+        self.assertEqual(result, future.replace(microsecond=0))
 
     def test_real_export_filename_shapes_hit_rate(self):
         """Issue #51: every real filename shape identified in the QA audit now

@@ -57,6 +57,23 @@ _META_CHILD_ATOMS = frozenset((b"hdlr", b"keys", b"ilst"))
 # media data; this cap keeps a malformed or hostile file from exhausting RAM.
 _MAX_MOOV_BYTES = 128 * 1024 * 1024
 
+# issue #62's originating report suggested 1826 (the earliest surviving
+# photograph) as the floor. That value cannot actually satisfy this issue's
+# own acceptance criteria: 1904-01-01 -- the QuickTime ``mvhd`` zero-epoch
+# sentinel that is the confirmed real-world defect (two AI-generated mp4s
+# archived as 1904.01.01.00.00.0{0,1}.mp4) -- is LATER than 1826, so it would
+# pass a >= 1826 check untouched. The floor is set to the Unix epoch instead:
+# every file this tool ever processes comes from a phone/digital-camera
+# export, decades after 1970, so nothing genuine is lost, while both known
+# OS/format zero-epoch sentinels in this codebase's domain (QuickTime's 1904
+# and, moot but consistent, Unix's own 1970-01-01T00:00:00 itself) and the
+# EXIF garbage this issue also targets (a crafted year of 9999 or 0001) are
+# excluded. A datetime that parses cleanly but falls outside
+# [MIN_PLAUSIBLE_CAPTURE, "now" + 1 day] is corrupt or sentinel metadata
+# rather than a real capture time, and must be bounded before it names an
+# archive path.
+MIN_PLAUSIBLE_CAPTURE = datetime(1970, 1, 1)
+
 
 def _iter_boxes(buf: bytes, start: int, end: int) -> Iterator[Tuple[bytes, int, int]]:
     """
@@ -377,6 +394,46 @@ class ExifHandler:
         """Check if file is a video file based on extension"""
         return Path(file_path).suffix.lower() in self.VIDEO_EXTENSIONS
 
+    @staticmethod
+    def _is_plausible_capture_time(dt: datetime, now: Optional[datetime] = None) -> bool:
+        """
+        Bound a candidate capture time to a plausible real-world range (#62).
+
+        A value can parse cleanly as a ``datetime`` and still be nonsense as a
+        capture time: a crafted EXIF ``DateTime`` of ``9999:12:31 23:59:59`` or
+        ``0001:01:01 00:00:00``, or a zeroed QuickTime ``mvhd`` box whose UTC
+        epoch of 1904-01-01 hachoir happily reports as a real date. This is the
+        single predicate shared by every timestamp source in this module --
+        EXIF (:meth:`_parse_exif_datetime`), both video paths (Apple's local
+        ``creationdate`` in :meth:`_extract_quicktime_creationdate` and
+        hachoir's ``mvhd`` in :meth:`_extract_video_timestamp_hachoir`), and
+        the filename fallback (:meth:`_extract_timestamp_from_filename`) --
+        rather than three ad hoc range checks.
+
+        Callers never raise on a ``False`` result; they treat it exactly like
+        a missing value and fall through to the next timestamp source, which
+        keeps this module's existing fail-safe shape (a file is still archived
+        under a filesystem timestamp, never abandoned).
+
+        The upper bound allows one day past ``now`` so a capture made across a
+        timezone boundary -- e.g. one hour in the future from this machine's
+        clock -- is accepted rather than treated as hostile.
+
+        Args:
+            dt: Candidate capture time to validate.
+            now: Reference "current" time for the upper bound. Defaults to
+                ``datetime.now()``; overridable so tests can pin both bounds
+                deterministically instead of racing a live clock, and so a
+                test asserting "one hour in the future is accepted" does not
+                rot as real time passes.
+
+        Returns:
+            True if ``dt`` falls within ``[MIN_PLAUSIBLE_CAPTURE, now + 1 day]``.
+        """
+        if now is None:
+            now = datetime.now()
+        return MIN_PLAUSIBLE_CAPTURE <= dt <= now + timedelta(days=1)
+
     def extract_timestamp(
         self, file_path: str, metadata: Optional["ImageMetadata"] = None
     ) -> Optional[datetime]:
@@ -552,6 +609,18 @@ class ExifHandler:
             logger.warning(
                 f"Unparseable QuickTime creationdate in {file_path}: {value!r}"
             )
+            return None
+
+        # #28's local-time preference does not exempt this source from the
+        # plausibility bound (#62) -- the Apple key can carry a nonsense date
+        # just as easily as hachoir's mvhd can. Reject and let the caller fall
+        # back to the mvhd path rather than naming a file from it.
+        if not self._is_plausible_capture_time(parsed):
+            logger.warning(
+                "Implausible QuickTime creationdate in %s: %s", file_path, value
+            )
+            return None
+
         return parsed
 
     def _read_moov_bytes(self, file_path: str) -> Optional[bytes]:
@@ -652,6 +721,19 @@ class ExifHandler:
 
                 creation_date = _hachoir_creation_date(metadata)
 
+                # A zeroed mvhd box (QuickTime epoch 1904-01-01, e.g. a video
+                # stripped by a re-muxer or messaging app) parses cleanly as a
+                # datetime but is not a real capture time. Reject it here,
+                # exactly like a missing value, so the plaintext scan below
+                # gets a chance and -- failing that -- the caller falls back
+                # to the filesystem timestamp instead of naming the file 1904
+                # (#62).
+                if creation_date is not None and not self._is_plausible_capture_time(creation_date):
+                    logger.warning(
+                        "Implausible video creation date in %s: %s", file_path, creation_date
+                    )
+                    creation_date = None
+
                 # Last resort only: reached when the direct lookup found nothing
                 # usable. Iterates hachoir's rendered metadata lines and regex-
                 # scans them for a date, which materializes every field as text.
@@ -666,10 +748,16 @@ class ExifHandler:
                             continue
                         date_str = date_match.group(1).replace('T', ' ')
                         try:
-                            creation_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                            break
+                            candidate = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
                         except Exception:
                             continue
+                        if not self._is_plausible_capture_time(candidate):
+                            logger.warning(
+                                "Implausible video creation date in %s: %s", file_path, candidate
+                            )
+                            continue
+                        creation_date = candidate
+                        break
 
                 if creation_date:
                     logger.info("Extracted video creation date: %s -> %s", file_path, creation_date)
@@ -705,11 +793,22 @@ class ExifHandler:
         """
         try:
             # EXIF datetime format: "YYYY:MM:DD HH:MM:SS"
-            return datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
+            parsed = datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
         except (ValueError, TypeError) as e:
             logger.error("Invalid EXIF datetime format in %s: %s - %s", file_path, datetime_str, e)
             self.missing_exif_files.append(file_path)
             return None
+
+        # A well-formed date that is not a plausible capture time (e.g. a
+        # crafted year of 9999 or 0001) falls through exactly like a
+        # malformed one -- the file still gets archived under a filesystem
+        # timestamp instead of naming its own archive directory year (#62).
+        if not self._is_plausible_capture_time(parsed):
+            logger.warning("Implausible EXIF timestamp in %s: %s", file_path, datetime_str)
+            self.missing_exif_files.append(file_path)
+            return None
+
+        return parsed
 
     def get_fallback_timestamp(self, file_path: str) -> datetime:
         """
@@ -768,7 +867,17 @@ class ExifHandler:
         if match:
             try:
                 year, month, day, hour, minute, second = map(int, match.groups())
-                return datetime(year, month, day, hour, minute, second)
+                candidate = datetime(year, month, day, hour, minute, second)
+                # The bare \d{4} year field admits 0000-9999, so this pattern
+                # can produce the same implausible dates as a crafted EXIF
+                # value (#62); bound it the same way and try the next pattern
+                # instead of naming a file from it.
+                if self._is_plausible_capture_time(candidate):
+                    return candidate
+                logger.warning(
+                    "Implausible timestamp from filename pattern, trying next pattern: %s -> %s",
+                    filename, candidate,
+                )
             except ValueError:
                 pass
 
@@ -784,7 +893,13 @@ class ExifHandler:
                 hour = int(time_str[:2])
                 minute = int(time_str[2:4])
                 second = int(time_str[4:6])
-                return datetime(year, month, day, hour, minute, second)
+                candidate = datetime(year, month, day, hour, minute, second)
+                if self._is_plausible_capture_time(candidate):
+                    return candidate
+                logger.warning(
+                    "Implausible timestamp from filename pattern, trying next pattern: %s -> %s",
+                    filename, candidate,
+                )
             except ValueError:
                 pass
 
@@ -811,6 +926,17 @@ class ExifHandler:
                 try:
                     parsed = datetime(year, month, day, hour, minute, second)
                 except ValueError:
+                    continue
+                # As with patterns 1 and 2, the bare \d{4} year field admits
+                # 0000-9999; an implausible reading is rejected the same way
+                # a malformed one is, trying the other reading before giving
+                # up on this pattern entirely (#62).
+                if not self._is_plausible_capture_time(parsed):
+                    logger.warning(
+                        "Implausible timestamp from filename using %s interpretation, "
+                        "trying next: %s -> %s",
+                        reading, filename, parsed,
+                    )
                     continue
                 logger.info(
                     "Extracted timestamp from filename using %s interpretation: %s -> %s",
