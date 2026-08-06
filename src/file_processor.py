@@ -255,6 +255,15 @@ class FileProcessor:
     # sequential inline path is faster. Below this threshold no pool is created.
     HEIC_PARALLEL_THRESHOLD = 8
 
+    # Byte prefixes a genuine Apple sidecar's content starts with: an XML
+    # property list (``<?xml ...``) or a binary property list (``bplist00``).
+    # Membership in ``FileCategory.SIDECAR`` is decided purely by the ``.aae``
+    # extension (issue #57's own defect), so before a candidate is unlinked --
+    # the only irreversible operation this tool performs on a file it is not
+    # archiving -- its content must actually look like one of these. Checked
+    # with ``bytes.startswith(SIDECAR_MAGIC)``, which accepts a tuple.
+    SIDECAR_MAGIC = (b"<?xml", b"bplist00")
+
     def __init__(
         self,
         export_dir: str = "export",
@@ -325,6 +334,19 @@ class FileProcessor:
         # name rather than archived as photographs, and reported as a distinct
         # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
         self._quarantined_files: List[Dict[str, any]] = []
+        # Apple sidecar (.aae) bookkeeping (issue #57). A candidate is either
+        # deleted (its content was validated against SIDECAR_MAGIC and, on a
+        # real run, os.remove succeeded) or kept -- recorded here as
+        # (reason, path) with reason 'not_plist' (content did not match the
+        # magic bytes, INCLUDING the fail-closed case where the candidate
+        # could not even be read) or 'delete_failed' (a validated sidecar's
+        # os.remove itself raised). Neither list feeds _processed_files or
+        # _failed_files: a sidecar was never a processable file to begin with
+        # (it is excluded from FileCategorizer.get_processable_files), so
+        # counting either outcome there would inflate files_processed or
+        # files_failed past files_seen (issue #31).
+        self._deleted_sidecars: List[str] = []
+        self._skipped_sidecars: List[Tuple[str, str]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -379,11 +401,22 @@ class FileProcessor:
         """
         Run the whole pipeline and return the summary -- the single public API.
 
-        Scans the export directory, categorizes, deletes sidecars, converts and
-        files every processable file, and returns the summary. This is the ONE
-        entry point a presentation layer calls: scanning, categorization,
-        sidecar deletion, and summary generation each happen exactly once per
-        run, so no caller re-drives (or reaches into) the pipeline (issue #13).
+        Scans the export directory, categorizes, converts and files every
+        processable file, deletes validated sidecars, and returns the summary.
+        This is the ONE entry point a presentation layer calls: scanning,
+        categorization, sidecar deletion, and summary generation each happen
+        exactly once per run, so no caller re-drives (or reaches into) the
+        pipeline (issue #13). Sidecar deletion runs LAST, after every
+        processable file has been filed or recorded as failed (issue #57): the
+        original ordering deleted the user's ``.aae`` edit history before a
+        single photo was safely in ``backup/``, so a run that crashed midway
+        left the edits gone and the photos unprocessed. If anything earlier in
+        this method raises without being caught (the per-file catch-all in
+        ``_process_category`` and ``_process_single_file`` normally absorbs
+        per-file failures, but ``ensure_target_directories`` or a target-
+        directory lookup failing outright would not be), that exception
+        propagates before the deletion call is ever reached -- so a run that
+        fails to process any photo leaves every ``.aae`` candidate untouched.
 
         Reuse contract (issue #35): a FileProcessor instance is explicitly
         reusable -- calling this method a second (or Nth) time on the SAME
@@ -475,9 +508,6 @@ class FileProcessor:
                 logger.info("Processing aborted by progress reporter")
                 return self._generate_summary()
 
-        # Delete sidecar files immediately
-        self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
-
         # Create target directories
         if not dry_run:
             self.categorizer.ensure_target_directories(self.backup_dir)
@@ -497,6 +527,13 @@ class FileProcessor:
         for category, files in processable_files.items():
             if files:
                 self._process_category(category, files, dry_run, progress)
+
+        # Validate and delete Apple sidecar (.aae) candidates only now that
+        # every processable file has been filed in backup/ or recorded as
+        # failed -- see the reordering note on this method's docstring, and
+        # _delete_sidecar_files below for the content validation itself
+        # (issue #57).
+        self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
 
         # Generate summary
         return self._generate_summary()
@@ -553,32 +590,100 @@ class FileProcessor:
 
         return files
 
-    def _delete_sidecar_files(self, sidecar_files: List[str], dry_run: bool):
+    def _looks_like_apple_sidecar(self, file_path: str) -> bool:
         """
-        Delete Apple sidecar files.
+        Report whether ``file_path``'s CONTENT looks like an Apple sidecar.
+
+        Membership in ``FileCategory.SIDECAR`` is decided purely by the
+        ``.aae`` extension (``FileCategorizer``), which is attacker/accident
+        influenceable: any file merely named ``*.aae`` -- of any size, from
+        anywhere in the export tree -- would otherwise qualify for deletion.
+        This reads the first 16 bytes and checks them against
+        :data:`SIDECAR_MAGIC` (an XML property list starts ``<?xml``; a binary
+        property list starts ``bplist00``), which is enough to distinguish a
+        genuine sidecar from an unrelated file that merely shares the
+        extension, without reading (or trusting) the rest of the file.
+
+        Fails CLOSED: a file that cannot even be opened (permission error, or
+        it vanished in a race between scan and delete) returns ``False`` --
+        never treated as validated -- so :meth:`_delete_sidecar_files` keeps
+        it rather than risk deleting something that was never confirmed safe.
 
         Args:
-            sidecar_files: List of sidecar file paths
-            dry_run: If True, only log what would be deleted
+            file_path: Candidate sidecar path (matched the ``.aae`` extension).
+
+        Returns:
+            True if the file's leading bytes match a known plist magic
+            prefix; False if they do not, or the file could not be read.
+        """
+        try:
+            with open(file_path, 'rb') as handle:
+                head = handle.read(16)
+        except OSError as error:
+            logger.warning(
+                "Could not read candidate sidecar %s, keeping: %s", file_path, error
+            )
+            return False
+        return head.startswith(self.SIDECAR_MAGIC)
+
+    def _delete_sidecar_files(self, sidecar_files: List[str], dry_run: bool):
+        """
+        Validate, then delete, Apple sidecar files -- never on extension alone.
+
+        Called only after every processable file has been filed or recorded as
+        failed (see the reordering note on :meth:`process_all_files`), and only
+        for a candidate whose content actually validates as a plist via
+        :meth:`_looks_like_apple_sidecar`. A candidate that fails validation --
+        because its content is not a plist, OR because it could not be read at
+        all (fail-closed) -- is left on disk untouched and recorded in
+        ``_skipped_sidecars`` as ``('not_plist', file_path)`` rather than
+        deleted. A validated sidecar whose ``os.remove`` itself fails (a race,
+        a permissions change) is likewise left in place and recorded as
+        ``('delete_failed', file_path)``.
+
+        Neither outcome is recorded in ``_processed_files`` or
+        ``_failed_files``: a sidecar was never a processable file (issue #31)
+        -- it is excluded from ``FileCategorizer.get_processable_files`` --
+        so counting it there would let ``files_processed + files_failed``
+        exceed the number of files actually seen as processable.
+
+        A dry run validates content exactly as a real run does -- it is what
+        makes the reported count match a real run for the same input (issue
+        #10) -- but never opens the file for writing and never calls
+        ``os.remove``; a validated candidate is simply recorded in
+        ``_deleted_sidecars`` as "would delete" without touching disk.
+
+        Args:
+            sidecar_files: Candidate sidecar paths (matched the ``.aae``/
+                ``.AAE`` extension; content not yet checked).
+            dry_run: If True, validate and report but perform no deletion.
         """
         if not sidecar_files:
             return
 
-        logger.info("Processing %s sidecar files for deletion", len(sidecar_files))
+        logger.info("Validating %s candidate sidecar files for deletion", len(sidecar_files))
 
         for file_path in sidecar_files:
+            if not self._looks_like_apple_sidecar(file_path):
+                logger.warning(
+                    "Not an Apple sidecar despite the .aae extension, keeping: %s",
+                    file_path,
+                )
+                self._skipped_sidecars.append(('not_plist', file_path))
+                continue
+
             if dry_run:
                 logger.info("[DRY RUN] Would delete sidecar file: %s", file_path)
-            else:
-                try:
-                    os.remove(file_path)
-                    logger.info("Deleted sidecar file: %s", file_path)
-                except Exception as e:
-                    logger.error("Failed to delete sidecar file %s: %s", file_path, e)
-                    # The exception object itself, not str(e) (issue #39): a
-                    # render-time formatter can still name the exception type
-                    # this way, which a stringified message discards for good.
-                    self._failed_files.append(('delete_sidecar', file_path, e))
+                self._deleted_sidecars.append(file_path)
+                continue
+
+            try:
+                os.remove(file_path)
+                logger.info("Deleted sidecar file: %s", file_path)
+                self._deleted_sidecars.append(file_path)
+            except OSError as e:
+                logger.error("Failed to delete sidecar file %s: %s", file_path, e)
+                self._skipped_sidecars.append(('delete_failed', file_path))
 
     def _process_category(
         self,
@@ -1586,6 +1691,15 @@ class FileProcessor:
             # and from failed (nothing errored; they were handled deliberately
             # and safely), so the count is honest either way (issue #58).
             'files_quarantined': len(self._quarantined_files),
+            # Apple sidecars actually deleted (real run) or that a dry run
+            # confirmed it WOULD delete -- the two counts are equal for
+            # identical input (issue #10 parity). Neither this nor
+            # 'sidecars_skipped' below feeds files_processed/files_failed:
+            # a sidecar was never a processable file (issue #31/#57).
+            'sidecars_deleted': len(self._deleted_sidecars),
+            # Candidates that matched the .aae extension but were kept rather
+            # than deleted -- see _delete_sidecar_files for the two reasons.
+            'sidecars_skipped': len(self._skipped_sidecars),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
@@ -1605,6 +1719,11 @@ class FileProcessor:
             'missing_exif_list': [
                 record.copy() for record in self._missing_exif_records
             ],
+            # (reason, path) pairs for candidates kept rather than deleted --
+            # see _delete_sidecar_files. A fresh list, not the internal one
+            # itself, matching 'missing_exif_list' above (issue #37's
+            # no-aliasing precedent).
+            'skipped_sidecar_files': self._skipped_sidecars.copy(),
         }
 
     def clear_processing_state(self):
@@ -1619,14 +1738,16 @@ class FileProcessor:
         need to reset mid-lifecycle (or a test asserting the reset is
         complete) still has an explicit hook.
 
-        Resets this object's own four private accumulators and
-        ``_quarantined_files``, plus every collaborator's own bookkeeping
-        (``ExifHandler.missing_exif_files``, ``HeicConverter.converted_files``/
-        ``failed_conversions``, ``FileCategorizer.categorized_files``) -- a
-        reset that only cleared this object's attributes and left the
-        collaborators' stale would be a half-measure, since ``_generate_summary``
-        reads categorization and HEIC stats FROM those collaborators, not from
-        a local copy.
+        Resets this object's own six private accumulators
+        (``_processed_files``, ``_used_timestamps``, ``_failed_files``,
+        ``_quarantined_files``, ``_deleted_sidecars``, ``_skipped_sidecars``),
+        ``_conversion_log`` and ``_missing_exif_records``, plus every
+        collaborator's own bookkeeping (``ExifHandler.missing_exif_files``,
+        ``HeicConverter.converted_files``/``failed_conversions``,
+        ``FileCategorizer.categorized_files``) -- a reset that only cleared
+        this object's attributes and left the collaborators' stale would be a
+        half-measure, since ``_generate_summary`` reads categorization and
+        HEIC stats FROM those collaborators, not from a local copy.
         """
         self._processed_files.clear()
         self._used_timestamps.clear()
@@ -1634,6 +1755,8 @@ class FileProcessor:
         self._quarantined_files.clear()
         self._conversion_log.clear()
         self._missing_exif_records.clear()
+        self._deleted_sidecars.clear()
+        self._skipped_sidecars.clear()
         self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()

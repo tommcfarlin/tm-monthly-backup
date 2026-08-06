@@ -62,6 +62,25 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         return file_path
 
+    def create_test_sidecar_file(self, filename: str) -> str:
+        """
+        Create a genuine (XML property list) ``.aae`` sidecar in export/.
+
+        Issue #57: a sidecar is now deleted only when its CONTENT validates as
+        a plist, not merely because it carries the ``.aae`` extension -- the
+        plain-text placeholder ``create_test_file`` writes no longer qualifies.
+
+        Args:
+            filename: Name of the sidecar file to create (e.g. "photo.aae").
+
+        Returns:
+            Full path to the created file.
+        """
+        file_path = os.path.join(self.export_dir, filename)
+        with open(file_path, 'wb') as f:
+            f.write(b'<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
+        return file_path
+
     def create_test_image_with_exif(self, filename: str, timestamp_str: str = "2024:01:15 14:30:45") -> str:
         """
         Create a real JPEG in the export directory with a genuine EXIF timestamp.
@@ -167,8 +186,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.create_test_file("video2.mp4")
         self.create_test_png("Screenshot 2024-01-15.png")
         self.create_test_png("IMG_1234.png")  # iOS screenshot pattern
-        self.create_test_file("sidecar1.aae")
-        self.create_test_file("sidecar2.aae")
+        self.create_test_sidecar_file("sidecar1.aae")
+        self.create_test_sidecar_file("sidecar2.aae")
         self.create_test_file("unknown.txt")
 
         results = self.processor.process_all_files(dry_run=False)
@@ -208,13 +227,14 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.export_dir, "unknown.txt")))
         self.assertTrue(os.path.isfile(
             os.path.join(self.backup_dir, "unknown", "unknown.txt")))
+        self.assertEqual(results['sidecars_deleted'], 2)
 
     def test_sidecar_file_deletion_dry_run(self):
         """Test that sidecar files are identified for deletion in dry run"""
-        # Create sidecar files
+        # Create genuine (plist-content) sidecar files (issue #57).
         sidecar_files = [
-            self.create_test_file("IMG_1234.aae"),
-            self.create_test_file("photo.aae")
+            self.create_test_sidecar_file("IMG_1234.aae"),
+            self.create_test_sidecar_file("photo.aae")
         ]
 
         results = self.processor.process_all_files(dry_run=True)
@@ -226,13 +246,19 @@ class TestWorkflowIntegration(unittest.TestCase):
         for file_path in sidecar_files:
             self.assertTrue(os.path.exists(file_path))
 
+        # The dry-run count of "would delete" matches the real-run count for
+        # identical input (issue #10 parity; asserted directly in
+        # tests/test_sidecar_validation.py).
+        self.assertEqual(results['sidecars_deleted'], 2)
+
     @patch('src.file_processor.os.remove')
     def test_sidecar_file_deletion_real(self, mock_remove):
         """Test actual sidecar file deletion (mocked)"""
-        # Create sidecar files
+        # Create genuine (plist-content) sidecar files (issue #57): a
+        # candidate must validate as a plist before os.remove is ever called.
         sidecar_files = [
-            self.create_test_file("IMG_1234.aae"),
-            self.create_test_file("photo.aae")
+            self.create_test_sidecar_file("IMG_1234.aae"),
+            self.create_test_sidecar_file("photo.aae")
         ]
 
         results = self.processor.process_all_files(dry_run=False)
@@ -241,6 +267,7 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(mock_remove.call_count, 2)
         for file_path in sidecar_files:
             mock_remove.assert_any_call(file_path)
+        self.assertEqual(results['sidecars_deleted'], 2)
 
     def test_duplicate_timestamp_handling(self):
         """Three photos sharing one EXIF timestamp land at .45/.46/.47 distinctly.
