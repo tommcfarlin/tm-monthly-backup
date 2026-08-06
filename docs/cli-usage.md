@@ -86,16 +86,16 @@ tm-monthly-backup
 # ✓ Backup directory ready: backup
 #
 # File Discovery Summary
-# ┌───────────────┬───────┬─────────────────────────────────────┐
-# │ Category      │ Count │ Description                         │
-# ├───────────────┼───────┼─────────────────────────────────────┤
-# │ Photos        │    45 │ JPEG, PNG, HEIC, etc.               │
-# │ Videos        │    12 │ MOV, MP4, M4V, etc.                 │
-# │ Screenshots   │     8 │ PNG files with screenshot patterns  │
-# │ Sidecar Files │    23 │ Apple .aae files (will be deleted)  │
-# │ Unknown       │     2 │ Unrecognized file types             │
-# │ Total         │    90 │ Files to process                    │
-# └───────────────┴───────┴─────────────────────────────────────┘
+# ┌───────────────┬───────┬───────────────────────────────────────┐
+# │ Category      │ Count │ Description                           │
+# ├───────────────┼───────┼───────────────────────────────────────┤
+# │ Photos        │    45 │ JPEG, PNG, HEIC, etc.                 │
+# │ Videos        │    12 │ MOV, MP4, M4V, etc.                   │
+# │ Screenshots   │     8 │ PNG files with screenshot patterns    │
+# │ Sidecar Files │    23 │ Apple .aae files (validated, deleted) │
+# │ Unknown       │     2 │ Unrecognized file types               │
+# │ Total         │    90 │ Files to process                      │
+# └───────────────┴───────┴───────────────────────────────────────┘
 ```
 
 The **Unknown** row is shown only when at least one unrecognized file was
@@ -254,7 +254,7 @@ handling that did not occur.
 | **Videos** | `.mov`, `.mp4`, `.m4v`, `.avi`, `.mkv`, `.wmv`, `.flv`, `.webm`, `.3gp`, `.mpg`, `.mpeg` | Moved without conversion |
 | **Screenshots** | `.png` with screenshot patterns | Detected by filename patterns |
 | **Generated** | AI-detected or heavily-edited `.png`/photo files | Routed to `generated/` (see below) |
-| **Sidecar** | `.aae` | Apple sidecar files (deleted) |
+| **Sidecar** | `.aae` | Apple sidecar files (deleted once content validates as a plist) |
 | **Unknown** | All others | Moved to `unknown/` under original name |
 
 The authoritative extension lists are `FileCategorizer.PHOTO_EXTENSIONS` and
@@ -395,13 +395,14 @@ Organizing files...       ━━━━━━━━━━━━━━━━━━
 
 ```
 Processing Complete - Success!
-┌───────────────────────────┬───────┐
-│ Metric                    │ Count │
-├───────────────────────────┼───────┤
-│ Files Processed           │    68 │
-│ HEIC Conversions          │    12 │
-│ Missing EXIF Files        │     3 │
-└───────────────────────────┴───────┘
+┌───────────────────────┬───────┐
+│ Metric                │ Count │
+├───────────────────────┼───────┤
+│ Files Processed       │    68 │
+│ HEIC Conversions      │    12 │
+│ Missing EXIF Files    │     3 │
+│ Sidecar Files Deleted │    23 │
+└───────────────────────┴───────┘
 
 File Organization
 ┌─────────────┬───────┬──────────────────────┐
@@ -428,6 +429,7 @@ Processing Complete - Files Quarantined
 │ Files Processed           │    66 │
 │ HEIC Conversions          │    12 │
 │ Missing EXIF Files        │     3 │
+│ Sidecar Files Deleted     │    23 │
 │ Quarantined (undecodable) │     2 │
 └───────────────────────────┴───────┘
 
@@ -442,6 +444,11 @@ File Organization
 │ Quarantined │     2 │ backup/corrupt/      │
 └─────────────┴───────┴──────────────────────┘
 ```
+
+The **Sidecar Files Deleted** row is always shown, in every mode (including a
+dry run); a **Sidecar Files Kept** row, and a detail table naming each kept
+candidate and why, appear only when at least one `.aae` candidate failed
+content validation or could not be deleted.
 
 ## Error Handling
 
@@ -462,12 +469,13 @@ When errors occur, the CLI provides detailed information:
 
 ```
 Processing Complete - With Errors
-┌─────────────────────┬───────┐
-│ Metric              │ Count │
-├─────────────────────┼───────┤
-│ Files Processed     │    62 │
-│ Failed Files        │     3 │
-└─────────────────────┴───────┘
+┌───────────────────────┬───────┐
+│ Metric                │ Count │
+├───────────────────────┼───────┤
+│ Files Processed       │    62 │
+│ Sidecar Files Deleted │    23 │
+│ Failed Files          │     3 │
+└───────────────────────┴───────┘
 
 Failed Files (3):
 ┌───────────────┬──────────────────────────┬─────────────────────────┐

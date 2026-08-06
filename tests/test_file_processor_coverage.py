@@ -59,7 +59,13 @@ class TestScanAndOverlap(unittest.TestCase):
 
 
 class TestSidecarDeletionFailure(unittest.TestCase):
-    """_delete_sidecar_files failure recording and dry-run branch."""
+    """_delete_sidecar_files validation, dry-run, and failure recording.
+
+    Issue #57: a candidate is deleted only when its CONTENT validates as a
+    plist; an unreadable or non-plist candidate is kept and reported, and none
+    of these outcomes is counted in ``_processed_files``/``_failed_files``
+    (issue #31) -- a sidecar was never a processable file.
+    """
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -71,39 +77,83 @@ class TestSidecarDeletionFailure(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_dry_run_does_not_delete(self):
-        """A dry run logs but leaves the sidecar file on disk."""
-        sidecar = os.path.join(self.temp_dir, "IMG_0001.aae")
-        open(sidecar, "wb").close()
+    def _write_plist(self, name: str) -> str:
+        """Write a genuine (XML property list) sidecar and return its path."""
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "wb") as handle:
+            handle.write(b'<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
+        return path
+
+    def test_dry_run_does_not_delete_a_valid_sidecar(self):
+        """A dry run reports a validated sidecar as deleted, but never touches disk."""
+        sidecar = self._write_plist("IMG_0001.aae")
 
         self.processor._delete_sidecar_files([sidecar], dry_run=True)
 
         self.assertTrue(os.path.exists(sidecar))
         self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
+        self.assertEqual(self.processor._deleted_sidecars, [sidecar])
+        self.assertEqual(self.processor._skipped_sidecars, [])
 
-    def test_delete_failure_is_recorded(self):
-        """An os.remove failure is recorded in failed_files."""
-        with patch("os.remove", side_effect=OSError("locked")):
-            self.processor._delete_sidecar_files(["/tmp/ghost.aae"], dry_run=False)
+    def test_non_plist_content_is_kept_and_skipped_not_deleted(self):
+        """A zero-byte (or otherwise non-plist) ``.aae`` is kept, not deleted.
 
-        self.assertEqual(len(self.processor._failed_files), 1)
-        self.assertEqual(self.processor._failed_files[0][0], "delete_sidecar")
-
-    def test_delete_failure_stores_exception_object_not_str(self):
-        """The caught exception object is stored, not its stringified form.
-
-        Issue #39: ``str(exc)`` discards the exception's type before it ever
-        reaches ``failed_files``, so a render-time formatter can no longer
-        show which exception class produced the failure. Fails against the
-        old code, where ``self._failed_files[0][2]`` is the plain string
-        ``"locked"``, not an ``OSError`` instance.
+        Acceptance criterion: ``notes.aae`` whose content is not a plist must
+        not be deleted; it must be reported as skipped.
         """
-        with patch("os.remove", side_effect=OSError("locked")):
-            self.processor._delete_sidecar_files(["/tmp/ghost.aae"], dry_run=False)
+        sidecar = os.path.join(self.temp_dir, "notes.aae")
+        open(sidecar, "wb").close()  # zero bytes: matches neither magic prefix
 
-        error = self.processor._failed_files[0][2]
-        self.assertIsInstance(error, OSError)
-        self.assertEqual(str(error), "locked")
+        self.processor._delete_sidecar_files([sidecar], dry_run=False)
+
+        self.assertTrue(os.path.exists(sidecar), "non-plist .aae was deleted")
+        self.assertEqual(self.processor._deleted_sidecars, [])
+        self.assertEqual(self.processor._skipped_sidecars, [('not_plist', sidecar)])
+        # Not counted as processed or failed (issue #31): a sidecar is not a
+        # processable file to begin with.
+        self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
+
+    def test_unreadable_candidate_fails_closed(self):
+        """A candidate that cannot be read is kept, not treated as validated.
+
+        A missing/unreadable file (a permissions error, or a race between
+        scan and delete) must never be deleted on the strength of its
+        extension alone -- the whole point of validating content first.
+        """
+        ghost = "/tmp/ghost-does-not-exist.aae"
+        self.assertFalse(os.path.exists(ghost))
+
+        with patch("os.remove") as mock_remove:
+            self.processor._delete_sidecar_files([ghost], dry_run=False)
+            mock_remove.assert_not_called()
+
+        self.assertEqual(self.processor._deleted_sidecars, [])
+        # Distinct from 'not_plist' (issue #57 fix-round-1): content was
+        # never actually inspected, so "not a plist" would be a false claim.
+        self.assertEqual(self.processor._skipped_sidecars, [('unreadable', ghost)])
+        self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
+
+    def test_delete_failure_after_validation_is_recorded_as_skipped_not_failed(self):
+        """A validated sidecar whose os.remove itself fails is kept, not deleted.
+
+        Issue #31/#57: this outcome must not land in ``_failed_files`` -- a
+        sidecar is not a processable file, so counting it there would let
+        ``files_processed + files_failed`` exceed the number of files
+        actually seen as processable.
+        """
+        sidecar = self._write_plist("IMG_0002.aae")
+
+        with patch("os.remove", side_effect=OSError("locked")):
+            self.processor._delete_sidecar_files([sidecar], dry_run=False)
+
+        self.assertTrue(os.path.exists(sidecar), "sidecar removed despite os.remove failing")
+        self.assertEqual(self.processor._deleted_sidecars, [])
+        self.assertEqual(self.processor._skipped_sidecars, [('delete_failed', sidecar)])
+        self.assertEqual(self.processor._failed_files, [])
+        self.assertEqual(self.processor._processed_files, [])
 
 
 class TestMoveFailureRecording(unittest.TestCase):
@@ -512,6 +562,11 @@ class TestClearProcessingState(unittest.TestCase):
         processor._missing_exif_records.append(
             {"original_path": "a.jpg", "final_path": "backup/photos/a.jpg"}
         )
+        # Issue #57's two new accumulators: a reset that dropped either of
+        # these would let a second run on the same instance silently report
+        # the first run's sidecar deletions/skips.
+        processor._deleted_sidecars.append("export/a.aae")
+        processor._skipped_sidecars.append(("not_plist", "export/notes.aae"))
         processor.exif_handler.missing_exif_files.append("f")
         processor.heic_converter.converted_files.append(("a", "b"))
 
@@ -523,6 +578,8 @@ class TestClearProcessingState(unittest.TestCase):
         self.assertEqual(processor._conversion_log, [])
         self.assertEqual(processor._used_timestamps, {})
         self.assertEqual(processor._missing_exif_records, [])
+        self.assertEqual(processor._deleted_sidecars, [])
+        self.assertEqual(processor._skipped_sidecars, [])
         self.assertEqual(processor.exif_handler.missing_exif_files, [])
         self.assertEqual(processor.heic_converter.converted_files, [])
 

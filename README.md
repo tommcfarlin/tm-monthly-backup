@@ -10,7 +10,7 @@ A robust Python CLI utility for automating monthly photo organization from Apple
 - **Video Metadata Extraction**: Extracts creation dates from video file metadata (MOV, MP4, etc.)
 - **AI Content Detection**: Automatically identifies and separates AI-generated images and heavily edited photos
 - **Screenshot Recognition**: Detects iOS screenshots with pattern matching
-- **Automatic Cleanup**: Removes Apple sidecar (.aae) files
+- **Automatic Cleanup**: Removes Apple sidecar (.aae) files once their content validates as a genuine plist
 - **Duplicate Handling**: Intelligently resolves timestamp conflicts
 - **Rich CLI Experience**: Beautiful progress bars, colored output, and detailed summaries
 - **Dry-Run Mode**: Safe testing without file modifications
@@ -131,7 +131,7 @@ Identifies iOS and macOS screenshots:
 ## File Processing
 
 - **HEIC files**: Converted to JPEG (default quality 98, configurable with `--jpeg-quality`; lossy at any setting) with EXIF preservation; the original HEIC is deleted after a verified conversion
-- **Apple sidecar files (.aae)**: Deleted automatically
+- **Apple sidecar files (.aae)**: Deleted automatically once their content validates as a genuine plist; a look-alike that merely shares the extension is kept and reported
 - **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS)
 - **Video metadata**: Extracts creation timestamps from video file headers
 - **Duplicate handling**: Timestamp conflicts resolved by incrementing seconds

@@ -277,7 +277,13 @@ class TestLandingPaths(unittest.TestCase):
         )
         aae_path = self._export_path("IMG_0004.aae")
         with open(aae_path, "wb") as handle:
-            handle.write(b"<plist>sidecar</plist>")
+            # Genuine sidecars are XML property lists (issue #57): real
+            # content, not just the extension, is what qualifies a candidate
+            # for deletion now.
+            handle.write(
+                b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                b'<plist version="1.0"><dict/></plist>'
+            )
         unknown_path = self._export_path("notes.xyz")
         with open(unknown_path, "wb") as handle:
             handle.write(b"unknown blob")

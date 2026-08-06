@@ -212,7 +212,10 @@ class TestProcessWithProgress(unittest.TestCase):
             date_time_original="2024:01:15 14:30:45",
         )
         sidecar = os.path.join(self.export, "pic.aae")
-        open(sidecar, "wb").close()
+        # A genuine (XML property list) sidecar (issue #57): content, not
+        # just the extension, is what makes a candidate eligible for deletion.
+        with open(sidecar, "wb") as handle:
+            handle.write(b'<?xml version="1.0"?><plist version="1.0"><dict/></plist>')
         cli = _recording_cli(self.export, self.backup)
 
         with patch("src.cli_interface.Confirm.ask", return_value=True):
@@ -221,6 +224,7 @@ class TestProcessWithProgress(unittest.TestCase):
         self.assertEqual(result.get("status"), "completed")
         self.assertFalse(os.path.exists(sidecar))  # sidecar deleted
         self.assertTrue(os.path.isdir(os.path.join(self.backup, "photos")))
+        self.assertEqual(result.get("sidecars_deleted"), 1)
 
 
 class TestDisplayResults(unittest.TestCase):

@@ -308,7 +308,7 @@ class CLIInterface:
         table.add_row("Photos", str(stats['photos']), "JPEG, PNG, HEIC, etc.")
         table.add_row("Videos", str(stats['videos']), "MOV, MP4, M4V, etc.")
         table.add_row("Screenshots", str(stats['screenshots']), "PNG files with screenshot patterns")
-        table.add_row("Sidecar Files", str(stats['sidecar']), "Apple .aae files (will be deleted)")
+        table.add_row("Sidecar Files", str(stats['sidecar']), "Apple .aae files (validated, then deleted)")
 
         if stats['unknown'] > 0:
             table.add_row("Unknown", str(stats['unknown']), "Unrecognized file types", style="yellow")
@@ -382,6 +382,7 @@ class CLIInterface:
         success_count = results.get('files_processed', 0)
         failure_count = results.get('files_failed', 0)
         quarantine_count = results.get('files_quarantined', 0)
+        sidecars_skipped = results.get('sidecars_skipped', 0)
 
         if dry_run:
             title = "Dry Run Results"
@@ -395,6 +396,20 @@ class CLIInterface:
             # in backup/corrupt/ to review -- so the banner says so (issue #58).
             title = "Processing Complete - Files Quarantined"
             title_style = "bold yellow"
+        elif sidecars_skipped > 0:
+            # No file errored and nothing was quarantined, but at least one
+            # .aae candidate was kept rather than deleted -- a delete that
+            # genuinely failed after validation, a candidate that could not
+            # even be read, one that did not validate as a plist, or (the
+            # #57 fix-round-1 critical) every processable file this run
+            # attempted having failed outright. A real OSError during unlink,
+            # or edit history quietly surviving for an undisclosed reason,
+            # must never be reported as an unqualified "Success!" -- exactly
+            # the dishonest-reporting class this project has spent two
+            # milestones eliminating (issue #31 and friends). The detail
+            # table below (display_skipped_sidecars) names each one and why.
+            title = "Processing Complete - Sidecars Kept"
+            title_style = "bold yellow"
         else:
             title = "Processing Complete - Success!"
             title_style = "bold green"
@@ -407,6 +422,17 @@ class CLIInterface:
         table.add_row("Files Processed", str(success_count))
         table.add_row("HEIC Conversions", str(results.get('heic_conversions', 0)))
         table.add_row("Missing EXIF Files", str(results.get('missing_exif_files', 0)))
+        # Shown unconditionally, in both dry-run and real runs (issue #57):
+        # the count a dry run reports here must equal what a real run on the
+        # same input reports (#10 parity) -- always rendering the row, rather
+        # than only when non-zero, makes that comparison visible every time,
+        # not just when there happen to be sidecars to delete.
+        table.add_row("Sidecar Files Deleted", str(results.get('sidecars_deleted', 0)))
+
+        if sidecars_skipped > 0:
+            table.add_row(
+                "Sidecar Files Kept", str(sidecars_skipped), style="yellow"
+            )
 
         if quarantine_count > 0:
             table.add_row(
@@ -450,6 +476,11 @@ class CLIInterface:
         # Display failures if any
         if failure_count > 0:
             self.display_failures(results.get('failed_files', []))
+
+        # Display kept (not deleted) sidecar candidates if any (issue #57).
+        skipped_sidecars = results.get('skipped_sidecar_files', [])
+        if skipped_sidecars:
+            self.display_skipped_sidecars(skipped_sidecars)
 
         # Display missing EXIF files if any
         missing_exif = results.get('missing_exif_list', [])
@@ -500,6 +531,52 @@ class CLIInterface:
             )
 
         self.console.print(failure_table)
+
+    def display_skipped_sidecars(self, skipped_sidecars: List):
+        """
+        Display Apple-sidecar (``.aae``) candidates kept rather than deleted.
+
+        A candidate matches the ``.aae`` extension but was not unlinked --
+        its content did not validate as a plist, it could not be read at all
+        (a distinct reason from "not a plist": that content was never
+        actually inspected), a validated sidecar's own deletion failed, or
+        every processable file this run attempted failed outright, so
+        nothing at all was deleted this run. Either way the file is still
+        sitting in ``export/`` and the user should know why it was not
+        treated as one of their edit-history sidecars (issue #57).
+
+        Args:
+            skipped_sidecars: List of ``(reason, file_path)`` tuples, where
+                ``reason`` is ``'not_plist'``, ``'unreadable'``,
+                ``'delete_failed'``, or ``'run_archived_nothing'``.
+        """
+        if not skipped_sidecars:
+            return
+
+        self.console.print(
+            f"\n[bold yellow]Sidecar Files Kept ({len(skipped_sidecars)}):[/bold yellow]"
+        )
+
+        reason_labels = {
+            'not_plist': "Not a plist despite .aae extension",
+            'unreadable': "Could not be read (content never checked)",
+            'delete_failed': "Deletion failed",
+            'run_archived_nothing': "No files were successfully archived this run",
+        }
+
+        skipped_table = Table(show_header=True, header_style="bold yellow")
+        skipped_table.add_column("Reason", style="yellow")
+        skipped_table.add_column("File", style="cyan")
+
+        for reason, file_path in skipped_sidecars:
+            # Untrusted filename -- escaped and control-stripped before it
+            # becomes a table cell, matching every other per-file row (#9).
+            skipped_table.add_row(
+                safe_markup(reason_labels.get(reason, reason)),
+                safe_markup(file_path),
+            )
+
+        self.console.print(skipped_table)
 
     def display_missing_exif_warning(self, missing_files: List[Dict[str, Optional[str]]]):
         """
