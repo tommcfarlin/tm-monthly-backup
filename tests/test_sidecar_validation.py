@@ -186,7 +186,9 @@ class TestContentValidationBeforeDeletion(unittest.TestCase):
         self.assertEqual(results["sidecars_deleted"], 0)
         self.assertEqual(results["sidecars_skipped"], 1)
         reason, path = results["skipped_sidecar_files"][0]
-        self.assertEqual(reason, "not_plist")
+        # Distinct from 'not_plist' (issue #57 fix-round-1): this candidate's
+        # content was never actually inspected, only its openability failed.
+        self.assertEqual(reason, "unreadable")
         self.assertEqual(path, sidecar)
 
 
@@ -206,33 +208,53 @@ class TestDeletionRunsAfterCategoryProcessing(unittest.TestCase):
     def test_delete_sidecar_files_called_after_process_category(self):
         """Call order: every ``_process_category`` call precedes the single
         ``_delete_sidecar_files`` call, for both a real and a dry run.
+
+        Runs against two independent export/backup trees (one per flag) so
+        the real run's actual deletion cannot interfere with the dry run's
+        assertions, and vice versa.
         """
-        make_exif_jpeg(
-            os.path.join(self.export_dir, "IMG_2000.jpg"),
-            date_time_original="2024:05:05 05:05:05",
-        )
-        _write(os.path.join(self.export_dir, "IMG_2000.aae"), XML_PLIST)
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                export_dir = os.path.join(
+                    self.temp_dir, f"export_{dry_run}"
+                )
+                backup_dir = os.path.join(
+                    self.temp_dir, f"backup_{dry_run}"
+                )
+                os.makedirs(export_dir, exist_ok=True)
+                make_exif_jpeg(
+                    os.path.join(export_dir, "IMG_2000.jpg"),
+                    date_time_original="2024:05:05 05:05:05",
+                )
+                _write(os.path.join(export_dir, "IMG_2000.aae"), XML_PLIST)
 
-        order = []
-        real_process_category = self.processor._process_category
-        real_delete = self.processor._delete_sidecar_files
+                processor = FileProcessor(export_dir, backup_dir)
+                order = []
+                real_process_category = processor._process_category
+                real_delete = processor._delete_sidecar_files
 
-        def recording_process_category(*args, **kwargs):
-            order.append("process_category")
-            return real_process_category(*args, **kwargs)
+                def recording_process_category(*args, **kwargs):
+                    order.append("process_category")
+                    return real_process_category(*args, **kwargs)
 
-        def recording_delete(*args, **kwargs):
-            order.append("delete_sidecar_files")
-            return real_delete(*args, **kwargs)
+                def recording_delete(*args, **kwargs):
+                    order.append("delete_sidecar_files")
+                    return real_delete(*args, **kwargs)
 
-        with patch.object(
-            self.processor, "_process_category", side_effect=recording_process_category
-        ), patch.object(
-            self.processor, "_delete_sidecar_files", side_effect=recording_delete
-        ):
-            self.processor.process_all_files(dry_run=False)
+                with patch.object(
+                    processor,
+                    "_process_category",
+                    side_effect=recording_process_category,
+                ), patch.object(
+                    processor,
+                    "_delete_sidecar_files",
+                    side_effect=recording_delete,
+                ):
+                    processor.process_all_files(dry_run=dry_run)
 
-        self.assertEqual(order, ["process_category", "delete_sidecar_files"])
+                self.assertEqual(
+                    order, ["process_category", "delete_sidecar_files"]
+                )
 
     def test_sidecar_still_present_while_photo_is_being_placed(self):
         """The sidecar must still exist on disk while the photo is mid-move --
@@ -334,13 +356,28 @@ class TestDryRunRealRunParity(unittest.TestCase):
 class TestFailedRunLeavesSidecarsIntact(unittest.TestCase):
     """A run that fails to process any photo leaves the .aae files intact.
 
-    Deferring deletion to after category processing (issue #57) means a
-    failure severe enough to prevent ANY photo from being processed -- i.e.
-    the run never even reaches the per-file processing loop -- also prevents
-    the deferred sidecar deletion from ever running, since it sits after that
-    loop in ``process_all_files``. Under the OLD ordering (delete first),
-    the same failure would still have destroyed the sidecar before the
-    failure ever occurred.
+    This is a RUN-LEVEL outcome, not a mechanism -- fix-round-1 ruling: the
+    acceptance criterion is written about an outcome ("a run that fails to
+    process any photo"), not about how the failure happens, and deferring the
+    delete call to after the per-category loop is NOT sufficient by itself:
+    ``_process_category``'s own per-file ``except Exception`` (issue #39's
+    sanctioned broad catch) guarantees that loop *completes* even when every
+    single processable file failed -- a full disk partway through a real run
+    (``shutil.move`` raising ``OSError(ENOSPC)``) is the ordinary way this
+    happens, and it does not stop the loop from returning normally. So
+    ``process_all_files`` additionally gates the deferred delete itself: it
+    computes attempted-minus-failed ("archived") and, when there were
+    processable files but none of them archived successfully, keeps every
+    sidecar candidate rather than calling ``_delete_sidecar_files`` at all
+    (recorded under the ``'run_archived_nothing'`` reason).
+
+    ``test_target_directory_creation_failure_leaves_sidecar_untouched`` is
+    kept as a second, independent way to reach the same outcome: a failure so
+    severe the per-category loop never even starts (so the deferred delete
+    call is never reached at all, regardless of the run-archived-nothing
+    gate). ``test_every_file_fails_during_processing_leaves_sidecar_intact``
+    is the one the criterion itself actually calls for -- the loop runs,
+    reaches, and completes, and the gate is what keeps the sidecar safe.
     """
 
     def setUp(self):
@@ -382,6 +419,75 @@ class TestFailedRunLeavesSidecarsIntact(unittest.TestCase):
         # The photo itself is untouched too -- nothing landed in backup/.
         self.assertFalse(os.path.isdir(os.path.join(self.backup_dir, "photos")))
 
+    def test_every_file_fails_during_processing_leaves_sidecar_intact(self):
+        """The reviewer's own probe: a full disk (ENOSPC) makes every single
+        photo fail INSIDE the per-category loop -- the loop still completes
+        normally (issue #39's per-file catch-all) -- and the run must still
+        leave every validated sidecar candidate on disk, not delete it once
+        the loop returns.
+
+        This is the acceptance-box-5 scenario per se: the loop runs and
+        completes, files_failed == files attempted, files_processed == 0,
+        and the .aae must survive. Fails against the code from before this
+        fix round (confirmed by stashing this round's src/ changes): the old
+        code deleted the (valid) sidecar unconditionally once the loop
+        returned, regardless of how many files inside it failed.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "IMG_1.jpg"),
+            date_time_original="2024:01:01 01:01:01",
+        )
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "IMG_2.jpg"),
+            date_time_original="2024:01:02 02:02:02",
+        )
+        sidecar = _write(
+            os.path.join(self.export_dir, "IMG_1.aae"), XML_PLIST
+        )
+
+        with patch(
+            "src.file_processor.shutil.move",
+            side_effect=OSError(28, "No space left on device"),
+        ):
+            results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 0)
+        self.assertEqual(results["files_failed"], 2)
+        self.assertEqual(
+            results["sidecars_deleted"], 0,
+            "a sidecar was deleted even though the run archived nothing",
+        )
+        self.assertTrue(
+            os.path.exists(sidecar),
+            "sidecar was destroyed on a run that archived zero photos",
+        )
+        self.assertEqual(
+            sorted(os.listdir(self.export_dir)),
+            ["IMG_1.aae", "IMG_1.jpg", "IMG_2.jpg"],
+            "export/ should still hold every original file untouched",
+        )
+        reason, path = results["skipped_sidecar_files"][0]
+        self.assertEqual(reason, "run_archived_nothing")
+        self.assertEqual(path, sidecar)
+
+    def test_run_archived_nothing_gate_does_not_fire_for_an_all_sidecar_batch(self):
+        """The gate must not fire merely because there were zero PHOTOS --
+        only when there were processable files that were ATTEMPTED and all
+        of them failed. An export containing only sidecars (no processable
+        file at all) is a distinct, ordinary case that must still delete a
+        valid sidecar normally.
+        """
+        sidecar = _write(
+            os.path.join(self.export_dir, "only.aae"), XML_PLIST
+        )
+
+        results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 0)
+        self.assertEqual(results["files_failed"], 0)
+        self.assertEqual(results["sidecars_deleted"], 1)
+        self.assertFalse(os.path.exists(sidecar))
+
 
 class TestSkippedSidecarDisplay(unittest.TestCase):
     """display_results renders the new rows, escaping untrusted filenames."""
@@ -416,6 +522,46 @@ class TestSkippedSidecarDisplay(unittest.TestCase):
         rendered = capture.get()
         self.assertIn("Sidecar Files Deleted", rendered)
         self.assertIn("3", rendered)
+
+    def test_kept_sidecar_demotes_the_success_banner(self):
+        """A run with zero failures/quarantines but a kept sidecar must not
+        report an unqualified "Success!" -- fix-round-1 concern: a genuine
+        delete failure (or any other kept-sidecar reason) was previously
+        invisible to the banner, since it never touched ``_failed_files``.
+        """
+        results = {
+            "files_processed": 1,
+            "files_failed": 0,
+            "files_quarantined": 0,
+            "sidecars_deleted": 0,
+            "sidecars_skipped": 1,
+            "skipped_sidecar_files": [("delete_failed", "export/photo.aae")],
+            "status": "completed",
+        }
+
+        with self.cli.console.capture() as capture:
+            self.cli.display_results(results, dry_run=False)
+        rendered = capture.get()
+
+        self.assertNotIn("Success!", rendered)
+        self.assertIn("Sidecars Kept", rendered)
+
+    def test_no_kept_sidecar_still_reports_plain_success(self):
+        """The banner is unaffected when nothing was kept -- no false demotion."""
+        results = {
+            "files_processed": 1,
+            "files_failed": 0,
+            "files_quarantined": 0,
+            "sidecars_deleted": 1,
+            "sidecars_skipped": 0,
+            "status": "completed",
+        }
+
+        with self.cli.console.capture() as capture:
+            self.cli.display_results(results, dry_run=False)
+        rendered = capture.get()
+
+        self.assertIn("Success!", rendered)
 
     def test_crafted_sidecar_filename_does_not_abort_rendering(self):
         """A malicious filename in the skipped-sidecar list is escaped, not

@@ -130,7 +130,9 @@ class TestSidecarDeletionFailure(unittest.TestCase):
             mock_remove.assert_not_called()
 
         self.assertEqual(self.processor._deleted_sidecars, [])
-        self.assertEqual(self.processor._skipped_sidecars, [('not_plist', ghost)])
+        # Distinct from 'not_plist' (issue #57 fix-round-1): content was
+        # never actually inspected, so "not a plist" would be a false claim.
+        self.assertEqual(self.processor._skipped_sidecars, [('unreadable', ghost)])
         self.assertEqual(self.processor._failed_files, [])
         self.assertEqual(self.processor._processed_files, [])
 
@@ -560,6 +562,11 @@ class TestClearProcessingState(unittest.TestCase):
         processor._missing_exif_records.append(
             {"original_path": "a.jpg", "final_path": "backup/photos/a.jpg"}
         )
+        # Issue #57's two new accumulators: a reset that dropped either of
+        # these would let a second run on the same instance silently report
+        # the first run's sidecar deletions/skips.
+        processor._deleted_sidecars.append("export/a.aae")
+        processor._skipped_sidecars.append(("not_plist", "export/notes.aae"))
         processor.exif_handler.missing_exif_files.append("f")
         processor.heic_converter.converted_files.append(("a", "b"))
 
@@ -571,6 +578,8 @@ class TestClearProcessingState(unittest.TestCase):
         self.assertEqual(processor._conversion_log, [])
         self.assertEqual(processor._used_timestamps, {})
         self.assertEqual(processor._missing_exif_records, [])
+        self.assertEqual(processor._deleted_sidecars, [])
+        self.assertEqual(processor._skipped_sidecars, [])
         self.assertEqual(processor.exif_handler.missing_exif_files, [])
         self.assertEqual(processor.heic_converter.converted_files, [])
 

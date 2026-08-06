@@ -382,6 +382,7 @@ class CLIInterface:
         success_count = results.get('files_processed', 0)
         failure_count = results.get('files_failed', 0)
         quarantine_count = results.get('files_quarantined', 0)
+        sidecars_skipped = results.get('sidecars_skipped', 0)
 
         if dry_run:
             title = "Dry Run Results"
@@ -394,6 +395,20 @@ class CLIInterface:
             # archived. That is not an unqualified success -- the user has files
             # in backup/corrupt/ to review -- so the banner says so (issue #58).
             title = "Processing Complete - Files Quarantined"
+            title_style = "bold yellow"
+        elif sidecars_skipped > 0:
+            # No file errored and nothing was quarantined, but at least one
+            # .aae candidate was kept rather than deleted -- a delete that
+            # genuinely failed after validation, a candidate that could not
+            # even be read, one that did not validate as a plist, or (the
+            # #57 fix-round-1 critical) every processable file this run
+            # attempted having failed outright. A real OSError during unlink,
+            # or edit history quietly surviving for an undisclosed reason,
+            # must never be reported as an unqualified "Success!" -- exactly
+            # the dishonest-reporting class this project has spent two
+            # milestones eliminating (issue #31 and friends). The detail
+            # table below (display_skipped_sidecars) names each one and why.
+            title = "Processing Complete - Sidecars Kept"
             title_style = "bold yellow"
         else:
             title = "Processing Complete - Success!"
@@ -414,7 +429,6 @@ class CLIInterface:
         # not just when there happen to be sidecars to delete.
         table.add_row("Sidecar Files Deleted", str(results.get('sidecars_deleted', 0)))
 
-        sidecars_skipped = results.get('sidecars_skipped', 0)
         if sidecars_skipped > 0:
             table.add_row(
                 "Sidecar Files Kept", str(sidecars_skipped), style="yellow"
@@ -523,16 +537,18 @@ class CLIInterface:
         Display Apple-sidecar (``.aae``) candidates kept rather than deleted.
 
         A candidate matches the ``.aae`` extension but was not unlinked --
-        either its content did not validate as a plist (including when it
-        could not be read at all; :meth:`FileProcessor._looks_like_apple_sidecar`
-        fails closed), or a validated sidecar's own deletion failed. Either
-        way the file is still sitting in ``export/`` and the user should know
-        why it was not treated as one of their edit-history sidecars (issue
-        #57).
+        its content did not validate as a plist, it could not be read at all
+        (a distinct reason from "not a plist": that content was never
+        actually inspected), a validated sidecar's own deletion failed, or
+        every processable file this run attempted failed outright, so
+        nothing at all was deleted this run. Either way the file is still
+        sitting in ``export/`` and the user should know why it was not
+        treated as one of their edit-history sidecars (issue #57).
 
         Args:
             skipped_sidecars: List of ``(reason, file_path)`` tuples, where
-                ``reason`` is ``'not_plist'`` or ``'delete_failed'``.
+                ``reason`` is ``'not_plist'``, ``'unreadable'``,
+                ``'delete_failed'``, or ``'run_archived_nothing'``.
         """
         if not skipped_sidecars:
             return
@@ -543,7 +559,9 @@ class CLIInterface:
 
         reason_labels = {
             'not_plist': "Not a plist despite .aae extension",
+            'unreadable': "Could not be read (content never checked)",
             'delete_failed': "Deletion failed",
+            'run_archived_nothing': "No files were successfully archived this run",
         }
 
         skipped_table = Table(show_header=True, header_style="bold yellow")

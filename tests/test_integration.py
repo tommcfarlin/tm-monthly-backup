@@ -766,13 +766,16 @@ class TestWorkflowIntegration(unittest.TestCase):
     def test_processing_state_cleanup(self):
         """clear_processing_state empties every piece of state the method owns.
 
-        A real run first populates all seven state containers -- ``_processed_files``
-        and ``_used_timestamps`` (a moved photo), ``_conversion_log`` and the HEIC
-        converter's ``converted_files`` (a real HEIC), ``exif_handler``'s
-        ``missing_exif_files`` (a no-EXIF file), ``_failed_files`` (a forced move
-        failure), and the categorizer's per-category lists. Each is asserted
+        A real run first populates all nine state containers --
+        ``_processed_files`` and ``_used_timestamps`` (a moved photo),
+        ``_conversion_log`` and the HEIC converter's ``converted_files`` (a
+        real HEIC), ``exif_handler``'s ``missing_exif_files`` (a no-EXIF
+        file), ``_failed_files`` (a forced move failure), the categorizer's
+        per-category lists, and issue #57's ``_deleted_sidecars`` (a genuine
+        sidecar) / ``_skipped_sidecars`` (a fake one). Each is asserted
         NON-empty before clearing and empty afterward, so ``clear_processing_state``
-        degrading to a no-op fails this test (it never inspected any of these
+        degrading to a no-op -- or simply forgetting one of the two newest
+        containers -- fails this test (it never inspected any of these
         before).
         """
         self.create_test_image_with_exif("photo.jpg", "2024:01:15 14:30:45")
@@ -781,6 +784,8 @@ class TestWorkflowIntegration(unittest.TestCase):
             date_time_original="2022:03:04 05:06:07",
         )
         self.create_test_image_without_exif("bare.jpg")
+        self.create_test_sidecar_file("photo.aae")
+        self.create_test_file("notes.aae")  # plain text: not a plist
 
         real_move = shutil.move
 
@@ -801,6 +806,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertTrue(self.processor._conversion_log)
         self.assertTrue(self.processor.exif_handler.missing_exif_files)
         self.assertTrue(self.processor.heic_converter.converted_files)
+        self.assertTrue(self.processor._deleted_sidecars)
+        self.assertTrue(self.processor._skipped_sidecars)
         self.assertTrue(
             any(files for files in self.processor.categorizer.categorized_files.values())
         )
@@ -814,6 +821,8 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(self.processor._conversion_log, [])
         self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
         self.assertEqual(self.processor.heic_converter.converted_files, [])
+        self.assertEqual(self.processor._deleted_sidecars, [])
+        self.assertEqual(self.processor._skipped_sidecars, [])
         for category, files in self.processor.categorizer.categorized_files.items():
             self.assertEqual(files, [], f"{category} not cleared")
 

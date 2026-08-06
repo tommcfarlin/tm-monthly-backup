@@ -337,14 +337,18 @@ class FileProcessor:
         # Apple sidecar (.aae) bookkeeping (issue #57). A candidate is either
         # deleted (its content was validated against SIDECAR_MAGIC and, on a
         # real run, os.remove succeeded) or kept -- recorded here as
-        # (reason, path) with reason 'not_plist' (content did not match the
-        # magic bytes, INCLUDING the fail-closed case where the candidate
-        # could not even be read) or 'delete_failed' (a validated sidecar's
-        # os.remove itself raised). Neither list feeds _processed_files or
-        # _failed_files: a sidecar was never a processable file to begin with
-        # (it is excluded from FileCategorizer.get_processable_files), so
-        # counting either outcome there would inflate files_processed or
-        # files_failed past files_seen (issue #31).
+        # (reason, path) with reason 'not_plist' (content was read but did
+        # not match the magic bytes), 'unreadable' (the file could not be
+        # opened/read at all -- a distinct reason from 'not_plist' because
+        # its content was never actually inspected), 'delete_failed' (a
+        # validated sidecar's own os.remove raised), or
+        # 'run_archived_nothing' (every processable file this run attempted
+        # failed, so nothing is deleted at all -- see process_all_files).
+        # Neither list feeds _processed_files or _failed_files: a sidecar was
+        # never a processable file to begin with (it is excluded from
+        # FileCategorizer.get_processable_files), so counting either outcome
+        # there would inflate files_processed or files_failed past
+        # files_seen (issue #31).
         self._deleted_sidecars: List[str] = []
         self._skipped_sidecars: List[Tuple[str, str]] = []
 
@@ -533,7 +537,42 @@ class FileProcessor:
         # failed -- see the reordering note on this method's docstring, and
         # _delete_sidecar_files below for the content validation itself
         # (issue #57).
-        self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
+        #
+        # Completing the loop above is NOT proof anything actually landed in
+        # backup/: _process_category's own per-file try/except (issue #39's
+        # sanctioned broad catch) guarantees the loop completes even when
+        # EVERY single processable file failed -- a full disk partway
+        # through a real run is the ordinary way this happens. Deferring the
+        # delete call is worthless if it still fires unconditionally once
+        # the loop returns, so a run that archived nothing must not delete
+        # anything either; the survivors are recorded so the existing Kept
+        # table explains why they are still there.
+        #
+        # "Archived" is computed as attempted-minus-failed, NOT by reading
+        # len(self._processed_files) directly: a dry run's branch of
+        # _process_single_file returns before ever appending to
+        # _processed_files (it only plans, it moves nothing), so a direct
+        # read would make every dry run look like "nothing archived" and
+        # report sidecars_deleted=0 while a real run over the same input
+        # reports N -- breaking the #10 dry-run/real-run parity this fix
+        # itself is required to preserve. attempted-minus-failed instead
+        # counts a quarantined file (issue #58; genuinely undecodable, but
+        # its bytes DID land safely in backup/corrupt/, in both dry and real
+        # runs) as "archived", which is correct: nothing was lost for it.
+        attempted = sum(len(files) for files in processable_files.values())
+        archived = attempted - len(self._failed_files)
+        if attempted > 0 and archived <= 0:
+            logger.warning(
+                "Every processable file failed (%s of %s); keeping all %s "
+                "sidecar candidate(s) rather than delete a user's edit "
+                "history for photos that never safely landed in backup/",
+                len(self._failed_files), attempted,
+                len(categorized[FileCategory.SIDECAR]),
+            )
+            for file_path in categorized[FileCategory.SIDECAR]:
+                self._skipped_sidecars.append(('run_archived_nothing', file_path))
+        else:
+            self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
 
         # Generate summary
         return self._generate_summary()
@@ -590,7 +629,7 @@ class FileProcessor:
 
         return files
 
-    def _looks_like_apple_sidecar(self, file_path: str) -> bool:
+    def _looks_like_apple_sidecar(self, file_path: str) -> Optional[bool]:
         """
         Report whether ``file_path``'s CONTENT looks like an Apple sidecar.
 
@@ -604,17 +643,25 @@ class FileProcessor:
         genuine sidecar from an unrelated file that merely shares the
         extension, without reading (or trusting) the rest of the file.
 
-        Fails CLOSED: a file that cannot even be opened (permission error, or
-        it vanished in a race between scan and delete) returns ``False`` --
-        never treated as validated -- so :meth:`_delete_sidecar_files` keeps
-        it rather than risk deleting something that was never confirmed safe.
+        Fails CLOSED on ``OSError`` -- covering a plain permission error, a
+        scan/delete race where the file vanished, AND the non-obvious
+        ``IsADirectoryError`` case (a directory happens to be named
+        ``dir.aae``; ``open(..., 'rb')`` raises rather than silently reading
+        nothing) -- by returning ``None`` rather than ``False``. The two are
+        deliberately distinct return values: ``False`` means the content WAS
+        read and did not match; ``None`` means the content was never actually
+        inspected at all, because the file could not be opened. Collapsing
+        both into ``False`` would let :meth:`_delete_sidecar_files` tell a
+        user their perfectly good, unreadable sidecar "was not a plist
+        despite the .aae extension" -- a claim about content nobody checked.
 
         Args:
             file_path: Candidate sidecar path (matched the ``.aae`` extension).
 
         Returns:
-            True if the file's leading bytes match a known plist magic
-            prefix; False if they do not, or the file could not be read.
+            ``True`` if the file's leading bytes match a known plist magic
+            prefix; ``False`` if the file was read but they do not match;
+            ``None`` if the file could not be opened/read at all.
         """
         try:
             with open(file_path, 'rb') as handle:
@@ -623,7 +670,7 @@ class FileProcessor:
             logger.warning(
                 "Could not read candidate sidecar %s, keeping: %s", file_path, error
             )
-            return False
+            return None
         return head.startswith(self.SIDECAR_MAGIC)
 
     def _delete_sidecar_files(self, sidecar_files: List[str], dry_run: bool):
@@ -633,12 +680,15 @@ class FileProcessor:
         Called only after every processable file has been filed or recorded as
         failed (see the reordering note on :meth:`process_all_files`), and only
         for a candidate whose content actually validates as a plist via
-        :meth:`_looks_like_apple_sidecar`. A candidate that fails validation --
-        because its content is not a plist, OR because it could not be read at
-        all (fail-closed) -- is left on disk untouched and recorded in
-        ``_skipped_sidecars`` as ``('not_plist', file_path)`` rather than
-        deleted. A validated sidecar whose ``os.remove`` itself fails (a race,
-        a permissions change) is likewise left in place and recorded as
+        :meth:`_looks_like_apple_sidecar`, which returns one of three states.
+        Content read but not matching is recorded in ``_skipped_sidecars`` as
+        ``('not_plist', file_path)``; content that could not be read AT ALL
+        (permission error, directory named ``*.aae``, a scan/delete race) is
+        recorded separately as ``('unreadable', file_path)`` -- distinct
+        reasons, because "not a plist" is a claim about content that was
+        never actually inspected in the second case. Both are left on disk
+        untouched. A validated sidecar whose ``os.remove`` itself fails (a
+        race, a permissions change) is likewise left in place and recorded as
         ``('delete_failed', file_path)``.
 
         Neither outcome is recorded in ``_processed_files`` or
@@ -664,7 +714,14 @@ class FileProcessor:
         logger.info("Validating %s candidate sidecar files for deletion", len(sidecar_files))
 
         for file_path in sidecar_files:
-            if not self._looks_like_apple_sidecar(file_path):
+            validated = self._looks_like_apple_sidecar(file_path)
+            if validated is None:
+                # _looks_like_apple_sidecar already logged WHY it could not
+                # be read; this reason is distinct from 'not_plist' below --
+                # its content was never actually inspected.
+                self._skipped_sidecars.append(('unreadable', file_path))
+                continue
+            if not validated:
                 logger.warning(
                     "Not an Apple sidecar despite the .aae extension, keeping: %s",
                     file_path,
@@ -1698,7 +1755,8 @@ class FileProcessor:
             # a sidecar was never a processable file (issue #31/#57).
             'sidecars_deleted': len(self._deleted_sidecars),
             # Candidates that matched the .aae extension but were kept rather
-            # than deleted -- see _delete_sidecar_files for the two reasons.
+            # than deleted -- see the __init__ comment on _skipped_sidecars
+            # for the four reasons.
             'sidecars_skipped': len(self._skipped_sidecars),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
