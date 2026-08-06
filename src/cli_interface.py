@@ -383,6 +383,7 @@ class CLIInterface:
         failure_count = results.get('files_failed', 0)
         quarantine_count = results.get('files_quarantined', 0)
         sidecars_skipped = results.get('sidecars_skipped', 0)
+        skipped_count = results.get('files_skipped', 0)
 
         if dry_run:
             title = "Dry Run Results"
@@ -395,6 +396,17 @@ class CLIInterface:
             # archived. That is not an unqualified success -- the user has files
             # in backup/corrupt/ to review -- so the banner says so (issue #58).
             title = "Processing Complete - Files Quarantined"
+            title_style = "bold yellow"
+        elif skipped_count > 0:
+            # A hidden or known-junk file (issue #30) never left export/ at
+            # all -- deliberately, by policy, not because anything errored --
+            # but "Success!" still overclaims: a file remains in export/ that
+            # the user was never told about anywhere before this banner. Kept
+            # as its own title/reason (see the __init__ comment on
+            # _skipped_files) rather than folded into "Sidecars Kept" below:
+            # a skipped file was never even categorized, let alone considered
+            # for deletion, so the two answer different questions.
+            title = "Processing Complete - Files Skipped"
             title_style = "bold yellow"
         elif sidecars_skipped > 0:
             # No file errored and nothing was quarantined, but at least one
@@ -432,6 +444,11 @@ class CLIInterface:
         if sidecars_skipped > 0:
             table.add_row(
                 "Sidecar Files Kept", str(sidecars_skipped), style="yellow"
+            )
+
+        if skipped_count > 0:
+            table.add_row(
+                "Files Skipped", str(skipped_count), style="yellow"
             )
 
         if quarantine_count > 0:
@@ -481,6 +498,12 @@ class CLIInterface:
         skipped_sidecars = results.get('skipped_sidecar_files', [])
         if skipped_sidecars:
             self.display_skipped_sidecars(skipped_sidecars)
+
+        # Display hidden/junk files the scan declined to collect, if any
+        # (issue #30).
+        skipped_files = results.get('skipped_files', [])
+        if skipped_files:
+            self.display_skipped_files(skipped_files)
 
         # Display missing EXIF files if any
         missing_exif = results.get('missing_exif_list', [])
@@ -569,6 +592,51 @@ class CLIInterface:
         skipped_table.add_column("File", style="cyan")
 
         for reason, file_path in skipped_sidecars:
+            # Untrusted filename -- escaped and control-stripped before it
+            # becomes a table cell, matching every other per-file row (#9).
+            skipped_table.add_row(
+                safe_markup(reason_labels.get(reason, reason)),
+                safe_markup(file_path),
+            )
+
+        self.console.print(skipped_table)
+
+    def display_skipped_files(self, skipped_files: List):
+        """
+        Display hidden/junk files the export scan declined to collect.
+
+        A distinct outcome from :meth:`display_skipped_sidecars` (issue #30):
+        these files never matched the ``.aae`` extension and were never
+        categorized at all -- they are excluded one stage earlier, at the
+        scan boundary, purely by basename. Known OS junk (``.DS_Store``,
+        ``.localized``, ``Thumbs.db``) is expected and benign; any other
+        dotted name is reported the same way because a leading dot alone does
+        not prove a file is disposable, and the user should be able to see
+        exactly which name was left behind and why, rather than infer it from
+        a bare count.
+
+        Args:
+            skipped_files: List of ``(reason, file_path)`` tuples, where
+                ``reason`` is ``'junk'`` (matched the known-junk denylist) or
+                ``'hidden'`` (any other dotted name).
+        """
+        if not skipped_files:
+            return
+
+        self.console.print(
+            f"\n[bold yellow]Files Skipped ({len(skipped_files)}):[/bold yellow]"
+        )
+
+        reason_labels = {
+            'junk': "Known junk file (e.g. .DS_Store)",
+            'hidden': "Hidden file (dotted name)",
+        }
+
+        skipped_table = Table(show_header=True, header_style="bold yellow")
+        skipped_table.add_column("Reason", style="yellow")
+        skipped_table.add_column("File", style="cyan")
+
+        for reason, file_path in skipped_files:
             # Untrusted filename -- escaped and control-stripped before it
             # becomes a table cell, matching every other per-file row (#9).
             skipped_table.add_row(
