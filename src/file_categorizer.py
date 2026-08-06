@@ -41,9 +41,13 @@ class ImageMetadata(NamedTuple):
     Attributes:
         exif: IFD0 and the Exif sub-IFD merged into one tag-name -> value
             mapping (see ``exif_handler.merge_exif_ifds``).
-        png_info: The ``Image.info`` dict captured at open time -- the PNG
-            text/provenance chunks written before IDAT (issue #44), among
-            whatever other ancillary chunks Pillow parses before pixel data.
+        png_info: The ``str``-valued entries of the ``Image.info`` dict,
+            captured at open time and only for ``.png`` files -- the PNG
+            text/provenance chunks written before IDAT (issue #44). Empty for
+            every other extension. Pillow's binary ancillary chunks
+            (``icc_profile``, raw ``exif``, ``dpi``, ``gamma``) are filtered
+            out at capture, so they can never reach the marker regex and can
+            never widen what issue #8's precision rules match.
         category: The :class:`FileCategory` this file resolved to.
     """
     exif: Dict[str, Any]
