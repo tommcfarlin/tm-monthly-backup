@@ -90,10 +90,8 @@ def determine_exit_code(results: dict) -> int:
 @click.option('--backup-dir', default='backup', help='Directory for organized output (default: backup)')
 @click.option('--jpeg-quality', type=click.IntRange(1, 100), default=Settings().jpeg_quality,
               show_default=True, help='JPEG quality for HEIC conversion')
-@click.option('--keep-heic', is_flag=True,
-              help='Keep original HEIC files after conversion')
 @click.version_option(version='1.0.0', prog_name='tm-monthly-backup')
-def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic):
+def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality):
     """
     Process exported Apple Photos files and organize them by type.
 
@@ -109,9 +107,9 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
     invocation); --dry-run never prompts, since it makes no changes to confirm.
 
     --jpeg-quality controls the HEIC->JPEG encode quality (1-100, default 98).
-    --keep-heic leaves the original .heic/.heif file in export/ after a
-    verified-good conversion instead of deleting it; a conversion that fails
-    verification is still recorded as a failure either way.
+    A converted HEIC's original is deleted once its conversion is verified
+    good; a conversion that fails verification is recorded as a failure and
+    the original is left in place.
     """
 
     # A run with no terminal to prompt from (cron, CI, `nohup`, a piped
@@ -129,7 +127,7 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality, keep_heic)
     setup_logging(verbose)
 
     # Initialize CLI interface
-    cli = CLIInterface(export_dir, backup_dir, jpeg_quality=jpeg_quality, keep_heic=keep_heic)
+    cli = CLIInterface(export_dir, backup_dir, jpeg_quality=jpeg_quality)
 
     # Display welcome banner
     cli.display_welcome()

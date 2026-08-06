@@ -64,14 +64,12 @@ tm-monthly-backup --verbose
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--jpeg-quality` | JPEG quality (1-100) for HEIC->JPEG conversion | `98` |
-| `--keep-heic` | Keep original HEIC/HEIF files after a verified conversion instead of deleting them | `False` (originals deleted) |
 
 `--jpeg-quality` is validated at the command line (`click.IntRange(1, 100)`); a
-value outside that range is rejected before any file is touched.
-`--keep-heic` affects only the delete step — a conversion that fails
-verification (see "Verify Before Delete" below) is always recorded as a
-failure and the original is always left in place, whether or not
-`--keep-heic` was passed.
+value outside that range is rejected before any file is touched. A HEIC's
+original is always deleted once its conversion is verified good (see "Verify
+Before Delete" below); a conversion that fails verification is always
+recorded as a failure and the original is always left in place.
 
 ## Usage Examples
 
@@ -184,24 +182,7 @@ overlapping destination would let a run re-ingest and destroy its own inputs.
 ```bash
 # Smaller JPEGs at the cost of some visible compression artifacting
 tm-monthly-backup --jpeg-quality 80
-
-# Keep every original HEIC in export/ alongside the converted JPEG in backup/
-tm-monthly-backup --keep-heic
-
-# Both together
-tm-monthly-backup --jpeg-quality 90 --keep-heic
 ```
-
-`--keep-heic` is useful when you want a lossless fallback beside the archived
-JPEG, or simply are not ready to trust the conversion yet — but it means
-`export/` keeps growing with every HEIC-heavy run rather than being fully
-drained. **More importantly, a retained original is invisible to this tool
-as "already archived": the next run will re-convert it and re-file it under
-a new, bumped timestamp that is not its capture time, producing a duplicate
-copy in `backup/`.** This repeats every run for as long as the original
-remains in `export/`. Move or delete retained originals out of `export/`
-once you have verified the backup, or run without `--keep-heic` again for a
-subsequent pass over the same directory.
 
 ### Verbose Logging
 
@@ -317,32 +298,14 @@ HEIC files are automatically converted to JPEG:
   the encode step, measured in the issue #40 audit), a poor trade for an
   archive tool.
 - **EXIF Preservation**: All metadata preserved
-- **Retention**: The original HEIC is deleted after a verified conversion by
-  default, so no lossless copy remains once the run completes. Pass
-  `--keep-heic` to leave the original `.heic`/`.heif` file in place in
-  `export/` alongside the converted JPEG in `backup/`. With `--keep-heic`,
-  `export/` is **not** fully drained by a HEIC-heavy run — the retained
-  originals remain — even though every file is still correctly counted as
-  processed and filed. **This has a real consequence, not just a disk-usage
-  one: nothing in this tool recognizes a retained original as
-  already-archived.** A file left in `export/` is scanned, categorized, and
-  processed again exactly like a new file on every subsequent run. The next
-  run re-converts it, reads the same EXIF capture timestamp, finds
-  `backup/photos/<that timestamp>.jpg` already occupied by the copy the
-  previous run filed, and the collision-resolution logic bumps the new
-  landing name forward by one second — so the retained photo gets a
-  **second, duplicate copy in the archive**, filed under a timestamp that is
-  **not** its actual capture time. This repeats on every run for as long as
-  the original stays in `export/`. If you use `--keep-heic`, move or delete
-  the retained originals out of `export/` before the next run, or expect
-  growing duplication in `backup/`.
+- **Retention**: The original HEIC is deleted after a verified conversion, so
+  no lossless copy remains once the run completes and `export/` is fully
+  drained by a HEIC-heavy run.
 - **Verify Before Delete**: The original `.heic` is deleted only after the
   converted JPEG is verified on disk (it exists, decodes, matches the source
   dimensions, and preserves EXIF) and has landed in `backup/photos/`. If
   verification fails, the original is left in `export/` and the run records a
-  failure — this verification step always runs, regardless of `--keep-heic`;
-  the flag changes only whether a *successful* conversion's original is
-  deleted afterward.
+  failure.
 
 ### Generated / AI-Detected Content
 
@@ -525,7 +488,6 @@ small, personal tool; the options below are the complete, closed set:
 |--------|----------|
 | `--export-dir` / `--backup-dir` | Source and destination directories |
 | `--jpeg-quality` | HEIC->JPEG encode quality (1-100, default `98`) |
-| `--keep-heic` | Whether a converted HEIC's original is deleted or kept |
 | `--dry-run` / `--yes` / `--verbose` | Run behavior — see "Command Options" above |
 
 Several other things this tool hardcodes are **deliberately not**
