@@ -298,9 +298,10 @@ HEIC files are automatically converted to JPEG:
   the encode step, measured in the issue #40 audit), a poor trade for an
   archive tool.
 - **EXIF Preservation**: All metadata preserved
-- **Retention**: The original HEIC is deleted after a verified conversion, so
-  no lossless copy remains once the run completes and `export/` is fully
-  drained by a HEIC-heavy run.
+- **Original Deletion**: The original HEIC is deleted after a verified
+  conversion, so no lossless copy of it remains once the run completes. A
+  HEIC-heavy run therefore drains `export/` completely, and the archived JPEG
+  is the only surviving copy of each converted photo.
 - **Verify Before Delete**: The original `.heic` is deleted only after the
   converted JPEG is verified on disk (it exists, decodes, matches the source
   dimensions, and preserves EXIF) and has landed in `backup/photos/`. If

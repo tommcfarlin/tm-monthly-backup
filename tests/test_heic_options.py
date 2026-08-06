@@ -437,6 +437,15 @@ class TestCliOptions(unittest.TestCase):
                 ],
             )
             self.assertEqual(result.exit_code, 0, result.output)
+            # Issue #65 removed --keep-heic, so a real run through main() must
+            # drain export/ completely. This is the only CLI-level assertion
+            # that the original is deleted rather than retained; the processor
+            # layer pins it directly, but a regression that reintroduced
+            # retention at the CLI would otherwise pass every test here.
+            self.assertEqual(
+                os.listdir(export_dir), [],
+                f"export/ was not drained by a real run: {os.listdir(export_dir)}",
+            )
             photos_dir = os.path.join(backup_dir, "photos")
             [landed] = os.listdir(photos_dir)
             return os.path.getsize(os.path.join(photos_dir, landed))

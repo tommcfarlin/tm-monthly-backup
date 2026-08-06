@@ -267,7 +267,7 @@ class FileProcessor:
         Args:
             export_dir: Directory containing exported files
             backup_dir: Directory for organized output files
-            settings: Immutable HEIC conversion/retention tunables (issue
+            settings: Immutable HEIC conversion tunables (issue
                 #41) -- see :class:`Settings`. Defaults to ``Settings()``
                 (quality 98, originals deleted) when omitted, so every
                 existing caller is unaffected.
