@@ -41,18 +41,9 @@ class Settings:
         jpeg_quality: JPEG quality (1-100) passed to
             :class:`HeicConverter` for HEIC->JPEG conversion. Default 98
             matches `HeicConverter`'s own default (issue #40).
-        keep_heic: When True, a successfully verified HEIC conversion leaves
-            the original `.heic`/`.heif` file in place in `export/` instead of
-            deleting it. This affects ONLY the delete step -- the
-            verify-before-delete gate (issue #7) still runs unconditionally,
-            so a conversion that fails verification is still recorded as a
-            failure regardless of this flag. Default False preserves the
-            tool's pre-#41 behavior (originals are deleted after a verified
-            conversion).
     """
 
     jpeg_quality: int = 98
-    keep_heic: bool = False
 
 
 def _convert_heic_worker(
@@ -1101,11 +1092,9 @@ class FileProcessor:
                 # finally safe to delete the original HEIC. Route through the
                 # single safe-delete implementation; verification already happened
                 # pre-move (the JPEG has since moved out of reach), so skip it here.
-                # ``settings.keep_heic`` (issue #41) gates ONLY this delete -- the
-                # verify-before-delete check above already ran unconditionally, so
-                # a conversion that failed verification is recorded as a failure
-                # above and never reaches this line regardless of retention.
-                if heic_original_to_delete is not None and not self.settings.keep_heic:
+                # A conversion that failed verification is recorded as a failure
+                # above and never reaches this line (issue #7).
+                if heic_original_to_delete is not None:
                     self.heic_converter.cleanup_original_heic(
                         heic_original_to_delete, verify_first=False
                     )

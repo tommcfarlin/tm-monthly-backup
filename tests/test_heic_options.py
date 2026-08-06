@@ -1,27 +1,37 @@
 """
-Tests for issue #41: expose JPEG quality and HEIC retention as real options.
+Tests for issue #41: expose JPEG quality as a real option.
 
 Before this issue, `HeicConverter.__init__` accepted `jpeg_quality` (and,
 since issue #40, `optimize`) but `FileProcessor` always constructed
 `HeicConverter()` with no arguments -- there was no path from `main.py` down
-to that parameter, and no way at all to keep an original `.heic` after
-conversion; `_process_single_file` deleted it unconditionally.
+to that parameter.
+
+Issue #41 originally also added a `--keep-heic` retention flag that left a
+converted HEIC's original in `export/` instead of deleting it. Issue #65
+found that a retained original is invisible to this tool as "already
+archived": the next run rescans it, re-converts it, and files a duplicate
+copy under a bumped, non-capture timestamp. The project decided the flag
+should be removed entirely rather than patched -- convert-then-delete is the
+tool's intended design -- so `--keep-heic`/`Settings.keep_heic` no longer
+exist and the tests that existed only to exercise retention are gone. The
+original .heic being deleted after a verified conversion is once again
+unconditional, exactly as it was before issue #41.
 
 These tests prove, with real HEIC bytes end to end (through `FileProcessor`
 and, for the CLI-level tests, through `src.main.main` via `CliRunner`):
 
 * `--jpeg-quality` reaches `HeicConverter` and measurably changes the
   converted JPEG's size.
-* `--keep-heic` leaves the original `.heic` in place while still filing the
-  converted JPEG in `backup/`.
-* Retention gates ONLY the delete step, never the issue #7 verify step: a
-  conversion that fails verification is still recorded as a failure with
-  `keep_heic=True`, exactly as it is with the default `keep_heic=False`. This
-  is the safety-critical case -- a retention flag that short-circuited
-  verification would turn a loud failure into a silent one.
+* The original `.heic` is deleted once its conversion is filed in `backup/`.
+* The issue #7 verify-before-delete gate still runs unconditionally: a
+  conversion that fails verification is recorded as a failure and the
+  original survives. This is the safety-critical case -- anything that let a
+  short-circuited verification through would turn a loud failure into a
+  silent one.
 * `Settings` is frozen (immutable for the duration of a run).
-* Both options behave identically on the sequential and pooled (issue #42)
-  HEIC conversion paths.
+* `jpeg_quality` behaves identically on the sequential and pooled
+  (issue #42) HEIC conversion paths, both of which delete verified-converted
+  originals identically.
 """
 
 import os
@@ -37,7 +47,6 @@ import click
 from click.testing import CliRunner
 from PIL import Image
 
-from src.cli_interface import CLIInterface
 from src.file_processor import FileProcessor, Settings
 from src.heic_converter import HeicConverter
 from src.main import main
@@ -82,7 +91,7 @@ class TestSettingsImmutable(unittest.TestCase):
     """Settings are immutable for the duration of a run."""
 
     def test_settings_is_frozen(self):
-        settings = Settings(jpeg_quality=80, keep_heic=True)
+        settings = Settings(jpeg_quality=80)
         with self.assertRaises(FrozenInstanceError):
             settings.jpeg_quality = 10
 
@@ -98,7 +107,6 @@ class TestSettingsImmutable(unittest.TestCase):
         """
         settings = Settings()
         self.assertEqual(settings.jpeg_quality, 98)
-        self.assertFalse(settings.keep_heic)
 
     def test_settings_default_agrees_with_heic_converter_default(self):
         """The two independent default literals must not drift apart.
@@ -159,8 +167,8 @@ class TestJpegQualityReachesConverter(unittest.TestCase):
         self.assertEqual(processor.heic_converter.jpeg_quality, 98)
 
 
-class TestKeepHeicRetention(unittest.TestCase):
-    """--keep-heic leaves the original in place but still files the JPEG."""
+class TestHeicOriginalIsDeletedAfterConversion(unittest.TestCase):
+    """The original .heic is deleted once its conversion is filed in backup/."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -171,29 +179,7 @@ class TestKeepHeicRetention(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_keep_heic_true_retains_original_and_files_jpeg(self):
-        heic = make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0100.heic"),
-            date_time_original="2024:02:02 08:00:00",
-        )
-        processor = FileProcessor(
-            self.export_dir, self.backup_dir, settings=Settings(keep_heic=True)
-        )
-
-        summary = processor.process_all_files(dry_run=False)
-
-        self.assertEqual(summary["files_failed"], 0)
-        self.assertEqual(summary["files_processed"], 1)
-        # The original survives...
-        self.assertTrue(os.path.exists(heic), "original .heic was deleted despite --keep-heic")
-        # ...and the converted JPEG landed in backup/ as usual.
-        landing = os.path.join(self.backup_dir, "photos", "2024.02.02.08.00.00.jpg")
-        self.assertTrue(os.path.isfile(landing))
-        with Image.open(landing) as jpeg:
-            self.assertEqual(jpeg.format, "JPEG")
-
-    def test_keep_heic_false_default_still_deletes_original(self):
-        """Regression guard: the default (unset) behavior is unchanged."""
+    def test_original_deleted_after_verified_conversion(self):
         heic = make_exif_heic(
             os.path.join(self.export_dir, "IMG_0101.heic"),
             date_time_original="2024:02:02 08:01:00",
@@ -203,49 +189,31 @@ class TestKeepHeicRetention(unittest.TestCase):
         summary = processor.process_all_files(dry_run=False)
 
         self.assertEqual(summary["files_failed"], 0)
+        self.assertEqual(summary["files_processed"], 1)
+        # The original is gone...
         self.assertFalse(os.path.exists(heic))
-
-    def test_keep_heic_true_dry_run_touches_nothing(self):
-        """
-        --keep-heic + --dry-run: dry-run parity (#10) holds for the new flag.
-
-        A dry run never converts or deletes anything regardless of
-        ``keep_heic`` -- the HEIC branch of ``_process_single_file`` never
-        reaches ``_convert_heic`` or the retention gate on the dry-run
-        branch at all -- so retention is a no-op here, but this is a new
-        flag entering the dry-run/real-run parity surface and deserves its
-        own assertion rather than relying on that being true by inference.
-        """
-        heic = make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0102.heic"),
-            date_time_original="2024:02:02 08:02:00",
-        )
-        original_bytes = Path(heic).read_bytes()
-        processor = FileProcessor(
-            self.export_dir, self.backup_dir, settings=Settings(keep_heic=True)
-        )
-
-        summary = processor.process_all_files(dry_run=True)
-
-        # Nothing converted, moved, or deleted; the plan reports zero
-        # processed/failed files (dry runs are side-effect free, issue #10).
-        self.assertEqual(summary["files_processed"], 0)
-        self.assertEqual(summary["files_failed"], 0)
-        self.assertTrue(os.path.exists(heic))
-        self.assertEqual(Path(heic).read_bytes(), original_bytes)
-        self.assertFalse(os.path.exists(os.path.join(self.backup_dir, "photos")))
+        # ...and the converted JPEG landed in backup/ instead.
+        landing = os.path.join(self.backup_dir, "photos", "2024.02.02.08.01.00.jpg")
+        self.assertTrue(os.path.isfile(landing))
+        with Image.open(landing) as jpeg:
+            self.assertEqual(jpeg.format, "JPEG")
 
 
-class TestKeepHeicVerifyStillRuns(unittest.TestCase):
+class TestVerifyBeforeDelete(unittest.TestCase):
     """
-    Retention gates ONLY the delete, never the issue #7 verify step.
+    The issue #7 verify-before-delete gate still runs unconditionally.
 
     A conversion that reports success but produces an unverifiable JPEG must
-    still be recorded as a failure -- with the original .heic surviving either
-    way, since neither branch (verify failed) ever reaches the delete call.
-    A regression that let ``keep_heic`` short-circuit verification (treating
-    "keep the original" as "trust the conversion") would turn this loud
-    failure into a silent success instead.
+    be recorded as a failure, with the original .heic surviving, because the
+    delete call is only ever reached after a successful verification. This
+    test injects the real #7 bug shape (a converter that writes a zero-byte
+    JPEG and reports success) directly against the default path -- the only
+    path that exists now that issue #65 removed the `--keep-heic` retention
+    flag this test originally ran under two settings (`keep_heic=True` and
+    `keep_heic=False`) to prove retention could not short-circuit
+    verification. That flag is gone, but the underlying guarantee -- a
+    failed verification is a loud, recorded failure, never a silent one --
+    outlives it, so this test is retargeted rather than deleted.
     """
 
     def setUp(self):
@@ -263,44 +231,12 @@ class TestKeepHeicVerifyStillRuns(unittest.TestCase):
         bad.write_bytes(b"")
         return str(bad)
 
-    def test_failed_verification_recorded_as_failure_with_keep_heic_true(self):
+    def test_failed_verification_recorded_as_failure(self):
         heic = make_exif_heic(
             os.path.join(self.export_dir, "IMG_0200.heic"),
             date_time_original="2024:02:02 09:00:00",
         )
         original_bytes = Path(heic).read_bytes()
-        processor = FileProcessor(
-            self.export_dir, self.backup_dir, settings=Settings(keep_heic=True)
-        )
-
-        with mock.patch.object(
-            processor.heic_converter,
-            "convert_heic_to_jpeg",
-            side_effect=self._bad_convert,
-        ):
-            summary = processor.process_all_files(dry_run=False)
-
-        # The failure is recorded -- retention does not launder a genuinely
-        # bad conversion into a quiet success.
-        self.assertGreaterEqual(summary["files_failed"], 1)
-        self.assertTrue(
-            any(entry[1] == heic for entry in processor._failed_files),
-            f"failure for {heic} not recorded in {processor._failed_files}",
-        )
-        # Nothing landed in backup/photos.
-        photos_dir = os.path.join(self.backup_dir, "photos")
-        landed = os.listdir(photos_dir) if os.path.isdir(photos_dir) else []
-        self.assertEqual(landed, [])
-        # The original survives untouched -- true both because retention was
-        # requested AND because verification failing keeps it regardless.
-        self.assertEqual(Path(heic).read_bytes(), original_bytes)
-
-    def test_failed_verification_recorded_as_failure_with_keep_heic_false(self):
-        """Same scenario with the default retention setting, for contrast."""
-        heic = make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0201.heic"),
-            date_time_original="2024:02:02 09:01:00",
-        )
         processor = FileProcessor(self.export_dir, self.backup_dir)
 
         with mock.patch.object(
@@ -310,12 +246,24 @@ class TestKeepHeicVerifyStillRuns(unittest.TestCase):
         ):
             summary = processor.process_all_files(dry_run=False)
 
+        # The failure is recorded -- a genuinely bad conversion never becomes
+        # a quiet success.
         self.assertGreaterEqual(summary["files_failed"], 1)
-        self.assertTrue(os.path.exists(heic))
+        self.assertTrue(
+            any(entry[1] == heic for entry in processor._failed_files),
+            f"failure for {heic} not recorded in {processor._failed_files}",
+        )
+        # Nothing landed in backup/photos.
+        photos_dir = os.path.join(self.backup_dir, "photos")
+        landed = os.listdir(photos_dir) if os.path.isdir(photos_dir) else []
+        self.assertEqual(landed, [])
+        # The original survives untouched.
+        self.assertEqual(Path(heic).read_bytes(), original_bytes)
 
 
 class TestPooledVsSequentialWithOptions(unittest.TestCase):
-    """jpeg_quality and keep_heic behave identically on both HEIC paths (#42)."""
+    """jpeg_quality behaves identically on both HEIC paths (#42), and both
+    paths delete verified-converted originals identically."""
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
@@ -365,8 +313,8 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
             pool_was_used = spy.called
         return summary, export_dir, backup_dir, pool_was_used
 
-    def test_keep_heic_retains_originals_on_both_paths(self):
-        settings = Settings(jpeg_quality=60, keep_heic=True)
+    def test_custom_jpeg_quality_matches_on_both_paths(self):
+        settings = Settings(jpeg_quality=60)
 
         seq_summary, seq_export, seq_backup, seq_pool_used = self._run("seq", True, settings)
         par_summary, par_export, par_backup, par_pool_used = self._run("par", False, settings)
@@ -377,9 +325,9 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
         self.assertFalse(seq_pool_used, "forced-sequential run unexpectedly used the pool")
         self.assertTrue(par_pool_used, "unforced 10-file run should have used the pool")
 
-        # Every original survives on both paths.
-        self.assertEqual(len(os.listdir(seq_export)), 10)
-        self.assertEqual(len(os.listdir(par_export)), 10)
+        # Every original is deleted on both paths (verified conversion).
+        self.assertEqual(os.listdir(seq_export), [])
+        self.assertEqual(os.listdir(par_export), [])
 
         # Landings and failures agree between the two paths.
         self.assertEqual(_landing_map(seq_summary), _landing_map(par_summary))
@@ -399,8 +347,8 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
         )
         self.assertEqual(seq_sizes, par_sizes)
 
-    def test_default_keep_heic_false_still_deletes_on_both_paths(self):
-        settings = Settings()  # keep_heic=False
+    def test_default_settings_delete_originals_on_both_paths(self):
+        settings = Settings()
 
         seq_summary, seq_export, _, seq_pool_used = self._run("seqdel", True, settings)
         par_summary, par_export, _, par_pool_used = self._run("pardel", False, settings)
@@ -413,7 +361,7 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
 
 
 class TestCliOptions(unittest.TestCase):
-    """End-to-end coverage of --jpeg-quality and --keep-heic through main()."""
+    """End-to-end coverage of --jpeg-quality through main()."""
 
     def setUp(self):
         self.runner = CliRunner()
@@ -425,12 +373,15 @@ class TestCliOptions(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_help_documents_both_new_options(self):
+    def test_help_documents_jpeg_quality_and_omits_removed_keep_heic(self):
         result = self.runner.invoke(main, ["--help"])
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--jpeg-quality", result.output)
-        self.assertIn("--keep-heic", result.output)
+        # --keep-heic was removed entirely (issue #65); pin its absence so a
+        # future re-add is a deliberate, visible decision rather than a
+        # silent regression.
+        self.assertNotIn("--keep-heic", result.output)
 
     def _invoke_with_quality(self, value: str):
         return self.runner.invoke(
@@ -469,30 +420,6 @@ class TestCliOptions(unittest.TestCase):
         self.assertIn("--jpeg-quality", result.output)
         self.assertIn("not a valid integer", result.output)
 
-    def test_keep_heic_flag_leaves_original_after_a_real_run(self):
-        heic = make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0300.heic"),
-            date_time_original="2024:02:02 10:00:00",
-        )
-
-        result = self.runner.invoke(
-            main,
-            [
-                "--export-dir", self.export_dir,
-                "--backup-dir", self.backup_dir,
-                "--keep-heic",
-                "--yes",
-            ],
-        )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(os.path.exists(heic), "original .heic missing after --keep-heic run")
-        self.assertTrue(
-            os.path.isfile(
-                os.path.join(self.backup_dir, "photos", "2024.02.02.10.00.00.jpg")
-            )
-        )
-
     def test_jpeg_quality_flag_changes_output_size_end_to_end(self):
         def _run_with_quality(quality: str) -> int:
             export_dir = os.path.join(self.temp_dir, f"export_q{quality}")
@@ -518,70 +445,6 @@ class TestCliOptions(unittest.TestCase):
         high_size = _run_with_quality("95")
 
         self.assertLess(low_size, high_size)
-
-
-class TestRetentionBanner(unittest.TestCase):
-    """
-    --keep-heic surfaces retained originals in the results banner.
-
-    A retained original is invisible to this tool as "already archived" (see
-    the "HEIC Originals Retained" documentation in ``docs/cli-usage.md``) --
-    the next run re-converts and re-files it as a duplicate. A user who does
-    not realize a run retained anything is exactly the audience for a visible
-    row at the moment it happens, the same way ``files_quarantined`` already
-    gets a distinct row and title (issue #58). These tests drive
-    ``CLIInterface.display_results`` directly against a real processed
-    summary, capturing the actual rendered console output rather than
-    inspecting the results dict, since the finding is specifically about what
-    the user *sees*.
-    """
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.export_dir = os.path.join(self.temp_dir, "export")
-        self.backup_dir = os.path.join(self.temp_dir, "backup")
-        os.makedirs(self.export_dir)
-
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def _render(self, cli: CLIInterface, results: Dict) -> str:
-        results = {**results, "status": "completed"}
-        with cli.console.capture() as capture:
-            cli.display_results(results, dry_run=False)
-        return capture.get()
-
-    def test_keep_heic_run_reports_retained_count_in_banner(self):
-        make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0500.heic"),
-            date_time_original="2024:02:02 11:00:00",
-        )
-        cli = CLIInterface(self.export_dir, self.backup_dir, keep_heic=True)
-
-        results = cli.processor.process_all_files(dry_run=False)
-        self.assertEqual(results["files_failed"], 0)
-
-        rendered = self._render(cli, results)
-
-        self.assertIn("HEIC Originals Retained", rendered)
-        # The row's count cell must reflect the real retained count (1),
-        # not just the row's presence.
-        self.assertRegex(rendered, r"HEIC Originals Retained\s*\S*\s*1")
-
-    def test_default_run_does_not_mention_retention(self):
-        """No row at all when nothing was retained (the default, keep_heic=False)."""
-        make_exif_heic(
-            os.path.join(self.export_dir, "IMG_0501.heic"),
-            date_time_original="2024:02:02 11:01:00",
-        )
-        cli = CLIInterface(self.export_dir, self.backup_dir)
-
-        results = cli.processor.process_all_files(dry_run=False)
-        self.assertEqual(results["files_failed"], 0)
-
-        rendered = self._render(cli, results)
-
-        self.assertNotIn("HEIC Originals Retained", rendered)
 
 
 if __name__ == "__main__":
