@@ -10,8 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
 
-from .exif_handler import ifd0_tag_names, merge_exif_ifds
-from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS
+from .media_types import (
+    VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS,
+    ifd0_tag_names,
+    merge_exif_ifds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,7 @@ class ImageMetadata(NamedTuple):
 
     Attributes:
         exif: IFD0 and the Exif sub-IFD merged into one tag-name -> value
-            mapping (see ``exif_handler.merge_exif_ifds``).
+            mapping (see ``media_types.merge_exif_ifds``).
         png_info: The ``str``-valued entries of the ``Image.info`` dict,
             captured at open time and only for ``.png`` files -- the PNG
             text/provenance chunks written before IDAT (issue #44). Empty for
@@ -311,7 +314,7 @@ class FileCategorizer:
         since it is the identical in-memory object read twice with different
         tag-name resolution. This is fix-round-1 finding 1 (issue #24 review):
         the merged view must never feed the ``Software`` editing-detection
-        heuristic (see :func:`exif_handler.merge_exif_ifds`'s docstring), only
+        heuristic (see :func:`media_types.merge_exif_ifds`'s docstring), only
         the capture-timestamp checks issue #25 actually intends to span both
         IFDs.
 
@@ -490,10 +493,10 @@ class FileCategorizer:
             file_path: Path to file (used only for its suffix and stem --
                 neither touches the filesystem).
             exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
-                :func:`exif_handler.merge_exif_ifds`), used only for the
+                :func:`media_types.merge_exif_ifds`), used only for the
                 capture-timestamp check.
             ifd0: IFD0-only tag-name -> value mapping (see
-                :func:`exif_handler.ifd0_tag_names`), used only for the
+                :func:`media_types.ifd0_tag_names`), used only for the
                 ``Software`` check.
             png_info: The PNG's ``Image.info`` dict (irrelevant for non-PNG).
 
@@ -617,10 +620,10 @@ class FileCategorizer:
 
         Args:
             exif: Merged IFD0 + Exif sub-IFD tag-name -> value mapping (see
-                :func:`exif_handler.merge_exif_ifds`) -- used only for the
+                :func:`media_types.merge_exif_ifds`) -- used only for the
                 capture-timestamp check.
             ifd0: IFD0-only tag-name -> value mapping (see
-                :func:`exif_handler.ifd0_tag_names`) -- used only for the
+                :func:`media_types.ifd0_tag_names`) -- used only for the
                 ``Software`` check.
 
         Returns:
@@ -644,7 +647,7 @@ class FileCategorizer:
         the Exif sub-IFD behind pointer tag ``0x8769``, which ``Image.getexif()``
         does not expose at the top level (issue #25). Since issue #24, ``exif``
         is already the merged tag-name view that includes it (see
-        :func:`exif_handler.merge_exif_ifds`), so this is a plain key lookup.
+        :func:`media_types.merge_exif_ifds`), so this is a plain key lookup.
 
         Args:
             exif: Merged tag-name -> value mapping.
