@@ -9,25 +9,67 @@ from datetime import date, datetime, time, timedelta
 from typing import Iterator, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 from PIL import Image
-from PIL.ExifTags import TAGS
 import pillow_heif
 from dateutil import parser as dateutil_parser
 
-from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS
+from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS, merge_exif_ifds
 
-# Video metadata extraction
-try:
-    from hachoir.parser import createParser
-    from hachoir.metadata import extractMetadata
+# Video metadata extraction (issue #47): hachoir.parser's __init__ eagerly
+# imports every parser it ships -- audio, video, container, archive, network,
+# win32 -- making it the single largest item in this module's import graph,
+# larger than rich or Pillow+pillow-heif combined, yet a batch with zero
+# video files never needs any of it. HACHOIR_AVAILABLE starts as None ("not
+# yet probed") instead of eagerly resolving True/False here; the actual
+# import happens lazily, in _ensure_hachoir_imported below, the first time
+# _extract_video_timestamp_hachoir needs it -- i.e. only once a video file's
+# Apple local-creationdate key (issue #28) is absent and hachoir's mvhd
+# fallback is actually reached.
+HACHOIR_AVAILABLE = None
+
+
+def _ensure_hachoir_imported() -> None:
+    """
+    Resolve ``HACHOIR_AVAILABLE`` and bind ``createParser``/``extractMetadata``.
+
+    Called once, from :meth:`ExifHandler._extract_video_timestamp_hachoir`,
+    immediately before those two names are used. A no-op whenever
+    ``HACHOIR_AVAILABLE`` is already something other than ``None`` -- either
+    because a previous call already resolved it for real, or because a test
+    has patched it directly (every test in ``tests/test_exif_handler*.py``
+    that patches ``createParser``/``extractMetadata`` also patches
+    ``HACHOIR_AVAILABLE`` to ``True`` in the same decorator stack). That
+    short-circuit matters: those tests patch ``createParser``/
+    ``extractMetadata`` with ``create=True`` precisely because the two names
+    do not exist at module scope until hachoir is actually probed. If this
+    function ignored an already-resolved ``HACHOIR_AVAILABLE`` and re-ran the
+    real import whenever hachoir happens to be installed, it would clobber
+    those mocks with the genuine hachoir callables and silently defang every
+    one of those tests -- the exact trap this issue's brief warns about.
+    """
+    global HACHOIR_AVAILABLE, createParser, extractMetadata
+    if HACHOIR_AVAILABLE is not None:
+        return
+    try:
+        from hachoir.parser import createParser as _createParser
+        from hachoir.metadata import extractMetadata as _extractMetadata
+    except ImportError:
+        HACHOIR_AVAILABLE = False
+        return
+    createParser = _createParser
+    extractMetadata = _extractMetadata
     HACHOIR_AVAILABLE = True
-except ImportError:
-    HACHOIR_AVAILABLE = False
+
 
 if TYPE_CHECKING:
     # Type-hint only: FileCategorizer.ImageMetadata is not imported at runtime
-    # so this module never depends on file_categorizer (which imports THIS
-    # module for merge_exif_ifds -- keeping the edge one-directional avoids a
-    # circular import, issue #24).
+    # so this module never depends on file_categorizer. Before issue #47,
+    # file_categorizer imported THIS module for ifd0_tag_names/merge_exif_ifds,
+    # so this guard was also what kept that edge one-directional (issue #24).
+    # Issue #47 moved those two helpers to media_types.py, so file_categorizer
+    # no longer imports exif_handler at all, at runtime or otherwise -- this
+    # TYPE_CHECKING guard is now belt-and-suspenders rather than load-bearing,
+    # but is kept since a live import here would still be wrong on its own
+    # terms (this module has no runtime need for FileCategorizer).
     from .file_categorizer import ImageMetadata
 
 # Enable HEIF support in Pillow
@@ -298,82 +340,6 @@ def _hachoir_creation_date(metadata) -> Optional[datetime]:
     return None
 
 
-def ifd0_tag_names(exif) -> dict:
-    """
-    Resolve a single IFD's tag ids to a tag-name -> value mapping.
-
-    Despite the name this works on any single IFD-shaped mapping (IFD0 or a
-    sub-IFD); it is named for its primary caller, which always passes IFD0.
-    Kept separate from :func:`merge_exif_ifds` so a caller that must NOT see
-    sub-IFD tags -- see :meth:`FileCategorizer._exif_shows_synthetic_edit`,
-    issue #24's fix-round-1 finding 1 below -- has a way to get an IFD0-only
-    view without re-implementing the tag-id -> tag-name resolution.
-
-    Args:
-        exif: An ``Image.Exif`` (or sub-IFD) mapping of tag id -> raw value.
-
-    Returns:
-        Mapping of resolved tag name -> raw tag value, for this IFD only.
-    """
-    resolved = {}
-    for tag_id, value in exif.items():
-        resolved.setdefault(TAGS.get(tag_id, str(tag_id)), value)
-    return resolved
-
-
-def merge_exif_ifds(exif, file_path: str = "") -> dict:
-    """
-    Flatten IFD0 and the Exif sub-IFD of a PIL ``Image.Exif`` into one
-    tag-name -> value mapping.
-
-    ``Image.getexif()`` exposes IFD0 only. The preferred ``DateTimeOriginal``
-    (0x9003) and ``DateTimeDigitized`` (0x9004) tags live in the Exif sub-IFD
-    behind pointer tag ``0x8769``, reachable only via ``Image.Exif.get_ifd()``
-    (issue #25). This is the single place that merge happens: used by
-    :meth:`ExifHandler._timestamp_candidates` (the standalone open path) and,
-    since issue #24, by :class:`FileCategorizer`'s once-per-file metadata read
-    -- both used to build this same view from their own separate
-    ``Image.open`` of the same file.
-
-    IFD0 values win over sub-IFD values for any shared tag id (setdefault).
-
-    CAUTION: this merged view is for **timestamp** lookups only (issue #25's
-    concern). Do NOT use it to look up ``Software`` or any other tag whose
-    presence is meant to be scoped to IFD0 -- issue #24's fix-round-1 finding
-    1 found that feeding this merged view to the editing-software heuristic
-    (:meth:`FileCategorizer._exif_shows_synthetic_edit`) let a ``Software``
-    tag written only in the Exif sub-IFD flip an ordinary photo to
-    ``GENERATED``, strictly widening issue #8's detection surface beyond what
-    the old, IFD0-only code ever matched. That heuristic now takes
-    :func:`ifd0_tag_names` for its ``Software`` check and this merged view
-    only for the capture-timestamp check, which #25 does intend to span both
-    directories.
-
-    Args:
-        exif: The ``Image.Exif`` mapping returned by ``Image.getexif()``.
-        file_path: Source path, used only for logging context if the sub-IFD
-            lookup raises.
-
-    Returns:
-        Mapping of resolved tag name -> raw tag value.
-    """
-    merged = ifd0_tag_names(exif)
-
-    # get_ifd returns {} when the sub-IFD is absent. The guard also covers
-    # exif objects that predate the sub-IFD API (e.g. plain-dict test doubles
-    # lack get_ifd) and malformed pointers that raise on access.
-    try:
-        sub_ifd = exif.get_ifd(ExifHandler.EXIF_IFD)
-    except (AttributeError, KeyError, OSError, ValueError) as exc:
-        logger.debug("No Exif sub-IFD in %s: %s", file_path, exc)
-        sub_ifd = {}
-
-    for tag_id, value in sub_ifd.items():
-        merged.setdefault(TAGS.get(tag_id, str(tag_id)), value)
-
-    return merged
-
-
 class ExifHandler:
     """Handles EXIF data extraction and timestamp processing for photos and videos"""
 
@@ -587,10 +553,11 @@ class ExifHandler:
         """
         Flatten IFD0 and the Exif sub-IFD into a tag-name -> value mapping.
 
-        Delegates to the module-level :func:`merge_exif_ifds`, which is
-        shared with :class:`FileCategorizer`'s once-per-file metadata read
-        (issue #24) so both build the identical tag-name view from a decoded
-        EXIF blob rather than each re-implementing the IFD0/sub-IFD merge.
+        Delegates to :func:`media_types.merge_exif_ifds` (moved there from
+        this module by issue #47), which is shared with
+        :class:`FileCategorizer`'s once-per-file metadata read (issue #24) so
+        both build the identical tag-name view from a decoded EXIF blob
+        rather than each re-implementing the IFD0/sub-IFD merge.
 
         Args:
             exif: The Image.Exif object returned by Image.getexif()
@@ -755,6 +722,7 @@ class ExifHandler:
         Returns:
             datetime object if found, None if missing/invalid
         """
+        _ensure_hachoir_imported()
         if not HACHOIR_AVAILABLE:
             logger.warning("Hachoir not available for video metadata extraction: %s", file_path)
             self.missing_exif_files.append(file_path)
