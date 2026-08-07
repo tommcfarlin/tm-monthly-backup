@@ -13,6 +13,8 @@ from PIL.ExifTags import TAGS
 import pillow_heif
 from dateutil import parser as dateutil_parser
 
+from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS
+
 # Video metadata extraction
 try:
     from hachoir.parser import createParser
@@ -388,11 +390,10 @@ class ExifHandler:
     # them at the top level. They are only reachable via getexif().get_ifd().
     EXIF_IFD = 0x8769
 
-    # Video file extensions that need special handling
-    VIDEO_EXTENSIONS = {
-        '.mov', '.mp4', '.m4v', '.avi', '.mkv', '.wmv',
-        '.flv', '.webm', '.3gp', '.mpg', '.mpeg'
-    }
+    # Video file extensions that need special handling. Single shared
+    # definition, imported from media_types.py (issue #43) so this set can
+    # never drift from the copy FileCategorizer uses to route to videos/.
+    VIDEO_EXTENSIONS = _SHARED_VIDEO_EXTENSIONS
 
     def __init__(self):
         self.missing_exif_files = []

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
 
 from .exif_handler import ifd0_tag_names, merge_exif_ifds
+from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,9 @@ class FileCategorizer:
         '.cr2', '.nef', '.arw', '.orf', '.rw2'
     }
 
-    VIDEO_EXTENSIONS = {
-        '.mov', '.mp4', '.m4v', '.avi', '.mkv', '.wmv',
-        '.flv', '.webm', '.3gp', '.mpg', '.mpeg'
-    }
+    # Single shared definition, imported from media_types.py (issue #43) so
+    # this set can never drift from the copy ExifHandler reads.
+    VIDEO_EXTENSIONS = _SHARED_VIDEO_EXTENSIONS
 
     SCREENSHOT_EXTENSIONS = {
         '.png'  # Screenshots are typically PNG on iOS/macOS
@@ -175,12 +175,6 @@ class FileCategorizer:
             FileCategory.SIDECAR: []
         }
 
-        # Convert to lowercase for case-insensitive matching
-        self.photo_exts = {ext.lower() for ext in self.PHOTO_EXTENSIONS}
-        self.video_exts = {ext.lower() for ext in self.VIDEO_EXTENSIONS}
-        self.screenshot_exts = {ext.lower() for ext in self.SCREENSHOT_EXTENSIONS}
-        self.sidecar_exts = {ext.lower() for ext in self.SIDECAR_EXTENSIONS}
-
         # Per-file EXIF + PNG-text metadata, read once per photo/screenshot-
         # extension file inside categorize_file and handed forward to
         # ExifHandler.extract_timestamp (issue #24) so the same file is not
@@ -205,7 +199,7 @@ class FileCategorizer:
         filename = file_path_obj.name.lower()
 
         # Check for sidecar files first
-        if ext in self.sidecar_exts:
+        if ext in self.SIDECAR_EXTENSIONS:
             return FileCategory.SIDECAR
 
         # Check for screenshots (PNG files with screenshot patterns).
@@ -221,15 +215,15 @@ class FileCategorizer:
         # name alone. ``_categorize_image_or_generated`` reads this file's
         # metadata exactly once (issue #24) and checks provenance before ever
         # consulting the ``filename`` fallback passed to it below.
-        if ext in self.screenshot_exts:
+        if ext in self.SCREENSHOT_EXTENSIONS:
             return self._categorize_image_or_generated(file_path, filename)
 
         # Check for photos
-        if ext in self.photo_exts:
+        if ext in self.PHOTO_EXTENSIONS:
             return self._categorize_image_or_generated(file_path)
 
         # Check for videos
-        if ext in self.video_exts:
+        if ext in self.VIDEO_EXTENSIONS:
             return FileCategory.VIDEO
 
         # Unknown file type
@@ -769,35 +763,47 @@ class FileCategorizer:
         """
         Get target directory path for a file category.
 
+        The directory name is simply ``category.value`` -- every
+        ``FileCategory`` member's value IS its target directory's name (e.g.
+        ``FileCategory.PHOTO.value == "photos"``), so this needs no
+        per-category branch and no directory-name string literals (issue
+        #43). Adding a new recognized category to the enum therefore needs no
+        edit here: it is handled the moment it is added.
+
+        ``SIDECAR`` is the one member excluded, the same way it is excluded
+        from :meth:`get_processable_files` (issue #29) -- sidecar files are
+        deleted rather than filed, so they have no target directory.
+
         Args:
             category: FileCategory
             base_backup_dir: Base backup directory path
 
         Returns:
             Full path to target directory
+
+        Raises:
+            ValueError: If ``category`` is ``FileCategory.SIDECAR``.
         """
-        if category == FileCategory.PHOTO:
-            return os.path.join(base_backup_dir, "photos")
-        elif category == FileCategory.VIDEO:
-            return os.path.join(base_backup_dir, "videos")
-        elif category == FileCategory.SCREENSHOT:
-            return os.path.join(base_backup_dir, "screenshots")
-        elif category == FileCategory.GENERATED:
-            return os.path.join(base_backup_dir, "generated")
-        elif category == FileCategory.UNKNOWN:
-            return os.path.join(base_backup_dir, "unknown")
-        else:
+        if category is FileCategory.SIDECAR:
             raise ValueError(f"No target directory defined for category: {category}")
+        return os.path.join(base_backup_dir, category.value)
 
     def ensure_target_directories(self, base_backup_dir: str) -> List[str]:
         """
         Create target directories for the recognized categories.
 
-        ``UNKNOWN`` is deliberately excluded: ``backup/unknown/`` must exist
-        only once an unrecognized file is actually routed into it, never as an
-        empty phantom that implies handling which did not occur (issue #29). It
-        is created lazily, at the moment a file lands there, by
-        :meth:`FileProcessor._process_unknown_file`.
+        Derived from :class:`FileCategory` the same way
+        :meth:`get_processable_files` is (issue #29): every member except
+        ``SIDECAR`` (no target directory, see :meth:`get_target_directory`)
+        and ``UNKNOWN``. ``UNKNOWN`` is deliberately excluded: ``backup/
+        unknown/`` must exist only once an unrecognized file is actually
+        routed into it, never as an empty phantom that implies handling which
+        did not occur (issue #29). It is created lazily, at the moment a file
+        lands there, by :meth:`FileProcessor._process_unknown_file`. Because
+        this iterates the enum rather than a hand-written list, adding a new
+        recognized category needs no edit here either (issue #43) -- only an
+        explicit exclusion, the same way UNKNOWN's already is, keeps a
+        category out of eager creation.
 
         Args:
             base_backup_dir: Base backup directory path
@@ -806,7 +812,9 @@ class FileCategorizer:
             List of created directory paths
         """
         directories = []
-        for category in [FileCategory.PHOTO, FileCategory.VIDEO, FileCategory.SCREENSHOT, FileCategory.GENERATED]:
+        for category in FileCategory:
+            if category in (FileCategory.SIDECAR, FileCategory.UNKNOWN):
+                continue
             target_dir = self.get_target_directory(category, base_backup_dir)
             os.makedirs(target_dir, exist_ok=True)
             directories.append(target_dir)

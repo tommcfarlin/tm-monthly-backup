@@ -10,6 +10,8 @@ from typing import Optional
 from PIL import Image
 import pillow_heif
 
+from .media_types import HEIC_EXTENSIONS
+
 # Enable HEIF support in Pillow
 pillow_heif.register_heif_opener()
 
@@ -42,6 +44,11 @@ class HeicConverter:
         """
         Check if file is a HEIC/HEIF file.
 
+        Reads from the shared ``HEIC_EXTENSIONS`` set in ``media_types.py``
+        (issue #43) rather than an inline literal, and that set is a ``set``
+        rather than the ``list`` this membership test previously used --
+        consistent with every other extension collection in this codebase.
+
         Args:
             file_path: Path to file
 
@@ -49,7 +56,7 @@ class HeicConverter:
             True if file is HEIC/HEIF format
         """
         ext = Path(file_path).suffix.lower()
-        return ext in ['.heic', '.heif']
+        return ext in HEIC_EXTENSIONS
 
     def convert_heic_to_jpeg(self, heic_path: str, output_dir: str = None) -> Optional[str]:
         """

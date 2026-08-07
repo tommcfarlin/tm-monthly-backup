@@ -5,6 +5,7 @@ Test suite for file categorization functionality
 import unittest
 import tempfile
 import os
+from enum import Enum
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -76,12 +77,16 @@ class TestFileCategorizer(unittest.TestCase):
             self.assertIsInstance(categorizer.categorized_files[category], list)
             self.assertEqual(len(categorizer.categorized_files[category]), 0)
 
-        # Check that extension sets are properly converted to lowercase
-        self.assertIn('.jpg', categorizer.photo_exts)
-        self.assertIn('.jpeg', categorizer.photo_exts)
-        self.assertIn('.mov', categorizer.video_exts)
-        self.assertIn('.png', categorizer.screenshot_exts)
-        self.assertIn('.aae', categorizer.sidecar_exts)
+        # Check that the class-level extension sets categorize_file consults
+        # are already lowercase (issue #43: the per-instance photo_exts/
+        # video_exts/screenshot_exts/sidecar_exts lowercasing comprehensions
+        # were removed as no-ops -- every source constant below was already
+        # lowercase -- so this now reads the class constants directly).
+        self.assertIn('.jpg', FileCategorizer.PHOTO_EXTENSIONS)
+        self.assertIn('.jpeg', FileCategorizer.PHOTO_EXTENSIONS)
+        self.assertIn('.mov', FileCategorizer.VIDEO_EXTENSIONS)
+        self.assertIn('.png', FileCategorizer.SCREENSHOT_EXTENSIONS)
+        self.assertIn('.aae', FileCategorizer.SIDECAR_EXTENSIONS)
 
     def test_categorize_photo_extensions(self):
         """Every photo-extension fixture maps to the exact category the code returns.
@@ -410,6 +415,71 @@ class TestFileCategorizer(unittest.TestCase):
         self.assertEqual(mock_makedirs.call_count, 4)
         for expected_dir in expected_dirs:
             mock_makedirs.assert_any_call(expected_dir, exist_ok=True)
+
+    def test_new_category_needs_no_edit_to_target_directory_methods(self):
+        """Pins AC2 (issue #43): adding a FileCategory member must require no
+        edit to get_target_directory or ensure_target_directories.
+
+        Python enums cannot be extended by subclassing once they have
+        members, so this builds an independent, same-shape Enum with every
+        existing FileCategory member plus one new ``ARCHIVE`` member, then
+        patches the module-level ``FileCategory`` name inside
+        file_categorizer.py to point at it. Both methods under test read
+        that name as a global at call time, so this changes what "the enum"
+        means to them without editing either method's source at all -- which
+        is exactly the scenario AC2 describes (a *future* new category, not
+        one either method was written with in mind).
+
+        Before issue #43's fix this pinned a real bug: the old
+        get_target_directory was a five-branch if/elif that raised
+        ValueError for ARCHIVE (an unrecognized branch), and the old
+        ensure_target_directories iterated a hand-written four-item list
+        that never mentioned ARCHIVE, so ARCHIVE's directory was silently
+        never created. Confirmed by stashing the src/ fix and re-running this
+        test: it fails on both counts against the pre-#43 code.
+        """
+        class _FileCategoryPlusOne(Enum):
+            PHOTO = "photos"
+            VIDEO = "videos"
+            SCREENSHOT = "screenshots"
+            GENERATED = "generated"
+            UNKNOWN = "unknown"
+            SIDECAR = "sidecar"
+            ARCHIVE = "archive"  # stand-in for a hypothetical new category
+
+        base_dir = "/test/backup"
+
+        with patch('src.file_categorizer.FileCategory', _FileCategoryPlusOne):
+            # get_target_directory resolves the brand-new member via
+            # category.value alone -- no ValueError, no branch to add.
+            self.assertEqual(
+                self.categorizer.get_target_directory(
+                    _FileCategoryPlusOne.ARCHIVE, base_dir
+                ),
+                "/test/backup/archive",
+            )
+            # The "no target directory" behavior for the enum's SIDECAR-
+            # equivalent member is preserved.
+            with self.assertRaises(ValueError):
+                self.categorizer.get_target_directory(
+                    _FileCategoryPlusOne.SIDECAR, base_dir
+                )
+
+            # ensure_target_directories iterates the (patched) enum, so the
+            # new member is created alongside every pre-existing recognized
+            # category with no explicit mention anywhere in the method.
+            with patch('os.makedirs') as mock_makedirs:
+                result = self.categorizer.ensure_target_directories(base_dir)
+
+        expected_dirs = [
+            "/test/backup/photos",
+            "/test/backup/videos",
+            "/test/backup/screenshots",
+            "/test/backup/generated",
+            "/test/backup/archive",
+        ]
+        self.assertEqual(result, expected_dirs)
+        self.assertEqual(mock_makedirs.call_count, len(expected_dirs))
 
     def test_get_categorization_stats(self):
         """Test getting categorization statistics"""
