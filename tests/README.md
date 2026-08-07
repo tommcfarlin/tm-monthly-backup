@@ -40,15 +40,26 @@ python tests/run_tests.py --unit-only
 python tests/run_tests.py --integration-only
 ```
 
+`--unit-only` selects every `test_*.py` module except `test_integration.py`, so a
+new unit test module runs automatically with no edit to `run_tests.py`.
+`--unit-only` and `--integration-only` are mutually exclusive; passing both is
+rejected by argparse rather than silently ignored. Every mode -- default,
+`--unit-only`, and `--integration-only` -- prints the same TEST SUMMARY block
+and exits `0` on success or `1` on failure.
+
 ### Control Verbosity
+`unittest.TextTestRunner` only distinguishes three verbosity levels (0, 1, 2),
+so `-v` and `-vv` are equivalent -- both select the same maximum level:
+
 ```bash
-# Quiet output
+# Quiet: only the final TEST SUMMARY block, no per-test lines or dots
 python tests/run_tests.py -q
 
-# Verbose output
-python tests/run_tests.py -v
+# Default: one dot per passing test (unittest's normal verbosity)
+python tests/run_tests.py
 
-# Maximum verbosity
+# Verbose: full test name, docstring, and outcome per test (-v and -vv are identical)
+python tests/run_tests.py -v
 python tests/run_tests.py -vv
 ```
 
@@ -113,8 +124,8 @@ encodes a genuine HEIF image via pillow-heif and reopens it to confirm both the
 HEIF decode and that `DateTimeOriginal` landed in the Exif sub-IFD. The EXIF read
 path is therefore exercised end-to-end against real bytes. Mocking is reserved for conditions that are
 awkward to reproduce deterministically on disk (e.g. a low-level I/O error on
-open). The suite still runs in any environment without external dependencies
-beyond Pillow.
+open). Building these fixtures requires both Pillow and pillow-heif; see
+Dependencies below.
 
 ## Coverage Areas
 
@@ -134,9 +145,9 @@ The test suite requires:
 - Python standard library `unittest` module
 - Application source modules in `src/` directory
 - Temporary file system access for test isolation
-
-Optional:
-- `PIL` (Pillow) for enhanced image testing (falls back gracefully if not available)
+- `Pillow` and `pillow-heif` -- `tests/fixtures.py` imports both unconditionally
+  to build real EXIF/HEIF fixtures on disk; there is no fallback path if
+  either is missing, so both must be installed (see `pyproject.toml`)
 
 ## Test Isolation
 
@@ -150,8 +161,15 @@ Each test:
 
 ## Continuous Integration
 
-The test suite is designed to run in CI environments:
-- No external file dependencies
-- Predictable execution time
-- Clear pass/fail status reporting
-- Detailed error messages for debugging
+There is no CI workflow configured for this repository yet (tracked as #17),
+so the claims below describe the suite's local behavior only, not an
+established CI track record:
+- No external file dependencies -- the suite needs Python's standard library
+  plus Pillow and pillow-heif (see Dependencies above); nothing reaches the
+  network or requires a fixture set outside the repo
+- Predictable execution time -- the full suite runs in a few seconds on this
+  machine (see the timing in `unittest`'s own summary line)
+- Clear pass/fail status reporting -- `run_tests.py`'s TEST SUMMARY block and
+  exit code (`0`/`1`) make the outcome unambiguous in any of its modes
+- Detailed error messages for debugging -- failures and errors are listed by
+  test ID in the summary, with full tracebacks available at `-v`
