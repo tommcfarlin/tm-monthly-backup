@@ -482,6 +482,14 @@ tm-monthly-backup --verbose --dry-run 2>&1 | tee debug.log
 sed 's|/Users/[^/]*/|/Users/USER/|g' debug.log > sanitized_debug.log
 ```
 
+**Redact before pasting.** Every `Moved: <src> -> <dst>` line and the missing-EXIF
+warning render the full absolute path of each file, which on macOS/Linux
+includes your account username (`/Users/<username>/...` or `/home/<username>/...`).
+This is local terminal output on your own machine, not something the tool
+sends anywhere — but if you paste a run log into a public issue or forum post,
+run it through the `sed` command above (or otherwise redact the path prefix)
+first.
+
 ### Common Log Patterns
 
 Look for these patterns in logs:

@@ -139,6 +139,16 @@ Identifies iOS and macOS screenshots:
 - **AI content separation**: Generated and heavily edited content goes to dedicated folder
 - **Missing metadata**: Fallback to filesystem timestamps with user warnings
 
+## What Ends Up in `backup/`
+
+Converted JPEGs preserve the complete EXIF block from the original HEIC, including
+**GPS coordinates**, camera make/model, device name, and capture timestamps. A
+file that is only moved rather than converted (already a JPEG, PNG, video, and
+so on) keeps its bytes untouched, so it carries forward whatever EXIF or other
+metadata it already had, unchanged. Treat `backup/` as being exactly as
+sensitive as your original photo library. If you sync or share this directory,
+you are sharing that metadata.
+
 ## Testing
 
 The project includes a comprehensive test suite covering unit tests and integration tests.
