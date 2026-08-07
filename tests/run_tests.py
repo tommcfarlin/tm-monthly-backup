@@ -5,84 +5,93 @@ Test runner for tm-monthly-backup test suite
 
 import sys
 import unittest
-import os
 from pathlib import Path
 
 # Add the repo root to path so tests can import the `src` package
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-def run_tests(verbosity=2, pattern="test_*.py"):
+
+def _iter_tests(suite):
+    """Flatten a (possibly nested) TestSuite into individual test cases."""
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            for test in _iter_tests(item):
+                yield test
+        else:
+            yield item
+
+
+def build_suite(test_dir, pattern="test_*.py", exclude_modules=None):
     """
-    Run all tests in the tests directory.
+    Discover tests under test_dir matching pattern, optionally excluding
+    tests whose module name is in exclude_modules.
 
     Args:
-        verbosity: Test output verbosity level (0-2)
-        pattern: Test file pattern to match
+        test_dir: Directory to discover tests in.
+        pattern: Test file glob pattern passed to unittest's discovery.
+        exclude_modules: Optional iterable of module names (e.g.
+            "test_integration") to drop from the discovered suite.
 
     Returns:
-        TestResult object
+        A single unittest.TestSuite containing the selected tests.
     """
-    # Discover and run all tests
     loader = unittest.TestLoader()
-    test_dir = Path(__file__).parent
+    discovered = loader.discover(str(test_dir), pattern=pattern)
 
-    # Load all test modules
-    suite = loader.discover(str(test_dir), pattern=pattern)
+    if not exclude_modules:
+        return discovered
 
-    # Run tests with specified verbosity
-    runner = unittest.TextTestRunner(verbosity=verbosity, buffer=True)
-    result = runner.run(suite)
+    filtered = unittest.TestSuite()
+    for test in _iter_tests(discovered):
+        if test.__class__.__module__ not in exclude_modules:
+            filtered.addTest(test)
+    return filtered
 
-    return result
 
 def main():
     """Main test runner entry point"""
     import argparse
 
     parser = argparse.ArgumentParser(description="Run tm-monthly-backup test suite")
-    parser.add_argument('-v', '--verbose', action='count', default=2,
-                       help='Increase test output verbosity')
-    parser.add_argument('-q', '--quiet', action='store_const', const=0, dest='verbose',
-                       help='Minimal test output')
+
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument(
+        '-v', '--verbose', '-vv', action='store_const', const=2,
+        dest='verbosity', default=1,
+        help='Verbose output: full test names and docstrings (-v and -vv are equivalent)')
+    verbosity_group.add_argument(
+        '-q', '--quiet', action='store_const', const=0, dest='verbosity',
+        help='Minimal output: only the final summary')
+
     parser.add_argument('-p', '--pattern', default='test_*.py',
                        help='Test file pattern (default: test_*.py)')
-    parser.add_argument('--unit-only', action='store_true',
-                       help='Run only unit tests (exclude integration tests)')
-    parser.add_argument('--integration-only', action='store_true',
-                       help='Run only integration tests')
+
+    selection_group = parser.add_mutually_exclusive_group()
+    selection_group.add_argument('--unit-only', action='store_true',
+                       help='Run only unit tests (every test_*.py except test_integration.py)')
+    selection_group.add_argument('--integration-only', action='store_true',
+                       help='Run only integration tests (test_integration.py)')
 
     args = parser.parse_args()
 
-    # Determine test pattern based on options
+    test_dir = Path(__file__).parent
+
+    # Determine which tests to run based on options
     if args.unit_only:
-        pattern = 'test_exif_handler.py test_file_categorizer.py'
         print("Running unit tests only...")
+        suite = build_suite(test_dir, exclude_modules={'test_integration'})
     elif args.integration_only:
-        pattern = 'test_integration.py'
         print("Running integration tests only...")
+        suite = build_suite(test_dir, pattern='test_integration.py')
     else:
-        pattern = args.pattern
         print("Running all tests...")
+        suite = build_suite(test_dir, pattern=args.pattern)
 
-    # Special handling for multiple specific files
-    if args.unit_only:
-        # Run unit tests individually
-        success = True
-        for test_file in ['test_exif_handler.py', 'test_file_categorizer.py']:
-            print(f"\n{'='*60}")
-            print(f"Running {test_file}")
-            print('='*60)
-            result = run_tests(verbosity=args.verbose, pattern=test_file)
-            if not result.wasSuccessful():
-                success = False
+    runner = unittest.TextTestRunner(verbosity=args.verbosity, buffer=True)
+    result = runner.run(suite)
 
-        sys.exit(0 if success else 1)
-    else:
-        # Run with standard discovery
-        result = run_tests(verbosity=args.verbose, pattern=pattern)
-
-    # Print summary
+    # Print summary -- the single reporting path for every mode above
     print(f"\n{'='*60}")
     print("TEST SUMMARY")
     print('='*60)
