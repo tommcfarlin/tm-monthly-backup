@@ -713,5 +713,106 @@ class TestDuplicateTimestampExhaustion(unittest.TestCase):
         self.assertEqual(result, base + timedelta(seconds=3600))
 
 
+class TestHachoirLogRoutedThroughApplicationLogger(unittest.TestCase):
+    """
+    hachoir's own private logger is silenced and redirected through the
+    application logger instead (issue #60), against a real, unmocked
+    hachoir invocation -- not a mock of this module's own forwarding
+    function, which would prove nothing about whether hachoir's real
+    ``log.use_print``/``log.on_new_message`` were actually configured.
+
+    Forces a fresh resolution of ``_ensure_hachoir_imported()`` for every
+    test here (rather than relying on whichever earlier test in the suite
+    happens to trigger the first real import and thus the first real
+    configuration of hachoir's logger) by resetting ``HACHOIR_AVAILABLE``
+    to ``None`` for the duration of each test.
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+        self._hachoir_patch = patch("src.exif_handler.HACHOIR_AVAILABLE", None)
+        self._hachoir_patch.start()
+
+    def tearDown(self):
+        self._hachoir_patch.stop()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_garbage_video(self, name="garbage.mp4"):
+        """
+        A deliberately malformed "video": not a real MP4/MOV container at
+        all, so ``createParser`` cannot identify a format and hachoir
+        writes its own ``[warn] Skip parser ...`` diagnostic -- the exact
+        real-world shape the issue's own reproduction used
+        ("garbage.mp4 -> None").
+        """
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "wb") as f:
+            f.write(b"not a real video container, just garbage bytes" * 5)
+        return path
+
+    def test_malformed_video_writes_nothing_to_stdout_or_stderr(self):
+        """createParser's own diagnostic must not reach either stream
+        directly (acceptance criterion 1). Checks for hachoir's own
+        characteristic markers specifically, rather than asserting the
+        streams are empty outright: this module's own
+        ``logger.warning("Could not create parser...")`` call, a few lines
+        below the ``createParser`` call under test, legitimately reaches
+        stderr through Python's own unconfigured-logging fallback in this
+        bare unittest environment (no ``setup_logging`` is running here) --
+        that is this application's own diagnostic, not hachoir bypassing
+        it, and is not what this test exists to catch.
+        """
+        import io
+
+        path = self._make_garbage_video()
+
+        captured_out, captured_err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", captured_out), patch("sys.stderr", captured_err):
+            self.handler._extract_video_timestamp_hachoir(path)
+
+        for stream_name, captured in (("stdout", captured_out), ("stderr", captured_err)):
+            text = captured.getvalue()
+            self.assertNotIn(
+                "[warn]", text, f"a bare hachoir warning leaked to {stream_name}"
+            )
+            self.assertNotIn(
+                "[err!]", text, f"a bare hachoir error leaked to {stream_name}"
+            )
+            self.assertNotIn(
+                "hachoir", text.lower(),
+                f"hachoir's own diagnostic text leaked to {stream_name}",
+            )
+
+    def test_diagnostic_reaches_the_application_logger_at_debug(self):
+        """The same diagnostic reaches the application logger at DEBUG
+        (i.e. surfaces under ``--verbose``) instead of vanishing along with
+        the direct stderr write (acceptance criterion 2)."""
+        path = self._make_garbage_video()
+
+        with self.assertLogs("src.exif_handler", level="DEBUG") as captured:
+            self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertTrue(
+            any("hachoir:" in message for message in captured.output),
+            "no forwarded hachoir diagnostic reached the application logger",
+        )
+
+    def test_diagnostic_is_absent_at_the_default_info_level(self):
+        """At the default (non-verbose) level, the forwarded hachoir
+        message is silent -- it is deliberately DEBUG-only, matching every
+        other verbose-only diagnostic in this module, not merely relocated
+        from one always-visible channel to another."""
+        path = self._make_garbage_video()
+
+        with self.assertLogs("src.exif_handler", level="INFO") as captured:
+            self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertFalse(
+            any("hachoir:" in message for message in captured.output),
+            "the forwarded hachoir diagnostic leaked into INFO-level output",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

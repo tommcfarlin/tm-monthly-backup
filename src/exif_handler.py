@@ -28,6 +28,40 @@ from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS, merge_exi
 HACHOIR_AVAILABLE = None
 
 
+def _forward_hachoir_log(level, prefix, text, context) -> None:
+    """
+    Route one hachoir diagnostic into the application logger (issue #60).
+
+    hachoir maintains its own private logging system (``hachoir.core.log``)
+    that, left unconfigured, writes every parser warning straight to
+    ``sys.stderr`` -- bypassing this application's logger, the
+    ``RichHandler``, and the sanitizing filter issue #9 installs, entirely
+    outside anything ``setup_logging`` or ``logging.disable`` can affect.
+    Two problems follow from that: ``_extract_video_timestamp_hachoir`` runs
+    while ``CLIInterface`` has a live ``rich`` ``Progress`` display open, so
+    a bare stderr write for every malformed video in a library interleaves
+    with and visibly scrambles the progress bars; and the message content
+    is derived from the untrusted video container's own bytes, so writing it
+    straight to the terminal outside the one path issue #9 already sanitizes
+    is the wrong default even though no concrete escape-sequence injection
+    through it was demonstrated when this issue was filed. Registered as
+    ``hachoir.core.log.log.on_new_message`` -- the documented redirect hook
+    -- once ``log.use_print`` is turned off, so nothing reaches stderr and
+    everything worth keeping instead reaches ``--verbose`` (DEBUG) exactly
+    like every other diagnostic this module logs.
+
+    Args:
+        level: hachoir's own severity (``LOG_INFO``/``LOG_WARN``/``LOG_ERROR``);
+            not used here, since this application does not mirror hachoir's
+            severity taxonomy -- every forwarded message lands at DEBUG.
+        prefix: hachoir's own rendered severity tag (e.g. ``"[warn]"``).
+        text: The message body, already formatted by hachoir.
+        context: The hachoir parser/field instance that raised the message;
+            not used here.
+    """
+    logger.debug("hachoir: %s %s", prefix, text)
+
+
 def _ensure_hachoir_imported() -> None:
     """
     Resolve ``HACHOIR_AVAILABLE`` and bind ``createParser``/``extractMetadata``.
@@ -53,11 +87,21 @@ def _ensure_hachoir_imported() -> None:
     try:
         from hachoir.parser import createParser as _createParser
         from hachoir.metadata import extractMetadata as _extractMetadata
+        from hachoir.core.log import log as _hachoir_log
     except ImportError:
         HACHOIR_AVAILABLE = False
         return
     createParser = _createParser
     extractMetadata = _extractMetadata
+    # Silence hachoir's own stderr writes and redirect them through this
+    # module's logger instead (issue #60). Done here, at the same lazy
+    # first-use point issue #47 already established, rather than at module
+    # import time: configuring hachoir's logger still requires importing
+    # hachoir.core.log, and doing that eagerly at module scope would defeat
+    # #47's entire point of never paying hachoir's import cost on a
+    # photo-only run.
+    _hachoir_log.use_print = False
+    _hachoir_log.on_new_message = _forward_hachoir_log
     HACHOIR_AVAILABLE = True
 
 
