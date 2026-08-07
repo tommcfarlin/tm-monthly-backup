@@ -1158,10 +1158,17 @@ class FileProcessor:
         # The suffix the file will carry once it is filed in ``backup/``. For a
         # HEIC this is the JPEG suffix its conversion produces, not the original
         # ``.heic`` -- derived here (issue #10) so a dry run plans the SAME final
-        # extension a real run lands. For every other file it is simply the
-        # source suffix. Both modes read this single value, so the planned
-        # destination name can never diverge on extension between them.
-        planned_extension = Path(file_path).suffix
+        # extension a real run lands. For every other file it is the source
+        # suffix, normalized to its canonical lowercase spelling (issue #55) so
+        # ``IMG_1.JPG`` and ``IMG_2.jpg`` land under the same spelling instead of
+        # preserving whatever case/alias the source happened to use. Both modes
+        # read this single value, so the planned destination name can never
+        # diverge on extension between them. This normalization deliberately
+        # does NOT reach ``backup/unknown/`` or ``backup/corrupt/`` -- both
+        # routes above return before this line, filing under the file's
+        # untouched original name, because their whole point is preserving that
+        # name as the sole recovery/identification clue (issues #29, #58).
+        planned_extension = FileCategorizer.normalize_extension(Path(file_path).suffix)
 
         # When a HEIC is converted, this holds the original ``.heic`` path so it
         # can be deleted only *after* its verified-good JPEG has safely landed in

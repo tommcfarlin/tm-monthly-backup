@@ -215,10 +215,12 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(results['files_processed'], 7)  # 2+2+2 + 1 unknown
 
         # The two EXIF photos are renamed to their exact DateTimeOriginal values.
+        # The second source is ``photo2.jpeg``; its output extension is
+        # normalized to the canonical ``.jpg`` spelling (issue #55).
         self.assertTrue(os.path.isfile(
             os.path.join(self.backup_dir, "photos", "2024.01.15.14.30.45.jpg")))
         self.assertTrue(os.path.isfile(
-            os.path.join(self.backup_dir, "photos", "2024.02.20.10.11.12.jpeg")))
+            os.path.join(self.backup_dir, "photos", "2024.02.20.10.11.12.jpg")))
 
         # Sidecars deleted from export; the unknown file is routed to
         # backup/unknown/ under its original name and no longer sits in export.
