@@ -30,6 +30,12 @@ ENV/
 # User Data Directories
 export/
 backup/
+# Any manual safety copy of an export taken before a run. The bare `export/`
+# rule above does not cover a differently-named sibling, and these hold
+# gigabytes of the user's own photographs -- a single `git add -A` would
+# otherwise stage the entire library.
+export-backup/
+export-*/
 
 # IDE
 .vscode/

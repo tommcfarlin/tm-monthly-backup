@@ -135,17 +135,25 @@ def is_unqualified_success(results: Dict) -> bool:
     (``.DS_Store``/``.localized``/``Thumbs.db``) does NOT disqualify a run:
     see :func:`_has_unexpected_skip`'s docstring for why.
 
+    A run whose post-run audit found a recorded landing the filesystem does not
+    corroborate (issue #69) is likewise not an unqualified success -- and is the
+    most serious of these, because it means the rest of this very summary cannot
+    be trusted. Every other condition above describes something the tool knows it
+    did; that one means the tool's own record of what it did is wrong.
+
     Args:
         results: The dict returned by :meth:`FileProcessor.process_all_files`.
 
     Returns:
         ``True`` if the run had zero failures, zero quarantined files, zero
-        kept sidecar candidates, and no unexpectedly-skipped file.
+        kept sidecar candidates, no unexpectedly-skipped file, and no landing
+        discrepancy.
     """
     return (
         results.get('files_failed', 0) == 0
         and results.get('files_quarantined', 0) == 0
         and results.get('sidecars_skipped', 0) == 0
+        and results.get('landing_discrepancies', 0) == 0
         and not _has_unexpected_skip(results)
     )
 
@@ -473,10 +481,21 @@ class CLIInterface:
         quarantine_count = results.get('files_quarantined', 0)
         sidecars_skipped = results.get('sidecars_skipped', 0)
         skipped_count = results.get('files_skipped', 0)
+        landing_discrepancies = results.get('landing_discrepancies', 0)
 
         if dry_run:
             title = "Dry Run Results"
             title_style = "bold blue"
+        elif landing_discrepancies > 0:
+            # Ranked above "With Errors" deliberately, and styled red rather
+            # than yellow: every other condition below describes an outcome the
+            # tool correctly knows about and is reporting accurately. This one
+            # means the tool's own record of what it did disagrees with the
+            # filesystem, so the counts in the table underneath it are not
+            # reliable -- the user needs to verify backup/ by hand rather than
+            # act on this summary (issue #69).
+            title = "Processing Complete - ACCOUNTING MISMATCH"
+            title_style = "bold red"
         elif failure_count > 0:
             title = "Processing Complete - With Errors"
             title_style = "bold yellow"
@@ -563,6 +582,11 @@ class CLIInterface:
         if results.get('heic_conversion_failures', 0) > 0:
             table.add_row("HEIC Conversion Failures", str(results['heic_conversion_failures']), style="red")
 
+        if landing_discrepancies > 0:
+            table.add_row(
+                "Unverified Landings", str(landing_discrepancies), style="red"
+            )
+
         self.console.print(table)
 
         # Category breakdown
@@ -604,6 +628,13 @@ class CLIInterface:
                 )
 
             self.console.print(breakdown_table)
+
+        # Display the post-run audit's findings first, ahead of every other
+        # detail table: it is the one section that tells the user the numbers
+        # above are wrong, so it must not be buried under them (issue #69).
+        landing_discrepancy_list = results.get('landing_discrepancy_list', [])
+        if landing_discrepancy_list:
+            self.display_landing_discrepancies(landing_discrepancy_list)
 
         # Display failures if any
         if failure_count > 0:
@@ -760,6 +791,55 @@ class CLIInterface:
             )
 
         self.console.print(skipped_table)
+
+    def display_landing_discrepancies(self, discrepancies: List):
+        """
+        Report recorded landings the filesystem did not corroborate (issue #69).
+
+        Distinct from :meth:`display_failures` in what it is telling the user.
+        A failure is a file the tool knows it did not archive, and the summary
+        counts it honestly. A discrepancy is a file the tool believes it DID
+        archive and cannot find -- so unlike every other table here, this one
+        means the numbers above it are wrong. The wording says so outright
+        rather than leaving the user to infer it, and points at manual
+        verification, because the tool has already demonstrated on this run that
+        its own accounting is not trustworthy.
+
+        Args:
+            discrepancies: List of ``(reason, path)`` tuples, where ``reason``
+                is ``'missing_landing'`` (recorded as filed, absent from disk)
+                or ``'duplicate_landing'`` (two records naming one path).
+        """
+        if not discrepancies:
+            return
+
+        self.console.print(
+            f"\n[bold red]Accounting mismatch ({len(discrepancies)}):[/bold red]"
+        )
+        self.console.print(
+            "[red]The counts above cannot be trusted for this run. Verify the "
+            "contents of the backup directory by hand before deleting anything "
+            "from the export directory or from Photos.[/red]"
+        )
+
+        reason_labels = {
+            'missing_landing': "Recorded as filed, but not on disk",
+            'duplicate_landing': "Two files recorded to one path",
+        }
+
+        discrepancy_table = Table(show_header=True, header_style="bold red")
+        discrepancy_table.add_column("Problem", style="red")
+        discrepancy_table.add_column("Path", style="cyan")
+
+        for reason, path in discrepancies:
+            # Untrusted path -- escaped and control-stripped before it becomes a
+            # table cell, matching every other per-file row (issue #9).
+            discrepancy_table.add_row(
+                safe_markup(reason_labels.get(reason, reason)),
+                safe_markup(path),
+            )
+
+        self.console.print(discrepancy_table)
 
     def display_missing_exif_warning(self, missing_files: List[Dict[str, Optional[str]]]):
         """

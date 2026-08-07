@@ -277,6 +277,77 @@ class TestDisplayResults(unittest.TestCase):
         self.cli.display_results({"status": "cancelled"})
         self.assertEqual(self.cli.console.export_text().strip(), "")
 
+    def test_landing_discrepancy_outranks_the_failure_title(self):
+        """An accounting mismatch takes the headline over "With Errors" (#69).
+
+        Ranked highest of the non-dry-run branches on purpose: every other
+        condition reports an outcome the tool knows about accurately, whereas
+        this one means the counts in the table itself are unreliable. A run with
+        BOTH a failure and a discrepancy must lead with the discrepancy.
+        """
+        self.cli.display_results({
+            "status": "completed",
+            "files_processed": 5,
+            "files_failed": 1,
+            "landing_discrepancies": 1,
+            "landing_discrepancy_list": [("missing_landing", "backup/photos/a.jpg")],
+            "failed_files": [],
+        })
+        output = self.cli.console.export_text()
+        # The title wraps across lines in this narrow table, so assert on its
+        # words rather than the joined string (same as test_quarantine_title).
+        self.assertIn("ACCOUNTING", output)
+        self.assertIn("MISMATCH", output)
+        self.assertNotIn("With Errors", output)
+
+    def test_landing_discrepancy_title_renders_red_not_yellow(self):
+        """Styled bold red (SGR 1;31), not the yellow used for known outcomes."""
+        self.cli.display_results({
+            "status": "completed",
+            "files_processed": 2,
+            "landing_discrepancies": 1,
+            "landing_discrepancy_list": [("missing_landing", "backup/photos/a.jpg")],
+        })
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;31m", styled, "mismatch title was not bold red")
+        self.assertNotIn("\x1b[1;32m", styled, "mismatch title rendered success green")
+
+    def test_landing_discrepancy_names_each_path_and_warns_about_the_counts(self):
+        """The detail table names the path and says the summary is untrustworthy."""
+        self.cli.display_results({
+            "status": "completed",
+            "files_processed": 2,
+            "landing_discrepancies": 2,
+            "landing_discrepancy_list": [
+                ("missing_landing", "backup/photos/2024.01.01.00.00.01.jpg"),
+                ("duplicate_landing", "backup/photos/2024.01.01.00.00.02.jpg"),
+            ],
+        })
+        output = self.cli.console.export_text()
+        self.assertIn("2024.01.01.00.00.01.jpg", output)
+        self.assertIn("2024.01.01.00.00.02.jpg", output)
+        self.assertIn("Recorded as filed, but not on disk", output)
+        self.assertIn("Two files recorded to one path", output)
+        # The user must be told not to act on the numbers, and specifically not
+        # to delete their originals on the strength of them.
+        self.assertIn("cannot be trusted", output)
+        self.assertIn("Unverified Landings", output)
+
+    def test_clean_run_renders_no_discrepancy_section(self):
+        """Zero discrepancies must not add a row or a table to a clean run."""
+        self.cli.display_results({
+            "status": "completed",
+            "files_processed": 3,
+            "landing_discrepancies": 0,
+            "landing_discrepancy_list": [],
+        })
+        output = self.cli.console.export_text()
+        self.assertIn("Success!", output)
+        # Bare "ACCOUNTING", not the joined title: the title wraps, so asserting
+        # the joined string would pass even if the mismatch branch had fired.
+        self.assertNotIn("ACCOUNTING", output)
+        self.assertNotIn("Unverified Landings", output)
+
     def test_dry_run_title(self):
         """A dry run renders the dry-run titled results table."""
         self.cli.display_results(

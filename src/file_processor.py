@@ -395,6 +395,15 @@ class FileProcessor:
         # _generate_summary -- and are otherwise rendered as separate rows so
         # neither explanation gets diluted by the other.
         self._skipped_files: List[Tuple[str, str]] = []
+        # Recorded landings that the filesystem does not corroborate, as
+        # (reason, path) (issue #69). Populated by ``_verify_landings``, which
+        # cross-checks ``_processed_files`` and ``_quarantined_files`` against
+        # disk just before the summary is built. Every other accumulator here
+        # answers "what did the tool decide to do"; this one is the only one
+        # that answers "did that decision actually take effect", which is why
+        # it is a cross-check rather than a fifth outcome bucket -- see
+        # ``_verify_landings`` and the identity note in ``_generate_summary``.
+        self._landing_discrepancies: List[Tuple[str, str]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -617,6 +626,14 @@ class FileProcessor:
                 self._skipped_sidecars.append(('run_archived_nothing', file_path))
         else:
             self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
+
+        # Audit the run's own bookkeeping against the filesystem before
+        # reporting it (issue #69). Deliberately placed here rather than inside
+        # _generate_summary: the two early returns above are reached before any
+        # file was processed (a missing export directory, or a caller declining
+        # the on_categorized gate), so there is nothing to verify on those paths,
+        # and _generate_summary stays a pure reader of the accumulators.
+        self._verify_landings(dry_run)
 
         # Generate summary
         return self._generate_summary()
@@ -1819,6 +1836,96 @@ class FileProcessor:
         else:
             shutil.move(source, destination)
 
+    def _verify_landings(self, dry_run: bool) -> None:
+        """
+        Cross-check every recorded landing against the filesystem (issue #69).
+
+        The accounting identity documented on :meth:`_generate_summary` is built
+        entirely from ``len()`` of in-memory accumulators, so it proves the
+        tool's counters agree with each other and nothing more. ``files_processed``
+        is ``len(self._processed_files)``, and an entry lands there on the
+        strength of ``shutil.move`` not having raised. That leaves a gap this
+        method closes: a recorded landing that produced no file, or two records
+        naming one file, would otherwise still print "Success!", because no code
+        path ever looked at ``backup/`` again after writing to it.
+
+        Two properties are checked, both unambiguous:
+
+        * **Existence** -- every recorded ``final_path`` must be a file on disk.
+        * **Distinctness** -- no two records may name the same ``final_path``.
+          Destinations are claimed atomically with ``O_CREAT | O_EXCL`` (issue
+          #6), so a duplicate is necessarily a bug; it is also the one failure
+          shape that leaves both the counts and the filenames looking entirely
+          ordinary, which is exactly why it needs an explicit assertion rather
+          than trusting the reservation to be correct.
+
+        A zero-byte landing is deliberately NOT flagged. It is the signature of
+        an orphaned reservation, but it is also what a legitimately empty source
+        file produces, and this runs on every real run over a user's personal
+        archive -- a check that cries wolf every run teaches the user to ignore
+        the banner, which costs more than the case it catches (the same reasoning
+        that kept a bare ``.DS_Store`` from demoting the banner in issue #30).
+
+        Dry runs are skipped outright, and the flag is required rather than
+        inferred from an empty ``_processed_files``: a dry run never appends
+        there, but :meth:`_quarantine_file` DOES record a quarantined entry whose
+        ``final_path`` was only resolved, never created. Inferring "nothing to
+        check" from ``_processed_files`` alone would therefore report a phantom
+        discrepancy for every undecodable file in a dry run, breaking the #10
+        parity this check has no business touching.
+
+        Findings are recorded in ``_landing_discrepancies`` rather than
+        ``_failed_files``: those files are already counted in
+        ``files_processed``, so adding them to the failure bucket would break the
+        very identity this method exists to audit. They are a cross-check on the
+        ``files_processed`` term, not a fifth outcome.
+
+        Args:
+            dry_run: When True, returns immediately without touching the
+                filesystem -- nothing was moved, so there is nothing to verify.
+        """
+        if dry_run:
+            return
+
+        # Both lists describe bytes that should now be sitting in backup/ --
+        # archived photos and quarantined undecodables alike (issue #58) -- so
+        # they are verified on the same footing. Processed first, then
+        # quarantined, so reported order follows the order the run filed them.
+        recorded = self._processed_files + self._quarantined_files
+
+        # Insertion-ordered so a discrepancy report reads in processing order.
+        occurrences: Dict[str, int] = {}
+        for record in recorded:
+            final_path = record.get('final_path')
+            if not final_path:
+                # A record with no destination never claimed one; nothing to
+                # verify against. Not currently reachable for either list, but
+                # guarded so a future outcome shape cannot crash the audit.
+                continue
+            occurrences[final_path] = occurrences.get(final_path, 0) + 1
+
+        for final_path, count in occurrences.items():
+            if count > 1:
+                logger.error(
+                    "Accounting check failed: %s file(s) recorded as filed to "
+                    "the same path %s -- destinations are reserved exclusively, "
+                    "so this indicates a bug, not a user-visible condition",
+                    count, final_path,
+                )
+                self._landing_discrepancies.append(('duplicate_landing', final_path))
+
+        # Iterating the distinct paths, not ``recorded``, so a path that is both
+        # duplicated and absent is reported once per property rather than once
+        # per record.
+        for final_path in occurrences:
+            if not os.path.isfile(final_path):
+                logger.error(
+                    "Accounting check failed: %s was recorded as successfully "
+                    "filed but is not present in the backup directory",
+                    final_path,
+                )
+                self._landing_discrepancies.append(('missing_landing', final_path))
+
     def _generate_summary(self) -> Dict[str, Any]:
         """
         Generate processing summary.
@@ -1924,6 +2031,19 @@ class FileProcessor:
             # itself, matching 'missing_exif_list' above (issue #37's
             # no-aliasing precedent).
             'skipped_sidecar_files': self._skipped_sidecars.copy(),
+            # Recorded landings the filesystem did not corroborate (issue #69).
+            # NOT a term in the accounting identity above: these files are
+            # already counted in files_processed (or files_quarantined), so
+            # adding them anywhere in that identity would double-count. They are
+            # an audit OF that identity's "moved" terms -- a non-zero count here
+            # means the summary above cannot be trusted, which is why it also
+            # withholds "Success!" via is_unqualified_success.
+            'landing_discrepancies': len(self._landing_discrepancies),
+            # (reason, path) pairs, reason 'missing_landing' (recorded as filed
+            # but absent from disk) or 'duplicate_landing' (two records naming
+            # one path). A fresh list, not the internal one (issue #37's
+            # no-aliasing precedent).
+            'landing_discrepancy_list': self._landing_discrepancies.copy(),
             # (reason, path) pairs for files the scan declined to collect --
             # see the __init__ comment on _skipped_files for 'junk' vs.
             # 'hidden'. A fresh list, not the internal one itself, matching
@@ -1944,10 +2064,11 @@ class FileProcessor:
         need to reset mid-lifecycle (or a test asserting the reset is
         complete) still has an explicit hook.
 
-        Resets this object's own seven private accumulators
+        Resets this object's own eight private accumulators
         (``_processed_files``, ``_used_timestamps``, ``_failed_files``,
         ``_quarantined_files``, ``_deleted_sidecars``, ``_skipped_sidecars``,
-        ``_skipped_files``), ``_conversion_log`` and ``_missing_exif_records``,
+        ``_skipped_files``, ``_landing_discrepancies``), ``_conversion_log``
+        and ``_missing_exif_records``,
         plus every collaborator's own bookkeeping
         (``ExifHandler.missing_exif_files``,
         ``HeicConverter.converted_files``/``failed_conversions``,
@@ -1965,6 +2086,7 @@ class FileProcessor:
         self._deleted_sidecars.clear()
         self._skipped_sidecars.clear()
         self._skipped_files.clear()
+        self._landing_discrepancies.clear()
         self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()
