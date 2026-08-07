@@ -694,7 +694,7 @@ class ExifHandler:
             The bytes of the ``moov`` box payload, or ``None`` if there is no
             ``moov`` atom or it exceeds the size cap.
         """
-        with open(file_path, "rb") as handle:
+        with Path(file_path).open("rb") as handle:
             offset = 0
             while True:
                 header = handle.read(8)

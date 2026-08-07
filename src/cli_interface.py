@@ -2,7 +2,6 @@
 Rich CLI interface with progress bars and beautiful output
 """
 
-import os
 import re
 import sys
 import logging
@@ -892,7 +891,7 @@ class _CLIProgressReporter(ProgressReporter):
         """Advance the conversion bar by one, naming the file just converted."""
         if self._progress is None or self._convert_task is None:
             return
-        name = safe_markup(os.path.basename(path))
+        name = safe_markup(Path(path).name)
         self._progress.update(
             self._convert_task, description=f"Converting {name}..."
         )
@@ -902,7 +901,7 @@ class _CLIProgressReporter(ProgressReporter):
         """Advance the organize bar by one, naming the file just handled."""
         if self._progress is None or self._organize_task is None:
             return
-        name = safe_markup(os.path.basename(path))
+        name = safe_markup(Path(path).name)
         self._progress.update(
             self._organize_task, description=f"Organizing {name}..."
         )
