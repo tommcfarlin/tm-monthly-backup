@@ -9,7 +9,11 @@ therefore accumulated every spelling a source app happened to use:
 ``2024.01.15.14.30.42.jpeg``, defeating the entire point of imposing one
 deterministic naming scheme. ``FileCategorizer.normalize_extension`` (a new
 module-level mapping, per the issue) now lowercases every output extension and
-collapses ``.jpeg`` -> ``.jpg`` and ``.tiff`` -> ``.tif``; every other
+collapses ``.jpeg`` -> ``.jpg``, ``.tiff`` -> ``.tif``, and ``.mpeg`` -> ``.mpg``
+(the third pair authorized during review round 1: ``.mpg``/``.mpeg`` are the
+same container/codec and both live in ``VIDEO_EXTENSIONS``, so leaving them
+unmapped would reproduce the exact two-spellings-per-format defect this issue
+exists to remove, just in ``videos/`` instead of ``photos/``); every other
 extension (RAW formats, ``.heif``) is lowercased but otherwise left alone.
 
 These tests run the real ``FileProcessor.process_all_files`` pipeline end to
@@ -18,14 +22,54 @@ so they fail if the normalization is removed, narrowed, or misapplied to the
 name-preserving quarantine/unknown routes.
 """
 
+import logging
 import os
 import shutil
 import tempfile
 import unittest
+from typing import List, Set
+
+from PIL import Image
+from PIL.ExifTags import Base
 
 from src.file_categorizer import FileCategorizer
 from src.file_processor import FileProcessor
 from tests.fixtures import make_exif_heic, make_exif_jpeg
+
+
+def _make_exif_tiff(path: str, date_time: str, color: str = "green") -> str:
+    """
+    Write a real TIFF carrying an IFD0 ``DateTime`` tag.
+
+    Unlike the JPEG/HEIC fixtures in ``tests/fixtures.py``, Pillow's TIFF
+    writer does not round-trip a ``DateTimeOriginal`` written into the Exif
+    sub-IFD (confirmed empirically: it comes back empty on reopen), so this
+    writes the IFD0 ``DateTime`` tag instead, which DOES round-trip for TIFF
+    and which ``ExifHandler.extract_timestamp`` falls back to when
+    ``DateTimeOriginal`` is absent.
+    """
+    image = Image.new("RGB", (16, 16), color=color)
+    exif = image.getexif()
+    exif[Base.DateTime.value] = date_time
+    image.save(path, format="TIFF", exif=exif)
+    return path
+
+
+class _PlanCapture(logging.Handler):
+    """Records the destinations a dry run reports, mirroring
+    ``tests.test_dry_run_parity._PlanCapture`` (kept as an independent copy
+    here rather than imported, so this file has no cross-file coupling to
+    another issue's test module).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.targets: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith("[DRY RUN]") and " -> " in message:
+            self.targets.append(message.rsplit(" -> ", 1)[1].strip())
 
 
 class TestNormalizeExtensionMapping(unittest.TestCase):
@@ -41,6 +85,10 @@ class TestNormalizeExtensionMapping(unittest.TestCase):
             '.tiff': '.tif',
             '.TIF': '.tif',
             '.tif': '.tif',
+            '.MPEG': '.mpg',
+            '.mpeg': '.mpg',
+            '.MPG': '.mpg',
+            '.mpg': '.mpg',
         }
         for source, expected in cases.items():
             self.assertEqual(
@@ -159,6 +207,53 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
         self.assertEqual(len(landed), 1)
         self.assertTrue(landed[0].endswith(".cr2"), landed)
 
+    # -- .tiff/.tif alias, end to end (review round 1, item 3) --------- #
+
+    def test_tiff_alias_lands_as_dot_tif(self):
+        """A .TIFF source is decoded, timestamped, and lands as .tif.
+
+        .tiff -> .tif was previously pinned only at the unit-mapping level;
+        this exercises it through the real decode-then-rename pipeline, since
+        both spellings sit in ``DECODABLE_IMAGE_EXTENSIONS`` and a future
+        refactor could silently drop the alias without any test catching it.
+        """
+        _make_exif_tiff(
+            self._export_path("scan_0001.TIFF"), date_time="2019:11:03 08:15:00"
+        )
+
+        self.processor.process_all_files(dry_run=False)
+
+        expected = self._backup_path("photos", "2019.11.03.08.15.00.tif")
+        self.assertTrue(
+            os.path.isfile(expected), f"expected canonical .tif landing at {expected}"
+        )
+        landed = os.listdir(self._backup_path("photos"))
+        self.assertEqual(landed, ["2019.11.03.08.15.00.tif"])
+
+    # -- .mpeg/.mpg alias, end to end (authorized in review round 1) -- #
+
+    def test_mpeg_alias_lands_as_dot_mpg(self):
+        """A .mpeg source (filename-dated fallback) lands as .mpg.
+
+        Authorized during review as a scope expansion beyond the issue's own
+        two named aliases: .mpg and .mpeg are the same container/codec and
+        both live in ``VIDEO_EXTENSIONS``, so leaving them unmapped would
+        reproduce the exact defect this issue targets, just in videos/.
+        """
+        with open(
+            self._export_path("VID_2020-09-09-10-11-12.mpeg"), "wb"
+        ) as handle:
+            handle.write(b"not a real mpeg video" * 4)
+
+        self.processor.process_all_files(dry_run=False)
+
+        expected = self._backup_path("videos", "2020.09.09.10.11.12.mpg")
+        self.assertTrue(
+            os.path.isfile(expected), f"expected canonical .mpg landing at {expected}"
+        )
+        landed = os.listdir(self._backup_path("videos"))
+        self.assertEqual(landed, ["2020.09.09.10.11.12.mpg"])
+
     # -- Acceptance criterion 4 -------------------------------------- #
 
     def test_no_format_appears_in_two_spellings_in_one_directory(self):
@@ -195,18 +290,39 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
     # -- HEIC invariant is undisturbed -------------------------------- #
 
     def test_heic_and_heif_sources_still_force_dot_jpg(self):
-        """HEIC conversion output stays .jpg regardless of source case."""
+        """HEIC/HEIF conversion output stays .jpg regardless of source case.
+
+        Covers three source spellings ``is_heic_file`` treats as equivalent
+        (``.HEIC``, lowercase ``.heic``, and ``.heif``) at three distinct
+        timestamps, so this actually exercises "regardless of source case"
+        rather than only the single uppercase-.HEIC case the name promised
+        but the original version of this test did not cover.
+        """
         make_exif_heic(
             self._export_path("IMG_0001.HEIC"),
             date_time_original="2022:03:04 05:06:07",
             color="blue",
         )
+        make_exif_heic(
+            self._export_path("img_0002.heic"),
+            date_time_original="2022:03:04 05:06:08",
+            color="blue",
+        )
+        make_exif_heic(
+            self._export_path("img_0003.heif"),
+            date_time_original="2022:03:04 05:06:09",
+            color="blue",
+        )
 
         results = self.processor.process_all_files(dry_run=False)
 
-        self.assertEqual(results["heic_conversions"], 1)
-        expected = self._backup_path("photos", "2022.03.04.05.06.07.jpg")
-        self.assertTrue(os.path.isfile(expected))
+        self.assertEqual(results["heic_conversions"], 3)
+        for second in ("07", "08", "09"):
+            expected = self._backup_path("photos", f"2022.03.04.05.06.{second}.jpg")
+            self.assertTrue(os.path.isfile(expected), f"missing {expected}")
+        landed = os.listdir(self._backup_path("photos"))
+        self.assertEqual(len(landed), 3)
+        self.assertTrue(all(name.endswith(".jpg") for name in landed), landed)
 
     # -- Quarantine / unknown routes are deliberately NOT normalized -- #
 
@@ -251,6 +367,14 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
         file's timestamp is bumped a second -- exactly the existing #6
         cross-run collision behavior, now proven to also hold when the two
         runs disagree on extension spelling.
+
+        The incoming source is deliberately ``.JPEG`` (an aliased spelling),
+        not plain ``.jpg``: this is what makes the test actually exercise
+        #55's interaction with #6, rather than merely re-proving #6 in
+        isolation (an already-canonical ``.jpg`` source would pass identically
+        against the pre-#55 code, since there would be nothing for this issue
+        to normalize). The bumped landing must be BOTH resolved to the next
+        second AND alias-collapsed to ``.jpg``.
         """
         photos_dir = self._backup_path("photos")
         os.makedirs(photos_dir, exist_ok=True)
@@ -261,7 +385,7 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
             legacy_contents = handle.read()
 
         make_exif_jpeg(
-            self._export_path("new_photo.jpg"),
+            self._export_path("new_photo.JPEG"),
             date_time_original="2024:01:15 14:30:45",
             color="green",
         )
@@ -283,6 +407,155 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
             f"{os.listdir(photos_dir)}",
         )
         self.assertEqual(len(os.listdir(photos_dir)), 2)
+
+
+class TestExtensionNormalizationDryRunParity(unittest.TestCase):
+    """
+    Dry-run / real-run parity for the normalized extension (issues #10 x #55).
+
+    ``tests/test_dry_run_parity.py``'s mixed-export fixture is all-lowercase,
+    already-canonical for every non-HEIC input (``IMG_0001.jpg``,
+    ``Screenshot_....png``, ``VID_....mov``, ``mystery.xyz``, ``broken.jpg``,
+    two more ``.jpg``s), so ``FileCategorizer.normalize_extension`` is a no-op
+    for every single one of them and that suite's parity test cannot detect a
+    divergence THIS issue's normalization could introduce. ``planned_extension``
+    (``src/file_processor.py``) is currently computed once, before the
+    ``dry_run``/real-run branch splits, and read identically by both --
+    but nothing pins that the normalization call specifically stays on that
+    shared line rather than migrating into only the real-run ``else:``
+    branch, which would make dry run and real run silently disagree on
+    extension while staying green everywhere else.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.dry_export = os.path.join(self.temp_dir, "dry_export")
+        self.dry_backup = os.path.join(self.temp_dir, "dry_backup")
+        self.real_export = os.path.join(self.temp_dir, "real_export")
+        self.real_backup = os.path.join(self.temp_dir, "real_backup")
+        for path in (self.dry_export, self.real_export):
+            os.makedirs(path, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _capture_dry_run_plan(self, export_dir: str, backup_dir: str) -> Set[str]:
+        processor = FileProcessor(export_dir, backup_dir)
+        capture = _PlanCapture()
+        logger = logging.getLogger("src.file_processor")
+        previous_level = logger.level
+        logger.addHandler(capture)
+        logger.setLevel(logging.INFO)
+        try:
+            processor.process_all_files(dry_run=True)
+        finally:
+            logger.removeHandler(capture)
+            logger.setLevel(previous_level)
+        return {os.path.relpath(target, backup_dir) for target in capture.targets}
+
+    def _relative_backup_tree(self, backup_dir: str) -> Set[str]:
+        found: Set[str] = set()
+        for dirpath, _dirs, filenames in os.walk(backup_dir):
+            for filename in filenames:
+                abs_path = os.path.join(dirpath, filename)
+                found.add(os.path.relpath(abs_path, backup_dir))
+        return found
+
+    def _populate_mixed_case_export(self, export_dir: str) -> None:
+        """Fill ``export_dir`` with only aliased/mixed-case, non-HEIC sources.
+
+        HEIC is deliberately excluded here -- its dry/real extension parity
+        was already pinned before this fix
+        (``test_heic_dry_run_reports_the_jpeg_a_real_run_lands``); this
+        fixture targets the gap that test cannot see: non-HEIC sources whose
+        raw suffix needs lowercasing/alias-collapsing.
+        """
+        make_exif_jpeg(
+            os.path.join(export_dir, "IMG_0001.JPG"),
+            date_time_original="2024:01:15 14:30:45",
+            color="green",
+        )
+        make_exif_jpeg(
+            os.path.join(export_dir, "IMG_0002.jpeg"),
+            date_time_original="2024:01:16 09:00:00",
+            color="green",
+        )
+        _make_exif_tiff(
+            os.path.join(export_dir, "scan_0003.TIFF"),
+            date_time="2019:11:03 08:15:00",
+        )
+        with open(
+            os.path.join(export_dir, "VID_2020-09-09-10-11-12.mpeg"), "wb"
+        ) as handle:
+            handle.write(b"not a real mpeg video" * 4)
+
+    def test_dry_run_reports_normalized_extensions_matching_real_run(self):
+        """Dry-run plan and real-run landings agree, both fully normalized."""
+        self._populate_mixed_case_export(self.dry_export)
+        self._populate_mixed_case_export(self.real_export)
+
+        dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
+
+        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor.process_all_files(dry_run=False)
+        real_tree = self._relative_backup_tree(self.real_backup)
+
+        expected = {
+            os.path.join("photos", "2024.01.15.14.30.45.jpg"),
+            os.path.join("photos", "2024.01.16.09.00.00.jpg"),
+            os.path.join("photos", "2019.11.03.08.15.00.tif"),
+            os.path.join("videos", "2020.09.09.10.11.12.mpg"),
+        }
+        self.assertEqual(
+            real_tree, expected, "real run did not land the expected normalized set"
+        )
+        self.assertEqual(
+            dry_plan,
+            real_tree,
+            "dry-run plan diverged from the real run's normalized landings",
+        )
+
+    def test_dry_run_predicts_bumped_and_normalized_name_over_legacy_archive(self):
+        """
+        A dry run over an archive already holding a legacy mixed-case name
+        must predict the SAME bumped, normalized landing a real run produces
+        -- not the legacy spelling, and not the un-bumped second.
+        """
+        for backup_dir in (self.dry_backup, self.real_backup):
+            photos_dir = os.path.join(backup_dir, "photos")
+            os.makedirs(photos_dir, exist_ok=True)
+            with open(
+                os.path.join(photos_dir, "2024.01.15.14.30.45.JPG"), "wb"
+            ) as handle:
+                handle.write(b"legacy uppercase-named archive entry")
+
+        for export_dir in (self.dry_export, self.real_export):
+            make_exif_jpeg(
+                os.path.join(export_dir, "new_photo.JPEG"),
+                date_time_original="2024:01:15 14:30:45",
+                color="green",
+            )
+
+        dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
+
+        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor.process_all_files(dry_run=False)
+        real_new_file = os.path.join(
+            self.real_backup, "photos", "2024.01.15.14.30.46.jpg"
+        )
+        self.assertTrue(
+            os.path.isfile(real_new_file),
+            f"real run did not bump+normalize as expected; photos/ has "
+            f"{os.listdir(os.path.join(self.real_backup, 'photos'))}",
+        )
+
+        expected_relative = os.path.join("photos", "2024.01.15.14.30.46.jpg")
+        self.assertEqual(
+            dry_plan,
+            {expected_relative},
+            "dry run must predict the bumped, normalized name the real run "
+            "actually lands, not the legacy spelling or the un-bumped second",
+        )
 
 
 if __name__ == "__main__":

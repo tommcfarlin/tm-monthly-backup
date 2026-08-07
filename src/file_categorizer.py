@@ -81,15 +81,20 @@ class FileCategorizer:
     # Canonical output spelling for extensions that have more than one common
     # alias (issue #55). This module already treats both spellings of each
     # pair as equivalent for categorization -- both live in ``PHOTO_EXTENSIONS``
-    # above -- and ``HeicConverter`` always writes lowercase ``.jpg`` for its
-    # converted output, so the codebase has already decided lowercase-and-one-
-    # spelling is canonical everywhere except the one place a human actually
-    # sees it: the filename ``FileProcessor`` composes for ``backup/``. This map
-    # is that decision made explicit and centralized, rather than inlined in
-    # ``FileProcessor._process_single_file``, so both aliased pairs collapse to
-    # a single on-disk spelling:
+    # or ``VIDEO_EXTENSIONS`` above -- and ``HeicConverter`` always writes
+    # lowercase ``.jpg`` for its converted output, so the codebase has already
+    # decided lowercase-and-one-spelling is canonical everywhere except the one
+    # place a human actually sees it: the filename ``FileProcessor`` composes
+    # for ``backup/``. This map is that decision made explicit and centralized,
+    # rather than inlined in ``FileProcessor._process_single_file``, so every
+    # aliased pair collapses to a single on-disk spelling:
     #   .jpeg -> .jpg   (matches the spelling HeicConverter already writes)
     #   .tiff -> .tif   (same short-form convention as .jpg, for consistency)
+    #   .mpeg -> .mpg   (same container/codec as .mpg, same short-form pattern;
+    #                    both live in VIDEO_EXTENSIONS as the same format, so
+    #                    leaving this pair unmapped would leave exactly the
+    #                    two-spellings-per-format defect this issue exists to
+    #                    remove, just in videos/ instead of photos/)
     # Every other extension is intentionally absent and passes through
     # unchanged apart from lowercasing: ``.heif`` is a distinct format from
     # ``.heic`` (a differently-boxed HEIF still, but not what this tool's HEIC
@@ -99,6 +104,7 @@ class FileCategorizer:
     EXTENSION_ALIASES = {
         '.jpeg': '.jpg',
         '.tiff': '.tif',
+        '.mpeg': '.mpg',
     }
 
     @classmethod
