@@ -786,7 +786,7 @@ class FileCategorizer:
         """
         if category is FileCategory.SIDECAR:
             raise ValueError(f"No target directory defined for category: {category}")
-        return os.path.join(base_backup_dir, category.value)
+        return str(Path(base_backup_dir) / category.value)
 
     def ensure_target_directories(self, base_backup_dir: str) -> List[str]:
         """

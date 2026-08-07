@@ -646,7 +646,7 @@ class FileProcessor:
             :meth:`_generate_summary` for how the two are reconciled into the
             files_scanned/files_skipped accounting.
         """
-        if not os.path.exists(self.export_dir):
+        if not Path(self.export_dir).exists():
             logger.error("Export directory does not exist: %s", self.export_dir)
             return []
 
@@ -684,14 +684,14 @@ class FileProcessor:
                     skip_reason = None
 
                 if skip_reason is not None:
-                    skipped_path = os.path.join(root, filename)
+                    skipped_path = str(Path(root) / filename)
                     logger.info(
                         "Skipping %s file: %s", skip_reason, skipped_path
                     )
                     self._skipped_files.append((skip_reason, skipped_path))
                     continue
 
-                path = os.path.join(root, filename)
+                path = str(Path(root) / filename)
 
                 # Reject anything that is not a regular file (issue #54).
                 # os.walk yields directory entries, but its ``filenames`` list
@@ -699,13 +699,13 @@ class FileProcessor:
                 # nodes -- non-regular files an untrusted archive (tar/cpio)
                 # can materialize in export/. Opening a FIFO for reading blocks
                 # forever until a writer appears, hanging the entire run (even
-                # --dry-run) once a later Image.open reaches it. os.path.isfile
-                # uses os.stat -- it never opens the file, so this check cannot
+                # --dry-run) once a later Image.open reaches it. Path.is_file()
+                # uses stat() -- it never opens the file, so this check cannot
                 # itself block -- and returns True only for regular files and
                 # symlinks pointing at regular files. A symlink to a real image
                 # is therefore kept (its target is resolved/named in issue #63);
                 # FIFOs, sockets, devices, and broken symlinks are skipped.
-                if not os.path.isfile(path):
+                if not Path(path).is_file():
                     logger.warning("Skipping non-regular file: %s", path)
                     continue
 
@@ -1297,7 +1297,7 @@ class FileProcessor:
             # reporting the actual cause (issue #23 fix round 1).
             target_path = None
             try:
-                # No os.makedirs here (issue #23): target_dir is always one of
+                # No mkdir() here (issue #23): target_dir is always one of
                 # the four directories process_all_files already created via
                 # ensure_target_directories(self.backup_dir) before this loop
                 # started -- every category reaching this branch is PHOTO,
@@ -1399,7 +1399,7 @@ class FileProcessor:
             target_dir: The ``backup/unknown/`` directory to file it into.
             dry_run: If True, only log what would happen; touch nothing.
         """
-        original_name = os.path.basename(file_path)
+        original_name = Path(file_path).name
 
         if dry_run:
             target_path = self._resolve_named_destination_dry_run(
@@ -1414,7 +1414,7 @@ class FileProcessor:
         try:
             # Create backup/unknown/ only now that a file is actually landing in
             # it -- this is what keeps the directory from being an empty phantom.
-            os.makedirs(target_dir, exist_ok=True)
+            Path(target_dir).mkdir(parents=True, exist_ok=True)
 
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
@@ -1458,7 +1458,7 @@ class FileProcessor:
         Returns:
             The ``backup/corrupt/`` path.
         """
-        return os.path.join(self.backup_dir, "corrupt")
+        return str(Path(self.backup_dir) / "corrupt")
 
     def _is_decodable_image(self, file_path: str) -> bool:
         """
@@ -1531,7 +1531,7 @@ class FileProcessor:
             file_path: Source path of the undecodable file.
             dry_run: If True, only log/record the decision; touch nothing.
         """
-        original_name = os.path.basename(file_path)
+        original_name = Path(file_path).name
         target_dir = self.get_quarantine_directory()
 
         if dry_run:
@@ -1554,7 +1554,7 @@ class FileProcessor:
         try:
             # Create backup/corrupt/ only now that a file is actually landing in
             # it -- this is what keeps the directory from being an empty phantom.
-            os.makedirs(target_dir, exist_ok=True)
+            Path(target_dir).mkdir(parents=True, exist_ok=True)
 
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
@@ -1607,7 +1607,7 @@ class FileProcessor:
         candidate = filename
         counter = 1
         while True:
-            target_path = os.path.join(target_dir, candidate)
+            target_path = str(Path(target_dir) / candidate)
             try:
                 fd = os.open(
                     target_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
@@ -1640,10 +1640,10 @@ class FileProcessor:
         ext = Path(filename).suffix
         candidate = filename
         counter = 1
-        while os.path.exists(os.path.join(target_dir, candidate)):
+        while (Path(target_dir) / candidate).exists():
             candidate = f"{stem} ({counter}){ext}"
             counter += 1
-        return os.path.join(target_dir, candidate)
+        return str(Path(target_dir) / candidate)
 
     def _taken_names(self, target_dir: str) -> Set[str]:
         """
@@ -1667,9 +1667,9 @@ class FileProcessor:
         if names is None:
             names = set()
             try:
-                for entry in os.listdir(target_dir):
-                    if os.path.isfile(os.path.join(target_dir, entry)):
-                        names.add(Path(entry).stem)
+                for entry in Path(target_dir).iterdir():
+                    if entry.is_file():
+                        names.add(entry.stem)
             except FileNotFoundError:
                 # The directory does not exist yet: nothing is claimed in it.
                 pass
@@ -1706,7 +1706,7 @@ class FileProcessor:
 
         while True:
             stem = self.exif_handler.format_timestamp_filename(adjusted)
-            target_path = os.path.join(target_dir, f"{stem}{file_extension}")
+            target_path = str(Path(target_dir) / f"{stem}{file_extension}")
             try:
                 fd = os.open(
                     target_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
@@ -1755,7 +1755,7 @@ class FileProcessor:
         adjusted = self.exif_handler.handle_duplicate_timestamp(timestamp, names)
         stem = self.exif_handler.format_timestamp_filename(adjusted)
         names.add(stem)
-        target_path = os.path.join(target_dir, f"{stem}{file_extension}")
+        target_path = str(Path(target_dir) / f"{stem}{file_extension}")
         return adjusted, target_path
 
     def _discard_reservation(self, target_path: str) -> None:
@@ -1767,7 +1767,7 @@ class FileProcessor:
                 are ignored so cleanup never masks the original move failure.
         """
         try:
-            os.remove(target_path)
+            Path(target_path).unlink()
         except OSError:
             pass
 
@@ -1792,8 +1792,8 @@ class FileProcessor:
           delete, or modify that target. So the target's real bytes are COPIED
           onto the destination (:func:`shutil.copy2` of the fully resolved real
           path, which also mirrors the target's mtime), and then only the *link*
-          is removed from ``export/`` -- :func:`os.remove` on a symlink unlinks
-          the link, never the file it points at. The target is left exactly
+          is removed from ``export/`` -- :meth:`Path.unlink` on a symlink
+          unlinks the link, never the file it points at. The target is left exactly
           where it was. Issue #54 already guaranteed a symlink reaching here
           points at a regular file (broken links and links to FIFOs/sockets were
           filtered at the scan boundary), so the resolved path is a real file.
@@ -1809,7 +1809,7 @@ class FileProcessor:
         """
         if os.path.islink(source):
             shutil.copy2(os.path.realpath(source), destination)
-            os.remove(source)
+            Path(source).unlink()
         else:
             shutil.move(source, destination)
 
