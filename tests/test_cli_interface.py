@@ -181,6 +181,38 @@ class TestDisplayFileScanResults(unittest.TestCase):
         self.assertIn("Unknown", text)
         self.assertIn("Total", text)
 
+    def test_generated_files_add_generated_row(self):
+        """A batch containing AI/C2PA-provenance content renders a Generated
+        row in the discovery table (issue #19) -- before this fix, the
+        table had no Generated row at all, so a batch entirely of generated
+        content silently vanished from the pre-run discovery display even
+        though it categorizes correctly (``get_categorization_stats``
+        already carried the count)."""
+        from tests.fixtures import make_png_with_text
+
+        generated = make_png_with_text(
+            os.path.join(self.temp_dir, "gen.png"),
+            {"c2pa": "manifest-stub"},
+        )
+
+        self.cli.display_file_scan_results([generated])
+
+        text = self.cli.console.export_text()
+        self.assertIn("Generated", text)
+        self.assertIn("Total", text)
+
+    def test_no_generated_files_omits_generated_row(self):
+        """An all-photo batch renders no Generated row at all (conditional,
+        matching the pre-existing Unknown-row style), not a permanent
+        "Generated: 0" line."""
+        photo = os.path.join(self.temp_dir, "photo.jpg")
+        open(photo, "wb").close()
+
+        self.cli.display_file_scan_results([photo])
+
+        text = self.cli.console.export_text()
+        self.assertNotIn("Generated", text)
+
 
 class TestProcessWithProgress(unittest.TestCase):
     """process_with_progress: the no-files short-circuit and a sidecar run."""

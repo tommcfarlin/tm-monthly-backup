@@ -17,6 +17,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from .file_processor import FileProcessor, ProgressReporter, Settings
+from .file_categorizer import CATEGORY_DISPLAY_ORDER, FileCategory
 
 # Initialize rich console
 console = Console()
@@ -359,6 +360,15 @@ class CLIInterface:
         ``FileProcessor`` already performed -- no second ``batch_categorize``
         (issue #13).
 
+        Rows are driven by :data:`FileCategorizer.CATEGORY_DISPLAY_ORDER`
+        (issue #19) rather than a hand-written list that omitted Generated:
+        a category earns an unconditional row when ``scan_always`` is set
+        (Photos/Videos/Screenshots/Sidecar), otherwise only when its count
+        is non-zero -- the style already used for Unknown here, now applied
+        to Generated too, so an all-photos run does not carry a permanent
+        "Generated: 0" line implying generated content is as routine a
+        category as Photos.
+
         Args:
             stats: Categorization counts from
                 :meth:`FileCategorizer.get_categorization_stats`.
@@ -369,13 +379,12 @@ class CLIInterface:
         table.add_column("Count", justify="right", style="green")
         table.add_column("Description", style="dim")
 
-        table.add_row("Photos", str(stats['photos']), "JPEG, PNG, HEIC, etc.")
-        table.add_row("Videos", str(stats['videos']), "MOV, MP4, M4V, etc.")
-        table.add_row("Screenshots", str(stats['screenshots']), "PNG files with screenshot patterns")
-        table.add_row("Sidecar Files", str(stats['sidecar']), "Apple .aae files (validated, then deleted)")
-
-        if stats['unknown'] > 0:
-            table.add_row("Unknown", str(stats['unknown']), "Unrecognized file types", style="yellow")
+        for info in CATEGORY_DISPLAY_ORDER:
+            count = stats[info.category.value]
+            if not info.scan_always and count == 0:
+                continue
+            style = "yellow" if info.category is FileCategory.UNKNOWN else None
+            table.add_row(info.label, str(count), info.scan_description, style=style)
 
         table.add_row("", "", "", style="dim")
         table.add_row("Total", str(stats['total']), "Files to process", style="bold")
@@ -549,15 +558,24 @@ class CLIInterface:
             breakdown_table.add_column("Files", justify="right", style="green")
             breakdown_table.add_column("Location", style="dim")
 
-            breakdown_table.add_row("Photos", str(stats.get('photos', 0)), "backup/photos/")
-            breakdown_table.add_row("Videos", str(stats.get('videos', 0)), "backup/videos/")
-            breakdown_table.add_row("Screenshots", str(stats.get('screenshots', 0)), "backup/screenshots/")
-
-            if stats.get('generated', 0) > 0:
-                breakdown_table.add_row("Generated", str(stats['generated']), "backup/generated/", style="magenta")
-
-            if stats.get('unknown', 0) > 0:
-                breakdown_table.add_row("Unknown", str(stats['unknown']), "backup/unknown/", style="yellow")
+            # Driven by the same shared registry as the pre-run discovery
+            # table and the text summary (issue #19). SIDECAR is skipped via
+            # its empty ``org_location``: sidecar candidates are deleted,
+            # never organized into a ``backup/<category>/`` directory, so
+            # it has no row here.
+            for info in CATEGORY_DISPLAY_ORDER:
+                if not info.org_location:
+                    continue
+                count = stats.get(info.category.value, 0)
+                if not info.org_always and count == 0:
+                    continue
+                if info.category is FileCategory.GENERATED:
+                    style = "magenta"
+                elif info.category is FileCategory.UNKNOWN:
+                    style = "yellow"
+                else:
+                    style = None
+                breakdown_table.add_row(info.label, str(count), info.org_location, style=style)
 
             if quarantine_count > 0:
                 breakdown_table.add_row(

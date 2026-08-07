@@ -31,6 +31,68 @@ class FileCategory(Enum):
     SIDECAR = "sidecar"
 
 
+class CategoryDisplayInfo(NamedTuple):
+    """One category's metadata for every summary rendering (issue #19)."""
+    category: FileCategory
+    label: str
+    scan_description: str
+    # "" (never None) for a category with no backup/ location -- see
+    # CATEGORY_DISPLAY_ORDER's own comment on SIDECAR below.
+    org_location: str
+    scan_always: bool
+    org_always: bool
+
+
+# Single ordered source of category display metadata, read by
+# ``get_file_summary`` (this module) and by ``CLIInterface``'s pre-run
+# discovery table (``display_categorization_summary``) and post-run
+# category breakdown (``display_results``). Before this issue, each of
+# those three renderings hand-wrote its own list of which categories to
+# show: ``get_categorization_stats`` carried a ``generated`` key from the
+# day it was added, but two of the three renderings silently never grew a
+# Generated row, so a run that filed files into ``backup/generated/``
+# reported a ``Total`` that did not reconcile with any visible line. Adding
+# a future ``FileCategory`` member now means adding one entry here; every
+# renderer that iterates this tuple picks it up without a separate edit.
+# ``org_location`` is ``""`` for ``SIDECAR``: sidecar candidates are
+# validated and deleted, never organized into a ``backup/<category>/``
+# directory, so the post-run breakdown table has nothing to show for them
+# and skips any entry whose ``org_location`` is falsy. ``scan_always``/
+# ``org_always`` say whether a category earns an unconditional row in that
+# rendering or only a conditional one, shown solely when its count is
+# non-zero -- the style ``display_results`` already used for Unknown
+# before this issue, now also applied to Generated and to the discovery
+# table's own Unknown/Generated rows for the same reason: an all-photos
+# run should not carry a permanent "Generated: 0" line implying generated
+# content is a routine category the way Photos/Videos/Screenshots are.
+CATEGORY_DISPLAY_ORDER: tuple[CategoryDisplayInfo, ...] = (
+    CategoryDisplayInfo(
+        FileCategory.PHOTO, "Photos", "JPEG, PNG, HEIC, etc.",
+        "backup/photos/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.VIDEO, "Videos", "MOV, MP4, M4V, etc.",
+        "backup/videos/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.SCREENSHOT, "Screenshots", "PNG files with screenshot patterns",
+        "backup/screenshots/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.GENERATED, "Generated", "AI-generated or heavily edited content",
+        "backup/generated/", False, False,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.UNKNOWN, "Unknown", "Unrecognized file types",
+        "backup/unknown/", False, False,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.SIDECAR, "Sidecar Files", "Apple .aae files (validated, then deleted)",
+        "", True, True,
+    ),
+)
+
+
 class ImageMetadata(NamedTuple):
     """
     Per-file image metadata, read once via a single ``Image.open`` (issue #24).
@@ -831,20 +893,26 @@ class FileCategorizer:
         """
         Get human-readable summary of categorized files.
 
+        Every category in :data:`CATEGORY_DISPLAY_ORDER` gets an
+        unconditional line here (issue #19), including ``Generated`` --
+        omitted before this fix even though :meth:`get_categorization_stats`
+        had carried its count from the day that key was added, so a run
+        that filed files into ``backup/generated/`` reported a ``Total``
+        that did not reconcile with any visible line above it.
+
         Returns:
             Formatted string summary
         """
         stats = self.get_categorization_stats()
 
-        summary_lines = [
-            "File Categorization Summary:",
-            f"  Photos: {stats['photos']} files",
-            f"  Videos: {stats['videos']} files",
-            f"  Screenshots: {stats['screenshots']} files",
-            f"  Unknown: {stats['unknown']} files",
-            f"  Sidecar (to delete): {stats['sidecar']} files",
-            f"  Total: {stats['total']} files"
-        ]
+        summary_lines = ["File Categorization Summary:"]
+        for info in CATEGORY_DISPLAY_ORDER:
+            # Sidecar candidates are deleted, not filed into backup/, so the
+            # text summary calls this out rather than reusing the plain
+            # "Sidecar Files" label the tables use.
+            label = "Sidecar (to delete)" if info.category is FileCategory.SIDECAR else info.label
+            summary_lines.append(f"  {label}: {stats[info.category.value]} files")
+        summary_lines.append(f"  Total: {stats['total']} files")
 
         return "\n".join(summary_lines)
 

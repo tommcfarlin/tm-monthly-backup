@@ -523,6 +523,71 @@ class TestFileCategorizer(unittest.TestCase):
         self.assertIn("Sidecar (to delete): 1 files", summary)
         self.assertIn("Total: 3 files", summary)
 
+    def test_get_file_summary_includes_generated(self):
+        """The Generated count must appear in the text summary (issue #19).
+
+        ``get_categorization_stats`` has carried a ``generated`` key since
+        the day it was added, but ``get_file_summary`` never rendered it: a
+        run that filed two files into ``backup/generated/`` logged a
+        ``Total: 2 files`` line with no visible line accounting for either
+        of them.
+        """
+        self.categorizer.categorized_files[FileCategory.GENERATED] = ["g1.png", "g2.png"]
+
+        summary = self.categorizer.get_file_summary()
+
+        self.assertIn("Generated: 2 files", summary)
+
+    def test_get_file_summary_line_items_sum_to_total(self):
+        """Every per-category line in the summary must sum to its own Total.
+
+        This is the assertion the issue names as the one that would have
+        caught the original defect directly: it parses every
+        ``  <Label>: <N> files`` line (skipping the ``Total`` line itself)
+        out of the rendered string and sums their counts, rather than
+        checking for any one label's presence -- so it fails for ANY
+        category silently omitted from the summary, not just Generated,
+        including one added by some future change to ``FileCategory`` that
+        forgets to add a line for it.
+        """
+        import re
+
+        self.categorizer.categorized_files[FileCategory.PHOTO] = ["p1.jpg", "p2.jpg"]
+        self.categorizer.categorized_files[FileCategory.VIDEO] = ["v1.mov"]
+        self.categorizer.categorized_files[FileCategory.SCREENSHOT] = ["s1.png"]
+        self.categorizer.categorized_files[FileCategory.GENERATED] = ["g1.png"]
+        self.categorizer.categorized_files[FileCategory.UNKNOWN] = ["u1.xyz"]
+        self.categorizer.categorized_files[FileCategory.SIDECAR] = ["sc1.aae", "sc2.aae"]
+
+        summary = self.categorizer.get_file_summary()
+
+        line_re = re.compile(r"^  (.+): (\d+) files$")
+        total_re = re.compile(r"^  Total: (\d+) files$")
+
+        line_items_sum = 0
+        reported_total = None
+        for line in summary.splitlines():
+            total_match = total_re.match(line)
+            if total_match:
+                reported_total = int(total_match.group(1))
+                continue
+            item_match = line_re.match(line)
+            if item_match:
+                line_items_sum += int(item_match.group(2))
+
+        self.assertIsNotNone(reported_total, "summary carried no parseable Total line")
+        self.assertEqual(
+            line_items_sum,
+            reported_total,
+            "the summary's own per-category lines do not sum to its Total "
+            "line -- some category present in the underlying stats is "
+            "missing a line in the rendered summary",
+        )
+        # Pin the expected value directly too, so a bug that dropped a
+        # category AND its count from the (still self-consistent) sum
+        # cannot slip past the reconciliation check above.
+        self.assertEqual(reported_total, 8)
+
     def test_clear_categorization(self):
         """Test clearing all categorized files"""
         # Setup test data
