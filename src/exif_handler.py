@@ -3,6 +3,7 @@ EXIF timestamp extraction and handling module for photos and videos
 """
 
 import os
+import re
 import struct
 import logging
 from datetime import date, datetime, time, timedelta
@@ -772,7 +773,6 @@ class ExifHandler:
                         line_lower = line.lower()
                         if not any(keyword in line_lower for keyword in ('creation', 'date', 'time')):
                             continue
-                        import re
                         date_match = re.search(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})', line)
                         if not date_match:
                             continue
@@ -884,8 +884,6 @@ class ExifHandler:
             datetime object if pattern found, None otherwise
         """
         filename = Path(file_path).name
-
-        import re
 
         # Pattern 1: IMG_YYYY-MM-DD-HH-MM-SS or similar. The date/time
         # separator also accepts whitespace (`\s`) alongside `_`/`-`, which

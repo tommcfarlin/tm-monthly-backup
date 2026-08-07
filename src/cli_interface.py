@@ -3,12 +3,10 @@ Rich CLI interface with progress bars and beautiful output
 """
 
 import re
-import sys
 import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
-import click
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 from rich.table import Table

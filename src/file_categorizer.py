@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
 
+from PIL import Image, UnidentifiedImageError
+
 from .media_types import (
     VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS,
     ifd0_tag_names,
@@ -333,8 +335,6 @@ class FileCategorizer:
             cannot be opened as an image at all (corrupt, zero-byte, or a
             format Pillow has no codec for -- e.g. RAW).
         """
-        from PIL import Image, UnidentifiedImageError
-
         # This is the only guard between a single bad file and the rest of
         # ``batch_categorize``'s loop, which has no try/except of its own
         # (issue #39): a permission error, a truncated/corrupt image, or a

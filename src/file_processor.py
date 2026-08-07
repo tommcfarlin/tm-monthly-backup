@@ -7,7 +7,7 @@ import shutil
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -360,7 +360,7 @@ class FileProcessor:
         # ``.png``). They are moved to ``backup/corrupt/`` under their original
         # name rather than archived as photographs, and reported as a distinct
         # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
-        self._quarantined_files: List[Dict[str, any]] = []
+        self._quarantined_files: List[Dict[str, Any]] = []
         # Apple sidecar (.aae) bookkeeping (issue #57). A candidate is either
         # deleted (its content was validated against SIDECAR_MAGIC and, on a
         # real run, os.remove succeeded) or kept -- recorded here as
@@ -445,7 +445,7 @@ class FileProcessor:
         self,
         dry_run: bool = False,
         progress: Optional[ProgressReporter] = None,
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
         Run the whole pipeline and return the summary -- the single public API.
 
@@ -1813,7 +1813,7 @@ class FileProcessor:
         else:
             shutil.move(source, destination)
 
-    def _generate_summary(self) -> Dict[str, any]:
+    def _generate_summary(self) -> Dict[str, Any]:
         """
         Generate processing summary.
 
