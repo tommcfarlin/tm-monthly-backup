@@ -31,7 +31,12 @@ from PIL import Image
 from src.file_categorizer import FileCategorizer, FileCategory
 from src.exif_handler import ExifHandler
 from src.file_processor import FileProcessor
-from tests.fixtures import make_corrupt_jpeg, make_exif_heic, make_exif_jpeg
+from tests.fixtures import (
+    make_corrupt_jpeg,
+    make_exif_heic,
+    make_exif_jpeg,
+    make_png_with_text,
+)
 
 
 def _counting_open():
@@ -162,6 +167,37 @@ class TestFullPassOpenCount(unittest.TestCase):
         self.assertEqual(
             len(calls), 1,
             f"expected exactly 1 Image.open call for a HEIC dry run, got "
+            f"{len(calls)}",
+        )
+
+    def test_screenshot_named_png_dry_run_opens_pillow_twice_not_three_times(self):
+        """A screenshot-named PNG must not cost an extra open (issues #22/#24).
+
+        Issue #22 made AI provenance win over the screenshot filename pattern,
+        which means a screenshot-named PNG is now opened during categorization
+        where the old filename short-circuit returned early without opening.
+        The total still holds at 2 because the open that used to happen later
+        in ``extract_timestamp`` is eliminated by #24's cache -- but nothing in
+        the suite pinned that, so a future change reintroducing a second real
+        read for exactly this shape of file would have gone unnoticed.
+
+        Two is the same total a plain JPEG costs: one shared metadata read plus
+        the preserved #58 quarantine decode.
+        """
+        make_png_with_text(
+            os.path.join(self.export_dir, "Screenshot 2024-01-15.png"),
+            {"Comment": "an ordinary screenshot, no provenance markers"},
+        )
+        processor = FileProcessor(self.export_dir, self.backup_dir)
+
+        wrapper, calls = _counting_open()
+        with patch("PIL.Image.open", side_effect=wrapper):
+            processor.process_all_files(dry_run=True)
+
+        self.assertEqual(
+            len(calls), 2,
+            f"expected 2 Image.open calls for a screenshot-named PNG (1 shared "
+            f"metadata read + 1 preserved #58 quarantine decode), got "
             f"{len(calls)}",
         )
 
