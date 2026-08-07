@@ -583,10 +583,13 @@ class TestHachoirFastPathRealBoundary(unittest.TestCase):
         mp4s with no Apple creationdate key and a zeroed mvhd were archived as
         ``1904.01.01.00.00.00.mp4`` / ``...00.01.mp4``. hachoir's ``get()``
         genuinely returns ``datetime(1904, 1, 1)`` here (this is not mocked),
-        so the rejection must happen in this module, not in hachoir. The
-        plaintext last-resort scan is exercised too (via the real
-        ``exportPlaintext``) and also finds nothing plausible, so the overall
-        result is None -- never 1904.
+        so the rejection must happen in this module, not in hachoir --
+        specifically via ``_is_quicktime_epoch_sentinel`` (fix round 1): the
+        generic plausibility floor (1826) does NOT reject 1904 on its own,
+        by design, so this pins the actual rejecting mechanism, not just the
+        end result. The plaintext last-resort scan is exercised too (via the
+        real ``exportPlaintext``) and also finds nothing plausible, so the
+        overall result is None -- never 1904.
         """
         path = os.path.join(self.temp_dir, "zeroed_mvhd.mov")
         _write_minimal_mp4(path, _mvhd_only_moov(0))
@@ -595,6 +598,23 @@ class TestHachoirFastPathRealBoundary(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertNotEqual(result, datetime(1904, 1, 1))
+        self.assertIn(path, self.handler.missing_exif_files)
+
+    def test_near_zero_mvhd_is_also_rejected_not_named_1904(self):
+        """
+        Issue #62, fix round 1: the real reproduction's SECOND file had an
+        independently zeroed mvhd that the collision logic then bumped a
+        second forward, but its own raw mvhd value (1, not 0) must be
+        rejected on its own merits, not merely because of the bump -- this
+        builds a real, unmocked mvhd == 1 (1904-01-01 00:00:01) directly, the
+        exact case an exact-instant-only sentinel check would miss.
+        """
+        path = os.path.join(self.temp_dir, "near_zero_mvhd.mov")
+        _write_minimal_mp4(path, _mvhd_only_moov(1))
+
+        result = self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertIsNone(result)
         self.assertIn(path, self.handler.missing_exif_files)
 
     def test_zeroed_mvhd_end_to_end_falls_through_to_filesystem_time(self):

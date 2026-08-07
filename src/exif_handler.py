@@ -57,22 +57,29 @@ _META_CHILD_ATOMS = frozenset((b"hdlr", b"keys", b"ilst"))
 # media data; this cap keeps a malformed or hostile file from exhausting RAM.
 _MAX_MOOV_BYTES = 128 * 1024 * 1024
 
-# issue #62's originating report suggested 1826 (the earliest surviving
-# photograph) as the floor. That value cannot actually satisfy this issue's
-# own acceptance criteria: 1904-01-01 -- the QuickTime ``mvhd`` zero-epoch
-# sentinel that is the confirmed real-world defect (two AI-generated mp4s
-# archived as 1904.01.01.00.00.0{0,1}.mp4) -- is LATER than 1826, so it would
-# pass a >= 1826 check untouched. The floor is set to the Unix epoch instead:
-# every file this tool ever processes comes from a phone/digital-camera
-# export, decades after 1970, so nothing genuine is lost, while both known
-# OS/format zero-epoch sentinels in this codebase's domain (QuickTime's 1904
-# and, moot but consistent, Unix's own 1970-01-01T00:00:00 itself) and the
-# EXIF garbage this issue also targets (a crafted year of 9999 or 0001) are
-# excluded. A datetime that parses cleanly but falls outside
-# [MIN_PLAUSIBLE_CAPTURE, "now" + 1 day] is corrupt or sentinel metadata
-# rather than a real capture time, and must be bounded before it names an
-# archive path.
-MIN_PLAUSIBLE_CAPTURE = datetime(1970, 1, 1)
+# Earliest surviving photograph is 1826 (Niepce's "View from the Window at Le
+# Gras"). This is deliberately generous, NOT tightened to the digital-camera
+# era: a scanned family photograph carrying a deliberately backdated EXIF
+# DateTimeOriginal (a 1950s/1960s print digitized into the library) is a
+# legitimate, valued input to a personal photo archive, and a tighter floor
+# would silently discard exactly the dates that matter most and are hardest
+# to reconstruct by falling them back to a meaningless filesystem mtime. A
+# datetime that parses cleanly but falls outside [MIN_PLAUSIBLE_CAPTURE, "now"
+# + 1 day] is corrupt/fabricated metadata rather than a real capture time --
+# a crafted EXIF year of 9999 or 0001 -- and must be bounded before it names
+# an archive path.
+#
+# NOTE: this floor deliberately does NOT catch the QuickTime ``mvhd``
+# zero-epoch sentinel (1904-01-01, issue #62's confirmed real-world defect,
+# see backup/videos/1904.01.01.00.00.0{0,1}.mp4) -- 1904 is LATER than 1826,
+# so it passes this floor untouched. That is intentional, not an oversight:
+# 1904 is not "implausibly old" in the general sense this floor polices, it
+# is a sentinel meaning "this specific field never recorded a value", and is
+# rejected separately by _is_quicktime_epoch_sentinel below, scoped to the
+# one field whose encoding produces it. A first pass at this fix folded both
+# concerns into a single, tighter floor (1970) and it silently broke the
+# scanned-photo case described above; keep them separate.
+MIN_PLAUSIBLE_CAPTURE = datetime(1826, 1, 1)
 
 
 def _iter_boxes(buf: bytes, start: int, end: int) -> Iterator[Tuple[bytes, int, int]]:
@@ -401,14 +408,21 @@ class ExifHandler:
 
         A value can parse cleanly as a ``datetime`` and still be nonsense as a
         capture time: a crafted EXIF ``DateTime`` of ``9999:12:31 23:59:59`` or
-        ``0001:01:01 00:00:00``, or a zeroed QuickTime ``mvhd`` box whose UTC
-        epoch of 1904-01-01 hachoir happily reports as a real date. This is the
-        single predicate shared by every timestamp source in this module --
-        EXIF (:meth:`_parse_exif_datetime`), both video paths (Apple's local
+        ``0001:01:01 00:00:00``. This is the single generic predicate shared
+        by every timestamp source in this module -- EXIF
+        (:meth:`_parse_exif_datetime`), both video paths (Apple's local
         ``creationdate`` in :meth:`_extract_quicktime_creationdate` and
         hachoir's ``mvhd`` in :meth:`_extract_video_timestamp_hachoir`), and
         the filename fallback (:meth:`_extract_timestamp_from_filename`) --
-        rather than three ad hoc range checks.
+        rather than repeated ad hoc range checks.
+
+        Deliberately NOT covered here: the QuickTime ``mvhd`` zero-epoch
+        sentinel (1904-01-01). That value is later than ``MIN_PLAUSIBLE_
+        CAPTURE`` and passes this check -- on purpose. It is a sentinel
+        meaning "this field never recorded a value", not an implausibly old
+        capture, and folding it into this generic floor would also reject the
+        genuine 1950s/60s dates a scanned family photograph can legitimately
+        carry. See :meth:`_is_quicktime_epoch_sentinel` for that check.
 
         Callers never raise on a ``False`` result; they treat it exactly like
         a missing value and fall through to the next timestamp source, which
@@ -433,6 +447,46 @@ class ExifHandler:
         if now is None:
             now = datetime.now()
         return MIN_PLAUSIBLE_CAPTURE <= dt <= now + timedelta(days=1)
+
+    @staticmethod
+    def _is_quicktime_epoch_sentinel(dt: datetime) -> bool:
+        """
+        True if ``dt`` lands on the QuickTime epoch's calendar date (#62).
+
+        QuickTime's ``mvhd`` ``creation_time`` field is a count of seconds
+        since 1904-01-01 00:00:00 UTC. A video whose capture time was never
+        stamped into that field -- stripped by a re-muxer, or never written
+        by an AI generator -- reports as exactly that epoch (``mvhd == 0`` ->
+        1904-01-01 00:00:00) or a handful of seconds past it (the real-world
+        reproduction that opened this issue showed a second, independently
+        zeroed file land one second later at 00:00:01, which the existing
+        collision-bump logic then made look like a deliberate burst pair shot
+        in 1904). This checks the whole calendar date, not the exact zero
+        instant, so both are caught by one condition rather than an
+        enumeration of near-zero offsets.
+
+        This is intentionally NOT folded into
+        :meth:`_is_plausible_capture_time`'s generic floor: 1904-01-01 is a
+        perfectly plausible real-world date in the abstract (it is well
+        after that floor's 1826 bound), and
+        widening the generic floor to exclude it costs the ability to accept
+        a genuinely backdated capture from a scanned photograph -- exactly
+        the regression a first pass at this fix introduced by raising the
+        floor to 1970 instead of adding this dedicated, field-scoped check.
+
+        Scope: this check is for the ``mvhd``-derived reading only. Apple's
+        ``com.apple.quicktime.creationdate`` key (issue #28) is a distinct
+        field with no zero-epoch encoding of its own -- an implausible value
+        there is caught by the generic floor/ceiling alone.
+
+        Args:
+            dt: Candidate capture time read from the ``mvhd`` field (directly
+                or via hachoir's rendered-text last resort).
+
+        Returns:
+            True if ``dt``'s calendar date is 1904-01-01.
+        """
+        return dt.date() == date(1904, 1, 1)
 
     def extract_timestamp(
         self, file_path: str, metadata: Optional["ImageMetadata"] = None
@@ -721,14 +775,21 @@ class ExifHandler:
 
                 creation_date = _hachoir_creation_date(metadata)
 
-                # A zeroed mvhd box (QuickTime epoch 1904-01-01, e.g. a video
-                # stripped by a re-muxer or messaging app) parses cleanly as a
-                # datetime but is not a real capture time. Reject it here,
-                # exactly like a missing value, so the plaintext scan below
-                # gets a chance and -- failing that -- the caller falls back
-                # to the filesystem timestamp instead of naming the file 1904
-                # (#62).
-                if creation_date is not None and not self._is_plausible_capture_time(creation_date):
+                # A zeroed (or near-zeroed) mvhd box -- landing on the
+                # QuickTime epoch calendar date, 1904-01-01, e.g. a video
+                # stripped by a re-muxer or never stamped by an AI generator
+                # -- parses cleanly as a datetime but is a sentinel, not a
+                # real capture time; the generic plausibility floor does NOT
+                # catch this (1904 is later than that floor's 1826, on
+                # purpose -- see _is_quicktime_epoch_sentinel's docstring), so
+                # it is checked explicitly here. Reject it exactly like a
+                # missing value, so the plaintext scan below gets a chance
+                # and -- failing that -- the caller falls back to the
+                # filesystem timestamp instead of naming the file 1904 (#62).
+                if creation_date is not None and (
+                    not self._is_plausible_capture_time(creation_date)
+                    or self._is_quicktime_epoch_sentinel(creation_date)
+                ):
                     logger.warning(
                         "Implausible video creation date in %s: %s", file_path, creation_date
                     )
@@ -751,7 +812,7 @@ class ExifHandler:
                             candidate = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
                         except Exception:
                             continue
-                        if not self._is_plausible_capture_time(candidate):
+                        if not self._is_plausible_capture_time(candidate) or self._is_quicktime_epoch_sentinel(candidate):
                             logger.warning(
                                 "Implausible video creation date in %s: %s", file_path, candidate
                             )

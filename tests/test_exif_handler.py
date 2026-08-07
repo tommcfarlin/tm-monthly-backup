@@ -473,24 +473,29 @@ class TestPlausibleCaptureTime(unittest.TestCase):
 
     def test_min_bound_is_inclusive(self):
         self.assertTrue(
-            ExifHandler._is_plausible_capture_time(datetime(1970, 1, 1))
+            ExifHandler._is_plausible_capture_time(datetime(1826, 1, 1))
         )
 
     def test_just_before_min_bound_is_rejected(self):
         self.assertFalse(
             ExifHandler._is_plausible_capture_time(
-                datetime(1969, 12, 31, 23, 59, 59)
+                datetime(1825, 12, 31, 23, 59, 59)
             )
         )
 
-    def test_quicktime_epoch_sentinel_is_rejected(self):
+    def test_quicktime_epoch_is_deliberately_not_rejected_here(self):
         """
-        Acceptance criterion 3, isolated at the predicate level: the QuickTime
-        ``mvhd`` zero-epoch (1904-01-01) -- LATER than the 1826 floor the
-        issue's own sketch suggested, so a naive port of that constant would
-        NOT have caught this -- is rejected by the actual floor chosen here.
+        Fix round 1 (#62): the QuickTime mvhd zero-epoch (1904-01-01) is
+        LATER than this predicate's 1826 floor, so it is NOT rejected by this
+        generic plausibility check -- on purpose. A first pass at this fix
+        raised the floor to 1970 to catch it here, which also rejected
+        legitimate backdated EXIF dates from scanned family photographs (see
+        test_scanned_family_photo_date_is_accepted below). The epoch itself
+        is now rejected by the dedicated, field-scoped
+        _is_quicktime_epoch_sentinel check instead -- see
+        TestQuicktimeEpochSentinel.
         """
-        self.assertFalse(
+        self.assertTrue(
             ExifHandler._is_plausible_capture_time(datetime(1904, 1, 1))
         )
 
@@ -522,6 +527,55 @@ class TestPlausibleCaptureTime(unittest.TestCase):
     def test_omitting_now_uses_the_live_clock(self):
         """The default (no injected ``now``) still accepts the actual present."""
         self.assertTrue(ExifHandler._is_plausible_capture_time(datetime.now()))
+
+
+class TestQuicktimeEpochSentinel(unittest.TestCase):
+    """
+    ExifHandler._is_quicktime_epoch_sentinel: the dedicated, field-scoped
+    check for the mvhd "no timestamp recorded" encoding (issue #62, fix
+    round 1). Separate from the generic plausibility floor/ceiling so
+    accepting genuinely old scanned-photo dates does not require also
+    accepting this specific sentinel.
+    """
+
+    def test_exact_epoch_is_a_sentinel(self):
+        """mvhd == 0 -> 1904-01-01 00:00:00, the exact reproduction case."""
+        self.assertTrue(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(1904, 1, 1, 0, 0, 0))
+        )
+
+    def test_one_second_past_epoch_is_still_a_sentinel(self):
+        """
+        mvhd == 1 -> 1904-01-01 00:00:01, the second file from the real
+        reproduction (independently zeroed, then bumped a second by the
+        collision logic). Acceptance criterion 3 is phrased as "creation
+        time is 0", but the fix must cover this near-zero case too, since it
+        is the same sentinel with the same root cause, not a different value.
+        """
+        self.assertTrue(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(1904, 1, 1, 0, 0, 1))
+        )
+
+    def test_late_in_the_epoch_day_is_still_a_sentinel(self):
+        """The whole calendar date is covered, not just a narrow zero-offset window."""
+        self.assertTrue(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(1904, 1, 1, 23, 59, 59))
+        )
+
+    def test_day_after_epoch_is_not_a_sentinel(self):
+        self.assertFalse(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(1904, 1, 2, 0, 0, 0))
+        )
+
+    def test_day_before_epoch_is_not_a_sentinel(self):
+        self.assertFalse(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(1903, 12, 31, 23, 59, 59))
+        )
+
+    def test_ordinary_modern_date_is_not_a_sentinel(self):
+        self.assertFalse(
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(2026, 7, 4, 21, 33, 3))
+        )
 
 
 class TestImplausibleExifTimestamps(unittest.TestCase):
@@ -565,6 +619,22 @@ class TestImplausibleExifTimestamps(unittest.TestCase):
         )
         result = self.handler._parse_exif_datetime(future, "test.jpg")
         self.assertIsNotNone(result)
+
+    def test_scanned_family_photo_date_is_accepted(self):
+        """
+        Fix round 1 (#62): a deliberately backdated EXIF DateTimeOriginal on
+        a scanned family photograph -- a legitimate, valued input to a
+        personal photo archive -- must be ACCEPTED, not rejected. This is
+        the exact capability a 1970 floor (this fix's own first pass) would
+        have cost: 1965 is comfortably within the 1826 floor but would have
+        been silently discarded by a 1970 one, falling the photo back to a
+        meaningless filesystem mtime instead of its real capture date.
+        """
+        result = self.handler._parse_exif_datetime(
+            "1965:06:01 12:00:00", "scanned.jpg"
+        )
+        self.assertEqual(result, datetime(1965, 6, 1, 12, 0, 0))
+        self.assertNotIn("scanned.jpg", self.handler.missing_exif_files)
 
     def test_implausible_datetimeoriginal_falls_through_to_datetime_tag(self):
         """
