@@ -567,6 +567,10 @@ class TestClearProcessingState(unittest.TestCase):
         # the first run's sidecar deletions/skips.
         processor._deleted_sidecars.append("export/a.aae")
         processor._skipped_sidecars.append(("not_plist", "export/notes.aae"))
+        # Issue #30's new accumulator: a reset that dropped this would let a
+        # second run on the same instance silently report the first run's
+        # hidden/junk-file skips.
+        processor._skipped_files.append(("hidden", "export/.hidden.jpg"))
         processor.exif_handler.missing_exif_files.append("f")
         processor.heic_converter.converted_files.append(("a", "b"))
 
@@ -580,6 +584,7 @@ class TestClearProcessingState(unittest.TestCase):
         self.assertEqual(processor._missing_exif_records, [])
         self.assertEqual(processor._deleted_sidecars, [])
         self.assertEqual(processor._skipped_sidecars, [])
+        self.assertEqual(processor._skipped_files, [])
         self.assertEqual(processor.exif_handler.missing_exif_files, [])
         self.assertEqual(processor.heic_converter.converted_files, [])
 

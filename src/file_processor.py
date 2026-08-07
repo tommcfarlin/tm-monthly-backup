@@ -264,6 +264,16 @@ class FileProcessor:
     # with ``bytes.startswith(SIDECAR_MAGIC)``, which accepts a tuple.
     SIDECAR_MAGIC = (b"<?xml", b"bplist00")
 
+    # Filenames that are known operating-system/filesystem junk rather than
+    # potential photo content -- matched by exact (case-sensitive) basename,
+    # never by a blanket dot-prefix rule (issue #30). Naming these explicitly
+    # is what makes the scan's intent legible: THESE specific names are always
+    # correctly ignored on sight, which is a different, stronger claim than
+    # "anything hidden is junk" -- a real photo can carry a leading dot too
+    # (an interrupted ``rsync``/``scp`` partial, a cloud-sync conflict copy),
+    # and that file must still be accounted for rather than silently dropped.
+    HIDDEN_FILE_DENYLIST = frozenset({'.DS_Store', '.localized', 'Thumbs.db'})
+
     def __init__(
         self,
         export_dir: str = "export",
@@ -351,6 +361,23 @@ class FileProcessor:
         # files_seen (issue #31).
         self._deleted_sidecars: List[str] = []
         self._skipped_sidecars: List[Tuple[str, str]] = []
+        # Files the SCAN itself declined to collect at all, recorded as
+        # (reason, path) with reason 'junk' (basename matched
+        # HIDDEN_FILE_DENYLIST -- e.g. .DS_Store) or 'hidden' (a dotted name
+        # that did not match the denylist) (issue #30). This is deliberately a
+        # DIFFERENT accumulator from _skipped_sidecars above rather than a
+        # shared one: _skipped_sidecars holds .aae candidates that WERE
+        # categorized and DID reach the delete-validation step but failed it,
+        # whereas a file recorded here never became a categorized/processable
+        # file at all -- it is filtered at the scan boundary, one stage
+        # earlier, for an unrelated reason (its name, not its content). Two
+        # mechanisms, not one, because they answer two different user
+        # questions ("why didn't my sidecar get deleted" vs. "why didn't this
+        # file get backed up at all"); they are added together only where the
+        # two must agree -- the files_scanned accounting identity in
+        # _generate_summary -- and are otherwise rendered as separate rows so
+        # neither explanation gets diluted by the other.
+        self._skipped_files: List[Tuple[str, str]] = []
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -581,8 +608,26 @@ class FileProcessor:
         """
         Scan export directory for all files.
 
+        A dotted (hidden) file's basename is no longer a silent drop (issue
+        #30): a name matching :data:`HIDDEN_FILE_DENYLIST` (known OS junk --
+        ``.DS_Store``, ``.localized``, ``Thumbs.db``) or any other dotted name
+        is excluded from the returned list -- unchanged from before this
+        fix -- but is now also appended to ``self._skipped_files`` as
+        ``(reason, path)`` before being skipped, so it is counted rather than
+        vanishing from every downstream total. This matches the policy
+        ``_scan_export_directory`` already applies to hidden *directories*
+        one level up (issue #56's ``dirs[:] = ...`` prune below): a dotted
+        name is never a pipeline participant at either level, but unlike a
+        pruned directory's contents (which were never individually visited),
+        a skipped top-level file IS individually visited here, so it is the
+        right place to record it.
+
         Returns:
-            List of file paths
+            List of retained (non-skipped, regular) file paths. Skipped
+            hidden/junk files are recorded as a side effect in
+            ``self._skipped_files``, not returned here -- see
+            :meth:`_generate_summary` for how the two are reconciled into the
+            files_scanned/files_skipped accounting.
         """
         if not os.path.exists(self.export_dir):
             logger.error("Export directory does not exist: %s", self.export_dir)
@@ -599,12 +644,34 @@ class FileProcessor:
             # sidecars found inside them. Mutating ``dirs`` in place is the
             # documented os.walk mechanism for skipping subtrees, and it applies
             # at every depth, so a hidden directory nested arbitrarily deep is
-            # pruned too. The leaf-level hidden-file skip below is retained.
+            # pruned too. The leaf-level hidden-file skip below is retained, and
+            # -- as of issue #30 -- counted rather than silently dropped, so a
+            # dotted name is handled identically (ignored, not archived) at
+            # both levels, but no longer invisibly at the file level.
             dirs[:] = [d for d in dirs if not d.startswith('.')]
 
             for filename in filenames:
-                # Skip hidden files
-                if filename.startswith('.'):
+                # A name matching the denylist is genuine, expected OS junk
+                # (issue #30 item 1): correctly never archived, before AND
+                # after this fix. Anything else dotted is policy-ignored too
+                # (matching the hidden-directory prune above), but -- unlike
+                # before -- is recorded rather than dropped, since a leading
+                # dot alone does not prove a file is junk (an interrupted
+                # rsync/scp partial or a cloud-sync conflict copy can carry
+                # real photo content under a dotted name).
+                if filename in self.HIDDEN_FILE_DENYLIST:
+                    skip_reason = 'junk'
+                elif filename.startswith('.'):
+                    skip_reason = 'hidden'
+                else:
+                    skip_reason = None
+
+                if skip_reason is not None:
+                    skipped_path = os.path.join(root, filename)
+                    logger.info(
+                        "Skipping %s file: %s", skip_reason, skipped_path
+                    )
+                    self._skipped_files.append((skip_reason, skipped_path))
                     continue
 
                 path = os.path.join(root, filename)
@@ -1732,6 +1799,35 @@ class FileProcessor:
         they are internal bookkeeping, not public API, so every count and
         list below is derived here rather than read directly by a caller.
 
+        Accounting identity (issue #30, shared with #29): after a non-dry
+        run, every path the scan visited lands in exactly one of four
+        buckets --
+
+            files_scanned == (files_processed + files_quarantined)   # moved
+                            + sidecars_deleted                        # deleted
+                            + (files_skipped + sidecars_skipped)      # skipped
+                            + files_failed                            # failed
+
+        ``files_quarantined`` counts toward "moved" because a quarantined
+        file DID leave ``export/`` for ``backup/corrupt/`` -- it is just not
+        filed as a photograph. ``files_skipped`` and ``sidecars_skipped`` are
+        summed together because they are two mechanisms for the same
+        bucket -- a file the scan itself declined to collect (hidden/junk;
+        issue #30) versus a ``.aae`` candidate that reached, and failed,
+        delete validation (issue #57) -- that both mean "still sitting in
+        ``export/``, and not because anything failed." The identity holds
+        because ``FileCategorizer.categorize_file`` always assigns exactly one
+        of six categories (so every scanned-and-retained file is either
+        processable or a sidecar candidate, never neither), and every
+        processable file is recorded in exactly one of processed/quarantined/
+        failed while every sidecar candidate is recorded in exactly one of
+        deleted/skipped -- see ``test_hidden_files_accounting.py`` for the
+        assertion. It is deliberately NOT asserted with a hard ``assert`` in
+        this method: a run a caller aborted via the ``on_categorized`` gate
+        (issue #13) reaches this method with files scanned but none of the
+        other four buckets populated yet, which is correct (nothing was
+        processed) rather than a defect this identity should reject.
+
         Returns:
             Dictionary with processing statistics and results for the run
             that just completed -- never a previous run on the same instance
@@ -1741,6 +1837,13 @@ class FileProcessor:
         heic_stats = self.heic_converter.get_conversion_stats()
 
         return {
+            # Every path the scan actually visited, INCLUDING hidden/junk
+            # files this run declined to collect (issue #30) -- unlike
+            # ``stats['total']`` alone, which only covers what
+            # ``batch_categorize`` saw, i.e. the files ``_scan_export_directory``
+            # already filtered ``_skipped_files`` out of. This is the "scanned"
+            # term in the accounting identity documented below.
+            'files_scanned': stats['total'] + len(self._skipped_files),
             'files_processed': len(self._processed_files),
             'files_failed': len(self._failed_files),
             # Undecodable image-typed files quarantined to backup/corrupt/. A
@@ -1758,6 +1861,15 @@ class FileProcessor:
             # than deleted -- see the __init__ comment on _skipped_sidecars
             # for the four reasons.
             'sidecars_skipped': len(self._skipped_sidecars),
+            # Hidden/junk files the SCAN itself declined to collect (issue
+            # #30) -- distinct from 'sidecars_skipped' above, which counts
+            # .aae candidates that WERE categorized and reached (and failed)
+            # sidecar-delete validation. Never fed into files_processed or
+            # files_failed for the same reason 'sidecars_skipped' is not: a
+            # skipped file was never a processable file to begin with (it
+            # never even reached the categorizer), so counting it there would
+            # inflate those totals past files_scanned's own accounting.
+            'files_skipped': len(self._skipped_files),
             'categorization_stats': stats,
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
@@ -1782,6 +1894,12 @@ class FileProcessor:
             # itself, matching 'missing_exif_list' above (issue #37's
             # no-aliasing precedent).
             'skipped_sidecar_files': self._skipped_sidecars.copy(),
+            # (reason, path) pairs for files the scan declined to collect --
+            # see the __init__ comment on _skipped_files for 'junk' vs.
+            # 'hidden'. A fresh list, not the internal one itself, matching
+            # 'missing_exif_list'/'skipped_sidecar_files' above (issue #37's
+            # no-aliasing precedent).
+            'skipped_files': self._skipped_files.copy(),
         }
 
     def clear_processing_state(self):
@@ -1796,11 +1914,12 @@ class FileProcessor:
         need to reset mid-lifecycle (or a test asserting the reset is
         complete) still has an explicit hook.
 
-        Resets this object's own six private accumulators
+        Resets this object's own seven private accumulators
         (``_processed_files``, ``_used_timestamps``, ``_failed_files``,
-        ``_quarantined_files``, ``_deleted_sidecars``, ``_skipped_sidecars``),
-        ``_conversion_log`` and ``_missing_exif_records``, plus every
-        collaborator's own bookkeeping (``ExifHandler.missing_exif_files``,
+        ``_quarantined_files``, ``_deleted_sidecars``, ``_skipped_sidecars``,
+        ``_skipped_files``), ``_conversion_log`` and ``_missing_exif_records``,
+        plus every collaborator's own bookkeeping
+        (``ExifHandler.missing_exif_files``,
         ``HeicConverter.converted_files``/``failed_conversions``,
         ``FileCategorizer.categorized_files``) -- a reset that only cleared
         this object's attributes and left the collaborators' stale would be a
@@ -1815,6 +1934,7 @@ class FileProcessor:
         self._missing_exif_records.clear()
         self._deleted_sidecars.clear()
         self._skipped_sidecars.clear()
+        self._skipped_files.clear()
         self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()
