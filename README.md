@@ -55,13 +55,20 @@ pip install -r requirements.txt
 `requirements.txt` mirrors the dependency list in `pyproject.toml`, which is the
 single source of truth.
 
+For a reproducible, tamper-evident install (recommended for anything other than
+local development), use the hash-pinned lockfile instead of either of the above:
+```bash
+pip install --require-hashes -r requirements.lock
+```
+See [Security](#security) below for why this matters for this particular tool.
+
 ### Dependencies
-- `click>=8.0.0,<9` - CLI interface framework
-- `pillow>=10.0.0,<12` - Image processing and EXIF data extraction
-- `pillow-heif>=0.10.0,<1` - HEIC file format support
-- `python-dateutil>=2.8.0,<3` - Advanced date/time parsing
-- `rich>=13.0.0,<15` - Beautiful CLI progress bars and formatting
-- `hachoir>=3.1.0,<4` - Video metadata extraction
+- `click>=8.1.7,<9` - CLI interface framework
+- `pillow>=10.3.0,<13` - Image processing and EXIF data extraction
+- `pillow-heif>=0.16.0,<2` - HEIC file format support
+- `python-dateutil>=2.8.2,<3` - Advanced date/time parsing
+- `rich>=13.7.0,<16` - Beautiful CLI progress bars and formatting
+- `hachoir>=3.3.0,<4` - Video metadata extraction
 
 ## Usage
 
@@ -138,6 +145,39 @@ Identifies iOS and macOS screenshots:
 - **Duplicate handling**: Timestamp conflicts resolved by incrementing seconds
 - **AI content separation**: Generated and heavily edited content goes to dedicated folder
 - **Missing metadata**: Fallback to filesystem timestamps with user warnings
+
+## Security
+
+`export/` is treated as **untrusted input**, not as a folder of your own known-good
+photos. Every file in it is handed to Pillow, `pillow-heif` (libheif), and
+`hachoir` for decoding -- all three parse untrusted binary data, and Pillow and
+`pillow-heif` are C-backed with active CVE histories (heap buffer overflows and
+memory-exhaustion bugs in image/HEIF decoding have shipped in past releases,
+some of them fixed only in the last one or two minor versions). A crafted or
+merely corrupt file dropped into `export/` -- from an iCloud sync glitch, a
+damaged download, or deliberate tampering -- reaches these libraries' decoders
+directly, which is exactly the class of bug their CVE histories are made of.
+
+Two things follow from that:
+
+1. **Keeping the pinned dependency versions current is a security task, not
+   housekeeping.** `pyproject.toml`/`requirements.txt` set floors that exclude
+   every release with a known advisory on a code path this tool exercises
+   (WebP/HEIF/JPEG/PNG decoding, EXIF parsing) and ceilings at the next major so
+   a future breaking release cannot be installed silently. Raising a floor
+   again in the future should be treated the same way: find the CVE or advisory
+   that motivates it, not just "the newest version."
+2. **Prefer the lockfile for anything other than local development.**
+   `requirements.lock` (generated with `pip-compile --generate-hashes`, or
+   `uv pip compile --generate-hashes` if you use uv) pins every dependency,
+   direct and transitive, to one exact version with its package hash, so
+   `pip install --require-hashes -r requirements.lock` fails closed rather than
+   silently installing a tampered or substituted package. Regenerate it with:
+   ```bash
+   pip install pip-tools
+   pip-compile --generate-hashes --output-file=requirements.lock pyproject.toml
+   ```
+   after changing anything in `pyproject.toml`'s `dependencies` list.
 
 ## What Ends Up in `backup/`
 

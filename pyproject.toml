@@ -25,22 +25,53 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-# Upper bounds guard against a future major release silently breaking the tool.
-# Each ceiling is the next major above the range known to work today:
-#   click        - CLI/option API can be reworked across majors; pin under 9.
-#   pillow       - EXIF APIs have changed across Pillow majors before (see #15);
-#                  10.x and 11.x share the current API, so allow both, exclude 12.
-#   pillow-heif  - still pre-1.0; 0.x minors can break, cap at the first major.
-#   python-dateutil - long stable on 2.x; guard against a hypothetical 3.0.
-#   rich         - 13.x and 14.x are API-compatible for our usage; cap under 15.
-#   hachoir      - on 3.x; cap under the next major.
+# Every floor below excludes a specific known-vulnerable release reachable
+# through this tool's own threat model -- export/ contents are untrusted
+# input handed straight to these libraries' C-backed decoders -- and every
+# ceiling guards against a future major silently breaking the tool (issue
+# #59; the ceiling half was already #15's contribution).
+#   click        - no CVE specific to this tool's usage; 8.1.7 is simply the
+#                  latest widely-used 8.x patch at the time of this floor
+#                  raise, not a security-driven minimum. CLI/option API can
+#                  be reworked across majors; pin under 9.
+#   pillow       - 10.0.0 (the previous floor) is directly vulnerable on
+#                  paths this tool exercises: CVE-2023-4863 (bundled libwebp
+#                  heap buffer overflow -- .webp is in PHOTO_EXTENSIONS, so
+#                  every .webp in export/ is decoded through the vulnerable
+#                  path) and CVE-2023-44271 (ImageFont/textlength memory
+#                  exhaustion) are both fixed in 10.0.1; CVE-2024-28219
+#                  (_imagingcms.c buffer overflow, unsafe strcpy) is fixed
+#                  only in 10.3.0. 10.3.0 is the minimum that clears all
+#                  three. 10.x/11.x/12.x share the EXIF API this tool relies
+#                  on (confirmed against the 12.2.0 currently installed in
+#                  this project's own venv); cap under 13.
+#   pillow-heif  - 0.16.0 is the first release requiring libheif>=1.19.0,
+#                  well past the libheif versions carrying CVE-2023-0996
+#                  (strided-image buffer overflow) and CVE-2024-41311
+#                  (ImageOverlay::parse out-of-bounds read/write, libheif
+#                  <=1.17.6) -- both reachable since every .heic in export/
+#                  is decoded through this library. Still pre-1.0; 0.x
+#                  minors can break, cap at the first major.
+#   python-dateutil - no CVE specific to this tool's usage; 2.8.2 is simply
+#                  the latest widely-used 2.8.x patch, not a security-driven
+#                  minimum. Long stable on 2.x; guard against a hypothetical
+#                  3.0.
+#   rich         - display-only, never parses untrusted file bytes, so no
+#                  CVE motivates this floor; 13.7.0 is simply the latest
+#                  widely-used 13.x patch at the time of this raise. 13.x and
+#                  14.x/15.x are API-compatible for our usage (confirmed
+#                  against the 15.0.0 currently installed); cap under 16.
+#   hachoir      - no CVE specific to this tool's usage was found for this
+#                  floor raise; 3.3.0 matches the version already verified
+#                  installed and exercised by this project's own test suite.
+#                  On 3.x; cap under the next major.
 dependencies = [
-    "click>=8.0.0,<9",
-    "pillow>=10.0.0,<12",
-    "pillow-heif>=0.10.0,<1",
-    "python-dateutil>=2.8.0,<3",
-    "rich>=13.0.0,<15",
-    "hachoir>=3.1.0,<4",
+    "click>=8.1.7,<9",
+    "pillow>=10.3.0,<13",
+    "pillow-heif>=0.16.0,<2",
+    "python-dateutil>=2.8.2,<3",
+    "rich>=13.7.0,<16",
+    "hachoir>=3.3.0,<4",
 ]
 
 [project.urls]
@@ -56,3 +87,29 @@ tm-monthly-backup = "src.main:main"
 # which would otherwise treat `src/` as a layout root and drop the package name.
 [tool.setuptools]
 packages = ["src"]
+
+# Deliberately narrow (issue #20 fix-round-1): the default rule set reports
+# 341 findings across src/ and tests/ today, almost all pre-existing style
+# modernization noise (UP006, FA100, RUF012, and similar) this milestone's
+# six issues were never about and this pass has not audited. Selecting only
+# the rule families those six issues actually fixed -- and confirmed clean --
+# makes "ruff check src/ tests/ passes cleanly" a real, checkable statement
+# instead of one that would be true under no plausible rule set. Widening
+# this list to the project's full default rule set (and doing the work to
+# get there) is a separate, larger effort this pass does not attempt.
+#   F     - pyflakes: unused imports/names (F401), unused locals (F841),
+#           f-strings with no placeholders (F541), and the rest of the
+#           pyflakes family (issues #20, #49).
+#   E722  - bare `except:` clauses (issue #20; already at zero before this
+#           milestone, from #16/#39 -- kept selected as a regression guard).
+#   G     - flake8-logging-format: eager f-string interpolation in a
+#           logging call (issue #48).
+#   W292  - missing a trailing newline at end of file (issue #49).
+#   B007  - an unused loop control variable (issue #49; already at zero in
+#           src/ before this milestone -- kept selected as a regression
+#           guard, and cleaned up in tests/ during this fix round).
+# Wiring this into CI (the issue's own item 5, and AC5) is deferred to
+# issue #17 -- this project has no CI pipeline at all, so there is nowhere
+# for that step to run yet.
+[tool.ruff.lint]
+select = ["F", "E722", "G", "W292", "B007"]

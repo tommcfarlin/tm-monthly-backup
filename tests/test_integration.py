@@ -6,10 +6,8 @@ import unittest
 import tempfile
 import os
 import shutil
-import json
-from pathlib import Path
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -506,7 +504,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
         self.assertNotIn(
-            photo_path, self.processor.exif_handler.get_missing_exif_files()
+            photo_path, self.processor.exif_handler.missing_exif_files
         )
 
     def test_no_exif_helper_falls_back(self):
@@ -520,7 +518,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn(
-            photo_path, self.processor.exif_handler.get_missing_exif_files()
+            photo_path, self.processor.exif_handler.missing_exif_files
         )
 
     def test_directory_creation(self):
@@ -827,7 +825,7 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(self.processor._used_timestamps, {})
         self.assertEqual(self.processor._failed_files, [])
         self.assertEqual(self.processor._conversion_log, [])
-        self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
+        self.assertEqual(self.processor.exif_handler.missing_exif_files, [])
         self.assertEqual(self.processor.heic_converter.converted_files, [])
         self.assertEqual(self.processor._deleted_sidecars, [])
         self.assertEqual(self.processor._skipped_sidecars, [])
@@ -1066,6 +1064,72 @@ class TestEndToEndWorkflow(unittest.TestCase):
             len(os.listdir(photos_dir)), 50,
             "collision resolution must yield 50 distinct files, none overwritten",
         )
+
+
+class TestHachoirWarningsDoNotReachTerminalDuringARun(unittest.TestCase):
+    """
+    A full CLI run over several unparseable videos leaves the terminal free
+    of hachoir's own bare diagnostic writes (issue #60, acceptance
+    criterion 3). Before the fix, ``createParser`` and ``extractMetadata``
+    wrote every parser warning straight to ``sys.stderr`` regardless of the
+    application's own logging configuration -- interleaving with
+    ``CLIInterface.process_with_progress``'s live ``rich`` ``Progress``
+    display, which is exactly the corruption this test would catch: a
+    stray, unmanaged write landing on the real process stdout/stderr while
+    ``rich`` is mid-render. Patches ``sys.stdout``/``sys.stderr`` around the
+    whole run (rather than only inspecting the recording ``rich.Console``,
+    which hachoir's writes bypass entirely) so a regression back to
+    hachoir's default ``use_print=True`` would be caught here even though
+    it would leave the ``rich``-rendered output itself unchanged.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.temp_dir, "export")
+        self.backup_dir = os.path.join(self.temp_dir, "backup")
+        os.makedirs(self.export_dir, exist_ok=True)
+        # Force a fresh, unmocked hachoir resolution for this test rather
+        # than relying on whichever earlier test in the suite happens to
+        # trigger the first real import.
+        self._hachoir_patch = patch("src.exif_handler.HACHOIR_AVAILABLE", None)
+        self._hachoir_patch.start()
+
+    def tearDown(self):
+        self._hachoir_patch.stop()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_garbage_videos_leave_stdout_and_stderr_clean(self):
+        import io
+
+        for i, ext in enumerate((".mp4", ".mov", ".mp4")):
+            path = os.path.join(self.export_dir, f"garbage_{i}{ext}")
+            with open(path, "wb") as f:
+                # Several distinct unparseable "videos" -- each one is a
+                # separate createParser() call and a separate opportunity
+                # for a hachoir diagnostic to leak to the terminal.
+                f.write(b"not a real video container, just garbage bytes" * 5)
+
+        cli = CLIInterface(self.export_dir, self.backup_dir)
+
+        captured_out, captured_err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", captured_out), patch("sys.stderr", captured_err):
+            results = cli.process_with_progress(dry_run=True)
+
+        self.assertEqual(results.get("status"), "completed")
+        # All three landed on the missing-EXIF fallback path (hachoir found
+        # no usable metadata in genuine garbage), proving hachoir's real
+        # parser genuinely ran for each rather than short-circuiting before
+        # ever reaching createParser.
+        self.assertEqual(results.get("missing_exif_files"), 3)
+
+        for stream_name, captured in (("stdout", captured_out), ("stderr", captured_err)):
+            text = captured.getvalue()
+            self.assertNotIn(
+                "[warn]", text, f"a bare hachoir warning leaked to {stream_name}"
+            )
+            self.assertNotIn(
+                "[err!]", text, f"a bare hachoir error leaked to {stream_name}"
+            )
 
 
 if __name__ == '__main__':

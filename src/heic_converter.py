@@ -135,7 +135,7 @@ class HeicConverter:
 
                 image.save(output_path, **save_kwargs)
 
-            logger.info("Successfully converted HEIC to JPEG: %s -> %s", heic_path, output_path)
+            logger.debug("Successfully converted HEIC to JPEG: %s -> %s", heic_path, output_path)
             self.converted_files.append((heic_path, str(output_path)))
             return str(output_path)
 
@@ -229,7 +229,7 @@ class HeicConverter:
                 if converted_jpeg is None:
                     logger.error(
                         "Refusing to delete original without a converted path to "
-                        f"verify against, keeping original: {heic_path}"
+                        "verify against, keeping original: %s", heic_path
                     )
                     return False
                 if not self.verify_conversion(heic_path, converted_jpeg):
@@ -237,7 +237,7 @@ class HeicConverter:
                     return False
 
             heic_file.unlink()
-            logger.info("Deleted original HEIC file: %s", heic_path)
+            logger.debug("Deleted original HEIC file: %s", heic_path)
             return True
 
         except Exception as e:

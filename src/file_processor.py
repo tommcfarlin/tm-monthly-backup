@@ -7,7 +7,7 @@ import shutil
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -360,7 +360,7 @@ class FileProcessor:
         # ``.png``). They are moved to ``backup/corrupt/`` under their original
         # name rather than archived as photographs, and reported as a distinct
         # outcome -- neither a clean "processed" nor a tool "failure" (issue #58).
-        self._quarantined_files: List[Dict[str, any]] = []
+        self._quarantined_files: List[Dict[str, Any]] = []
         # Apple sidecar (.aae) bookkeeping (issue #57). A candidate is either
         # deleted (its content was validated against SIDECAR_MAGIC and, on a
         # real run, os.remove succeeded) or kept -- recorded here as
@@ -445,7 +445,7 @@ class FileProcessor:
         self,
         dry_run: bool = False,
         progress: Optional[ProgressReporter] = None,
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """
         Run the whole pipeline and return the summary -- the single public API.
 
@@ -527,7 +527,7 @@ class FileProcessor:
 
         # Categorize files
         categorized = self.categorizer.batch_categorize(all_files)
-        logger.info(f"Categorization complete:\n{self.categorizer.get_file_summary()}")
+        logger.info("Categorization complete:\n%s", self.categorizer.get_file_summary())
 
         # Compute the processable set now -- before the confirmation gate --
         # so its HEIC count can ride along on the ``on_categorized`` report
@@ -813,6 +813,12 @@ class FileProcessor:
                 self._skipped_sidecars.append(('not_plist', file_path))
                 continue
 
+            # Kept at INFO, not demoted with this method's other per-file
+            # lines (issue #48): the results table only ever shows a COUNT
+            # of deleted sidecars, never which files, so this line (and its
+            # dry-run counterpart below) is the only per-file trace of an
+            # irreversible deletion of the user's own edit history. Deleting
+            # nothing is unrecoverable in a way an ordinary "Moved:" is not.
             if dry_run:
                 logger.info("[DRY RUN] Would delete sidecar file: %s", file_path)
                 self._deleted_sidecars.append(file_path)
@@ -1185,7 +1191,7 @@ class FileProcessor:
             # the ONLY difference is whether the conversion side effect runs.
             planned_extension = '.jpg'
             if dry_run:
-                logger.info("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
+                logger.debug("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
                 # ``current_path`` deliberately stays the ``.heic``: its EXIF
                 # timestamp is identical to the converted JPEG's (conversion
                 # preserves EXIF), so the timestamp read below matches a real run
@@ -1203,7 +1209,7 @@ class FileProcessor:
                     # preserved EXIF -- against the actual mkstemp path from #26.
                     if not self.heic_converter.verify_conversion(file_path, converted_path):
                         logger.error(
-                            f"HEIC conversion verification failed, keeping original: {file_path}"
+                            "HEIC conversion verification failed, keeping original: %s", file_path
                         )
                         # Remove the unverifiable artifact so a corrupt JPEG is not
                         # left in export to be re-ingested on a later run. The
@@ -1275,7 +1281,7 @@ class FileProcessor:
             adjusted_timestamp, target_path = self._resolve_destination_dry_run(
                 target_dir, timestamp, file_extension
             )
-            logger.info("[DRY RUN] Would move: %s -> %s", current_path, target_path)
+            logger.debug("[DRY RUN] Would move: %s -> %s", current_path, target_path)
             if exif_was_missing:
                 # A dry run never moves anything, so ``original_path`` is the
                 # only path that actually exists on disk right now -- the
@@ -1339,7 +1345,7 @@ class FileProcessor:
                     # placeholder so a 0-byte stub is not left behind in backup/.
                     self._discard_reservation(target_path)
                     raise
-                logger.info("Moved: %s -> %s", current_path, target_path)
+                logger.debug("Moved: %s -> %s", current_path, target_path)
 
                 # The verified-good JPEG is now safely filed in backup/, so it is
                 # finally safe to delete the original HEIC. Route through the
@@ -1406,7 +1412,7 @@ class FileProcessor:
                 target_dir, original_name
             )
             logger.info(
-                f"[DRY RUN] Would move unrecognized file: {file_path} -> {target_path}"
+                "[DRY RUN] Would move unrecognized file: %s -> %s", file_path, target_path
             )
             return
 
@@ -1813,7 +1819,7 @@ class FileProcessor:
         else:
             shutil.move(source, destination)
 
-    def _generate_summary(self) -> Dict[str, any]:
+    def _generate_summary(self) -> Dict[str, Any]:
         """
         Generate processing summary.
 

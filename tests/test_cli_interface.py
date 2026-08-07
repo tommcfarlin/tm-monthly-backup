@@ -12,12 +12,12 @@ import os
 import shutil
 import tempfile
 import unittest
+from enum import Enum
 from unittest.mock import patch
 
 from rich.console import Console
 
 from src.cli_interface import CLIInterface
-from src.file_categorizer import FileCategory
 
 
 def _recording_cli(export_dir, backup_dir):
@@ -181,6 +181,38 @@ class TestDisplayFileScanResults(unittest.TestCase):
         self.assertIn("Unknown", text)
         self.assertIn("Total", text)
 
+    def test_generated_files_add_generated_row(self):
+        """A batch containing AI/C2PA-provenance content renders a Generated
+        row in the discovery table (issue #19) -- before this fix, the
+        table had no Generated row at all, so a batch entirely of generated
+        content silently vanished from the pre-run discovery display even
+        though it categorizes correctly (``get_categorization_stats``
+        already carried the count)."""
+        from tests.fixtures import make_png_with_text
+
+        generated = make_png_with_text(
+            os.path.join(self.temp_dir, "gen.png"),
+            {"c2pa": "manifest-stub"},
+        )
+
+        self.cli.display_file_scan_results([generated])
+
+        text = self.cli.console.export_text()
+        self.assertIn("Generated", text)
+        self.assertIn("Total", text)
+
+    def test_no_generated_files_omits_generated_row(self):
+        """An all-photo batch renders no Generated row at all (conditional,
+        matching the pre-existing Unknown-row style), not a permanent
+        "Generated: 0" line."""
+        photo = os.path.join(self.temp_dir, "photo.jpg")
+        open(photo, "wb").close()
+
+        self.cli.display_file_scan_results([photo])
+
+        text = self.cli.console.export_text()
+        self.assertNotIn("Generated", text)
+
 
 class TestProcessWithProgress(unittest.TestCase):
     """process_with_progress: the no-files short-circuit and a sidecar run."""
@@ -252,6 +284,56 @@ class TestDisplayResults(unittest.TestCase):
         )
         self.assertIn("Dry Run Results", self.cli.console.export_text())
 
+    def test_dry_run_title_renders_blue(self):
+        """The dry-run title is styled bold blue (issue #49), not left the
+        default table-title style. ANSI SGR 1;34 is bold+blue; export_text's
+        styles=True is the only way to observe rich's applied style rather
+        than just the title's text, which the previous, unwired
+        ``title_style`` local left indistinguishable from every other run."""
+        self.cli.display_results(
+            {"status": "completed", "files_processed": 3}, dry_run=True
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;34m", styled, "dry-run title was not rendered bold blue")
+
+    def test_clean_success_title_renders_green(self):
+        """A clean, unqualified-success run's title is styled bold green."""
+        self.cli.display_results(
+            {
+                "status": "completed",
+                "files_processed": 3,
+                "files_failed": 0,
+                "files_quarantined": 0,
+                "categorization_stats": {
+                    "photos": 3, "videos": 0, "screenshots": 0,
+                    "generated": 0, "unknown": 0,
+                },
+            }
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;32m", styled, "success title was not rendered bold green")
+
+    def test_failure_title_renders_yellow_not_green(self):
+        """A run with failures is styled bold yellow, distinct from a clean
+        run's green -- this is the exact defect issue #49 reports: before the
+        fix, ``title_style`` was computed but never passed to ``Table(...)``,
+        so a failing run rendered in the identical style as a clean one."""
+        self.cli.display_results(
+            {
+                "status": "completed",
+                "files_processed": 1,
+                "files_failed": 1,
+                "files_quarantined": 0,
+                "categorization_stats": {
+                    "photos": 1, "videos": 0, "screenshots": 0,
+                    "generated": 0, "unknown": 0,
+                },
+            }
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;33m", styled, "failure title was not rendered bold yellow")
+        self.assertNotIn("\x1b[1;32m", styled, "failure title rendered the success green")
+
     def test_quarantine_title_and_rows(self):
         """Quarantined-but-no-failure renders the quarantine banner and rows."""
         results = {
@@ -304,6 +386,112 @@ class TestDisplayResults(unittest.TestCase):
         self.assertIn("Generated", text)
         self.assertIn("Unknown", text)
         self.assertIn("disk full", text)
+
+
+class TestNewCategoryNeedsNoEditAnywhere(unittest.TestCase):
+    """Pins AC4 (issue #19, corrected in issue #59 fix-round-1): adding a
+    FileCategory member must require an edit in exactly one place --
+    CATEGORY_DISPLAY_ORDER, for a human to author nicer copy -- and nothing
+    breaks or needs an edit anywhere else in the meantime.
+
+    Follows the same pattern issue #43's own
+    ``test_new_category_needs_no_edit_to_target_directory_methods`` uses:
+    Python enums cannot be extended by subclassing once they have members,
+    so this builds an independent, same-shape Enum with every existing
+    FileCategory member plus one new ``ARCHIVE`` member nobody has written
+    any display copy for, then patches the module-level ``FileCategory``
+    name. Two separate names need patching, not one: ``cli_interface.py``
+    did ``from .file_categorizer import FileCategory``, which copies the
+    reference at import time rather than aliasing it live, so
+    ``src.cli_interface.FileCategory`` and ``src.file_categorizer.FileCategory``
+    are today two independent bindings to the same object -- patching only
+    one leaves the other module's ``for category in FileCategory:`` loops
+    iterating the original six-member enum. Both a fresh
+    ``CLIInterface`` (so ``FileCategorizer.__init__``'s dict comprehension
+    also runs against the patched enum, not the original one ``setUp``
+    would have built) and both patches must be in place before anything
+    under test runs.
+
+    This is the exact scope of the issue #59 fix-round-1 correction: the
+    original issue #19 claim ("a future FileCategory member needs one new
+    entry here... the acceptance criterion the issue's own text asked
+    for") was false as written -- get_categorization_stats() and the
+    categorized_files init dict were each still a separate hand-written
+    list of members, so a category added only to CATEGORY_DISPLAY_ORDER
+    (or, as here, not even there) would have silently produced a KeyError
+    or a missing count rather than the claimed one-place edit. Confirmed by
+    stashing this fix-round's src/ changes and re-running: it fails on
+    every assertion below against the pre-fix-round code (a hand-written
+    ``get_categorization_stats`` KeyErrors on the new member's ``.value``,
+    and every renderer's ``for info in CATEGORY_DISPLAY_ORDER`` loop never
+    sees it at all).
+    """
+
+    class _FileCategoryPlusOne(Enum):
+        PHOTO = "photos"
+        VIDEO = "videos"
+        SCREENSHOT = "screenshots"
+        GENERATED = "generated"
+        UNKNOWN = "unknown"
+        SIDECAR = "sidecar"
+        ARCHIVE = "archive"  # stand-in for a hypothetical new category
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_stats_summary_and_both_renderers_handle_it_with_no_edit(self):
+        archive = self._FileCategoryPlusOne.ARCHIVE
+
+        with patch("src.file_categorizer.FileCategory", self._FileCategoryPlusOne), \
+             patch("src.cli_interface.FileCategory", self._FileCategoryPlusOne):
+            cli = CLIInterface(
+                os.path.join(self.temp_dir, "export"),
+                os.path.join(self.temp_dir, "backup"),
+            )
+            cli.console = Console(file=io.StringIO(), record=True, width=120)
+            categorizer = cli.processor.categorizer
+
+            # __init__'s dict comprehension picked up ARCHIVE with no edit.
+            self.assertIn(archive, categorizer.categorized_files)
+
+            # Simulate one file having categorized as the new member.
+            categorizer.categorized_files[archive].append("archive_file.arc")
+
+            # get_categorization_stats() derives its dict from
+            # categorized_files, so the new member's count appears with no
+            # edit either.
+            stats = categorizer.get_categorization_stats()
+            self.assertEqual(stats.get("archive"), 1)
+            self.assertEqual(stats["total"], 1)
+
+            # get_file_summary() iterates FileCategory directly, so the new
+            # member gets a line via get_category_display_info's generic
+            # fallback (title-cased from its own .value) with no edit.
+            summary = categorizer.get_file_summary()
+            self.assertIn("Archive: 1 files", summary)
+
+            # The pre-run discovery table: same fallback, rendered as an
+            # actual row since its count is non-zero.
+            cli.display_categorization_summary(stats)
+            scan_text = cli.console.export_text()
+            self.assertIn("Archive", scan_text)
+
+            # The post-run breakdown table: same fallback, including the
+            # generated "backup/archive/" location.
+            cli.console = Console(file=io.StringIO(), record=True, width=120)
+            cli.display_results({
+                "status": "completed",
+                "files_processed": 1,
+                "files_failed": 0,
+                "files_quarantined": 0,
+                "categorization_stats": stats,
+            })
+            results_text = cli.console.export_text()
+            self.assertIn("Archive", results_text)
+            self.assertIn("backup/archive/", results_text)
 
 
 class TestDisplayFailures(unittest.TestCase):

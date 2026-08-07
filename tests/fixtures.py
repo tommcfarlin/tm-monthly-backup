@@ -18,7 +18,6 @@ construct a broken fixture: a bad round-trip raises :class:`FixtureError` at
 build time rather than surfacing as a mysterious test result later.
 """
 
-import os
 import struct
 from typing import Optional, Tuple
 

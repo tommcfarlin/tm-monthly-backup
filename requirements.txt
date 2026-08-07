@@ -6,9 +6,9 @@
 #     pip install -e .
 #
 # The pins below mirror the [project.dependencies] table in pyproject.toml.
-click>=8.0.0,<9
-pillow>=10.0.0,<12
-pillow-heif>=0.10.0,<1
-python-dateutil>=2.8.0,<3
-rich>=13.0.0,<15
-hachoir>=3.1.0,<4
+click>=8.1.7,<9
+pillow>=10.3.0,<13
+pillow-heif>=0.16.0,<2
+python-dateutil>=2.8.2,<3
+rich>=13.7.0,<16
+hachoir>=3.3.0,<4

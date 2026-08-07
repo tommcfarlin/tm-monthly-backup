@@ -3,6 +3,7 @@ EXIF timestamp extraction and handling module for photos and videos
 """
 
 import os
+import re
 import struct
 import logging
 from datetime import date, datetime, time, timedelta
@@ -25,6 +26,40 @@ from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS, merge_exi
 # Apple local-creationdate key (issue #28) is absent and hachoir's mvhd
 # fallback is actually reached.
 HACHOIR_AVAILABLE = None
+
+
+def _forward_hachoir_log(level, prefix, text, context) -> None:
+    """
+    Route one hachoir diagnostic into the application logger (issue #60).
+
+    hachoir maintains its own private logging system (``hachoir.core.log``)
+    that, left unconfigured, writes every parser warning straight to
+    ``sys.stderr`` -- bypassing this application's logger, the
+    ``RichHandler``, and the sanitizing filter issue #9 installs, entirely
+    outside anything ``setup_logging`` or ``logging.disable`` can affect.
+    Two problems follow from that: ``_extract_video_timestamp_hachoir`` runs
+    while ``CLIInterface`` has a live ``rich`` ``Progress`` display open, so
+    a bare stderr write for every malformed video in a library interleaves
+    with and visibly scrambles the progress bars; and the message content
+    is derived from the untrusted video container's own bytes, so writing it
+    straight to the terminal outside the one path issue #9 already sanitizes
+    is the wrong default even though no concrete escape-sequence injection
+    through it was demonstrated when this issue was filed. Registered as
+    ``hachoir.core.log.log.on_new_message`` -- the documented redirect hook
+    -- once ``log.use_print`` is turned off, so nothing reaches stderr and
+    everything worth keeping instead reaches ``--verbose`` (DEBUG) exactly
+    like every other diagnostic this module logs.
+
+    Args:
+        level: hachoir's own severity (``LOG_INFO``/``LOG_WARN``/``LOG_ERROR``);
+            not used here, since this application does not mirror hachoir's
+            severity taxonomy -- every forwarded message lands at DEBUG.
+        prefix: hachoir's own rendered severity tag (e.g. ``"[warn]"``).
+        text: The message body, already formatted by hachoir.
+        context: The hachoir parser/field instance that raised the message;
+            not used here.
+    """
+    logger.debug("hachoir: %s %s", prefix, text)
 
 
 def _ensure_hachoir_imported() -> None:
@@ -52,11 +87,21 @@ def _ensure_hachoir_imported() -> None:
     try:
         from hachoir.parser import createParser as _createParser
         from hachoir.metadata import extractMetadata as _extractMetadata
+        from hachoir.core.log import log as _hachoir_log
     except ImportError:
         HACHOIR_AVAILABLE = False
         return
     createParser = _createParser
     extractMetadata = _extractMetadata
+    # Silence hachoir's own stderr writes and redirect them through this
+    # module's logger instead (issue #60). Done here, at the same lazy
+    # first-use point issue #47 already established, rather than at module
+    # import time: configuring hachoir's logger still requires importing
+    # hachoir.core.log, and doing that eagerly at module scope would defeat
+    # #47's entire point of never paying hachoir's import cost on a
+    # photo-only run.
+    _hachoir_log.use_print = False
+    _hachoir_log.on_new_message = _forward_hachoir_log
     HACHOIR_AVAILABLE = True
 
 
@@ -590,8 +635,8 @@ class ExifHandler:
         # hachoir, so it works even when hachoir cannot be imported.
         local_creation = self._extract_quicktime_creationdate(file_path)
         if local_creation is not None:
-            logger.info(
-                f"Extracted local video creation date: {file_path} -> {local_creation}"
+            logger.debug(
+                "Extracted local video creation date: %s -> %s", file_path, local_creation
             )
             return local_creation
 
@@ -629,7 +674,7 @@ class ExifHandler:
         parsed = parse_local_creationdate(value)
         if parsed is None:
             logger.warning(
-                f"Unparseable QuickTime creationdate in {file_path}: {value!r}"
+                "Unparseable QuickTime creationdate in %s: %r", file_path, value
             )
             return None
 
@@ -684,7 +729,7 @@ class ExifHandler:
                         payload_len = offset + size - body_offset
                         if payload_len < 0 or payload_len > _MAX_MOOV_BYTES:
                             logger.debug(
-                                f"moov atom too large or invalid in {file_path}"
+                                "moov atom too large or invalid in %s", file_path
                             )
                             return None
                         return handle.read(payload_len)
@@ -772,7 +817,6 @@ class ExifHandler:
                         line_lower = line.lower()
                         if not any(keyword in line_lower for keyword in ('creation', 'date', 'time')):
                             continue
-                        import re
                         date_match = re.search(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})', line)
                         if not date_match:
                             continue
@@ -790,7 +834,7 @@ class ExifHandler:
                         break
 
                 if creation_date:
-                    logger.info("Extracted video creation date: %s -> %s", file_path, creation_date)
+                    logger.debug("Extracted video creation date: %s -> %s", file_path, creation_date)
                     return creation_date
                 else:
                     logger.warning("No creation date found in video metadata: %s", file_path)
@@ -853,7 +897,7 @@ class ExifHandler:
         # Try to extract date from filename first
         filename_timestamp = self._extract_timestamp_from_filename(file_path)
         if filename_timestamp:
-            logger.info("Extracted timestamp from filename: %s -> %s", file_path, filename_timestamp)
+            logger.debug("Extracted timestamp from filename: %s -> %s", file_path, filename_timestamp)
             return filename_timestamp
 
         try:
@@ -884,8 +928,6 @@ class ExifHandler:
             datetime object if pattern found, None otherwise
         """
         filename = Path(file_path).name
-
-        import re
 
         # Pattern 1: IMG_YYYY-MM-DD-HH-MM-SS or similar. The date/time
         # separator also accepts whitespace (`\s`) alongside `_`/`-`, which
@@ -968,6 +1010,15 @@ class ExifHandler:
                         reading, filename, parsed,
                     )
                     continue
+                # Kept at INFO, not demoted with this module's other per-file
+                # success lines (issue #48): this narrates WHICH of two
+                # genuinely ambiguous day-first/month-first readings of the
+                # filename was chosen (issue #51) -- a wrong choice silently
+                # misfiles the photo under the other valid date, and unlike
+                # an ordinary successful move/conversion, the archived
+                # filename alone does not announce that a *choice* was made
+                # between two plausible interpretations. Pinned by an
+                # existing test (test_pattern_day_first_logs_chosen_interpretation).
                 logger.info(
                     "Extracted timestamp from filename using %s interpretation: %s -> %s",
                     reading, filename, parsed,
@@ -1018,17 +1069,13 @@ class ExifHandler:
 
             formatted = self.format_timestamp_filename(adjusted)
             if formatted not in existing_files:
-                logger.info("Resolved timestamp conflict: %s -> %s", base_format, formatted)
+                logger.debug("Resolved timestamp conflict: %s -> %s", base_format, formatted)
                 return adjusted
 
             attempts += 1
 
         logger.error("Could not resolve timestamp conflict after %s attempts", max_attempts)
         return adjusted
-
-    def get_missing_exif_files(self) -> list:
-        """Return list of files that had missing/invalid EXIF data"""
-        return self.missing_exif_files.copy()
 
     def clear_missing_files_log(self):
         """Clear the missing EXIF files log"""

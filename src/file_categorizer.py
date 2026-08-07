@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from enum import Enum
 
+from PIL import Image, UnidentifiedImageError
+
 from .media_types import (
     VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS,
     ifd0_tag_names,
@@ -27,6 +29,108 @@ class FileCategory(Enum):
     GENERATED = "generated"  # AI-generated or heavily edited content
     UNKNOWN = "unknown"
     SIDECAR = "sidecar"
+
+
+class CategoryDisplayInfo(NamedTuple):
+    """One category's metadata for every summary rendering (issue #19)."""
+    category: FileCategory
+    label: str
+    scan_description: str
+    # "" (never None) for a category with no backup/ location -- see
+    # CATEGORY_DISPLAY_ORDER's own comment on SIDECAR below.
+    org_location: str
+    scan_always: bool
+    org_always: bool
+
+
+# Authored category display metadata -- the ONE place a human decides the
+# label/description/location copy for a category (issue #19; scope
+# corrected in issue #59 fix-round-1, see get_category_display_info below).
+# ``org_location`` is ``""`` for ``SIDECAR``: sidecar candidates are
+# validated and deleted, never organized into a ``backup/<category>/``
+# directory, so the post-run breakdown table has nothing to show for them
+# and skips any entry whose ``org_location`` is falsy. ``scan_always``/
+# ``org_always`` say whether a category earns an unconditional row in that
+# rendering or only a conditional one, shown solely when its count is
+# non-zero -- the style ``display_results`` already used for Unknown
+# before issue #19, now also applied to Generated and to the discovery
+# table's own Unknown/Generated rows for the same reason: an all-photos
+# run should not carry a permanent "Generated: 0" line implying generated
+# content is a routine category the way Photos/Videos/Screenshots are.
+CATEGORY_DISPLAY_ORDER: tuple[CategoryDisplayInfo, ...] = (
+    CategoryDisplayInfo(
+        FileCategory.PHOTO, "Photos", "JPEG, PNG, HEIC, etc.",
+        "backup/photos/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.VIDEO, "Videos", "MOV, MP4, M4V, etc.",
+        "backup/videos/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.SCREENSHOT, "Screenshots", "PNG files with screenshot patterns",
+        "backup/screenshots/", True, True,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.GENERATED, "Generated", "AI-generated or heavily edited content",
+        "backup/generated/", False, False,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.UNKNOWN, "Unknown", "Unrecognized file types",
+        "backup/unknown/", False, False,
+    ),
+    CategoryDisplayInfo(
+        FileCategory.SIDECAR, "Sidecar Files", "Apple .aae files (validated, then deleted)",
+        "", True, True,
+    ),
+)
+
+# Keyed view of the tuple above, built once for O(1) lookup by
+# get_category_display_info.
+_CATEGORY_DISPLAY_BY_CATEGORY: dict[FileCategory, CategoryDisplayInfo] = {
+    info.category: info for info in CATEGORY_DISPLAY_ORDER
+}
+
+
+def get_category_display_info(category: FileCategory) -> CategoryDisplayInfo:
+    """
+    Return ``category``'s authored display metadata, or a generic fallback.
+
+    Issue #59 fix-round-1 correction: the original issue #19 fix claimed a
+    future ``FileCategory`` member would need one new entry "here" (in
+    ``CATEGORY_DISPLAY_ORDER``) and nowhere else -- false as written, since
+    ``get_categorization_stats`` and the ``categorized_files`` init dict
+    were each still a separate hand-written list of members, unaffected by
+    adding to this tuple. Both are now derived from ``FileCategory`` itself
+    (see ``__init__`` and ``get_categorization_stats``), and every renderer
+    that shows a per-category row (``get_file_summary``,
+    ``CLIInterface.display_categorization_summary``,
+    ``CLIInterface.display_results``) now iterates ``FileCategory`` too,
+    calling this function instead of reading ``CATEGORY_DISPLAY_ORDER``
+    directly -- so a category present in the enum but absent from this
+    tuple (a brand new member nobody has authored copy for yet) still gets
+    a sensible generic row everywhere: a title-cased label derived from its
+    own ``.value``, a ``backup/<value>/`` location, and the conditional
+    (only-when-non-zero) style rather than an unconditional one, since a
+    category with no authored judgment call about its typical volume should
+    not default to looking as routine as Photos. ``CATEGORY_DISPLAY_ORDER``
+    remains the one place a human adds nicer, category-specific copy --
+    but nothing breaks or needs an edit anywhere else in the meantime.
+
+    Args:
+        category: The FileCategory member to look up.
+
+    Returns:
+        The authored CategoryDisplayInfo if one exists, otherwise a
+        generated fallback.
+    """
+    info = _CATEGORY_DISPLAY_BY_CATEGORY.get(category)
+    if info is not None:
+        return info
+    label = category.value.replace('_', ' ').title()
+    return CategoryDisplayInfo(
+        category, label, f"{label} files",
+        f"backup/{category.value}/", False, False,
+    )
 
 
 class ImageMetadata(NamedTuple):
@@ -169,14 +273,14 @@ class FileCategorizer:
     )
 
     def __init__(self):
-        self.categorized_files = {
-            FileCategory.PHOTO: [],
-            FileCategory.VIDEO: [],
-            FileCategory.SCREENSHOT: [],
-            FileCategory.GENERATED: [],
-            FileCategory.UNKNOWN: [],
-            FileCategory.SIDECAR: []
-        }
+        # Derived from FileCategory itself, the same derive-from-the-enum
+        # pattern issue #43 established for get_target_directory/
+        # ensure_target_directories (issue #59 fix-round-1): a future
+        # FileCategory member is picked up here with no edit, the moment it
+        # is added to the enum, since this dict comprehension iterates
+        # whatever FileCategory resolves to at __init__ time rather than
+        # naming each member.
+        self.categorized_files = {category: [] for category in FileCategory}
 
         # Per-file EXIF + PNG-text metadata, read once per photo/screenshot-
         # extension file inside categorize_file and handed forward to
@@ -333,8 +437,6 @@ class FileCategorizer:
             cannot be opened as an image at all (corrupt, zero-byte, or a
             format Pillow has no codec for -- e.g. RAW).
         """
-        from PIL import Image, UnidentifiedImageError
-
         # This is the only guard between a single bad file and the rest of
         # ``batch_categorize``'s loop, which has no try/except of its own
         # (issue #39): a permission error, a truncated/corrupt image, or a
@@ -506,24 +608,24 @@ class FileCategorizer:
         # Check for C2PA/AI provenance in PNG text chunks.
         if file_path.lower().endswith('.png'):
             if self._png_info_has_ai_provenance(png_info):
-                logger.info("Detected AI-generated content: %s", file_path)
+                logger.debug("Detected AI-generated content: %s", file_path)
                 return True
 
         # Editing software present with no genuine capture timestamp.
         if self._exif_shows_synthetic_edit(exif, ifd0):
-            logger.info("Detected heavily edited content: %s", file_path)
+            logger.debug("Detected heavily edited content: %s", file_path)
             return True
 
         # UUID-style stems are a common convention for generated output.
         if self._has_uuid_stem(file_path):
-            logger.info("Detected UUID filename (likely generated): %s", file_path)
+            logger.debug("Detected UUID filename (likely generated): %s", file_path)
             return True
 
         return False
 
-    def _png_text_has_ai_provenance(self, img) -> bool:
+    def _png_info_has_ai_provenance(self, png_info: Optional[Dict[str, Any]]) -> bool:
         """
-        Report whether a PNG's text chunks carry genuine AI/C2PA provenance.
+        Report whether a PNG-info-shaped mapping carries AI/C2PA provenance.
 
         A chunk is provenance if its KEY is a known generator key
         (:attr:`GENERATED_TEXT_KEYS`) or if its VALUE contains a high-signal
@@ -532,7 +634,7 @@ class FileCategorizer:
         identifiable keys -- while the value match is confined to whole-word
         product names so ordinary caption text can no longer trip it (issue #8).
 
-        Reads ``img.info`` rather than ``img.text`` (issue #44). Pillow's
+        Operates on ``img.info`` rather than ``img.text`` (issue #44). Pillow's
         ``PngImageFile.text`` property calls ``self.load()`` before returning,
         because tEXt/iTXt chunks are legally allowed to follow IDAT and Pillow
         will not report a partial answer -- so merely probing ``.text`` forces
@@ -557,25 +659,11 @@ class FileCategorizer:
         a binary chunk like an ICC profile can never widen what gets matched,
         the way scanning ``str(value)`` over every ``info`` entry would.
 
-        Args:
-            img: An open :class:`PIL.Image.Image`.
-
-        Returns:
-            True if any text chunk indicates AI-generated provenance.
-        """
-        png_info = getattr(img, 'info', None)
-        return self._png_info_has_ai_provenance(png_info)
-
-    def _png_info_has_ai_provenance(self, png_info: Optional[Dict[str, Any]]) -> bool:
-        """
-        Report whether a PNG-info-shaped mapping carries AI/C2PA provenance.
-
-        The no-I/O core of :meth:`_png_text_has_ai_provenance` (issue #24):
-        operates directly on an already-read ``img.info``-shaped mapping so
-        :meth:`_is_generated_content` can call it with
-        :class:`FileCategorizer`'s once-per-file cached ``png_info`` instead
-        of a live ``Image``. See that method's docstring for why ``img.info``
-        (rather than ``img.text``) is the right thing to read (issue #44).
+        This is the no-I/O core :meth:`_is_generated_content` calls with
+        :class:`FileCategorizer`'s once-per-file cached ``png_info`` (issue
+        #24); a live-``Image``-taking wrapper of the same name used to sit in
+        front of it but was removed as dead code (issue #49) once #24 routed
+        every production caller through the cached-dict form directly.
 
         Args:
             png_info: A mapping shaped like PIL's ``Image.info`` (or falsy).
@@ -828,37 +916,56 @@ class FileCategorizer:
         """
         Get statistics about file categorization.
 
+        Derived from ``self.categorized_files`` -- itself derived from
+        ``FileCategory`` (issue #59 fix-round-1) -- by ``category.value``
+        rather than one hand-written key per member, so a future
+        ``FileCategory`` member's count appears here with no edit, the
+        moment ``__init__`` sees it. ``FileCategory.PHOTO.value == "photos"``
+        etc. (issue #43), so this reproduces the exact key spelling every
+        existing caller already depends on.
+
         Returns:
             Dictionary with categorization counts
         """
-        return {
-            'photos': len(self.categorized_files[FileCategory.PHOTO]),
-            'videos': len(self.categorized_files[FileCategory.VIDEO]),
-            'screenshots': len(self.categorized_files[FileCategory.SCREENSHOT]),
-            'generated': len(self.categorized_files[FileCategory.GENERATED]),
-            'unknown': len(self.categorized_files[FileCategory.UNKNOWN]),
-            'sidecar': len(self.categorized_files[FileCategory.SIDECAR]),
-            'total': sum(len(files) for files in self.categorized_files.values())
+        stats = {
+            category.value: len(files)
+            for category, files in self.categorized_files.items()
         }
+        stats['total'] = sum(len(files) for files in self.categorized_files.values())
+        return stats
 
     def get_file_summary(self) -> str:
         """
         Get human-readable summary of categorized files.
+
+        Every category gets an unconditional line here (issue #19),
+        including ``Generated`` -- omitted before that fix even though
+        :meth:`get_categorization_stats` had carried its count from the day
+        that key was added, so a run that filed files into
+        ``backup/generated/`` reported a ``Total`` that did not reconcile
+        with any visible line above it.
+
+        Iterates ``FileCategory`` directly and looks up each member's
+        display copy via :func:`get_category_display_info` (issue #59
+        fix-round-1), rather than iterating ``CATEGORY_DISPLAY_ORDER`` --
+        the fixed tuple built once at import time can never itself gain a
+        new member merely by extending the enum, so a caller who swaps in a
+        ``FileCategory`` with an extra member still gets a line for it here.
 
         Returns:
             Formatted string summary
         """
         stats = self.get_categorization_stats()
 
-        summary_lines = [
-            f"File Categorization Summary:",
-            f"  Photos: {stats['photos']} files",
-            f"  Videos: {stats['videos']} files",
-            f"  Screenshots: {stats['screenshots']} files",
-            f"  Unknown: {stats['unknown']} files",
-            f"  Sidecar (to delete): {stats['sidecar']} files",
-            f"  Total: {stats['total']} files"
-        ]
+        summary_lines = ["File Categorization Summary:"]
+        for category in FileCategory:
+            info = get_category_display_info(category)
+            # Sidecar candidates are deleted, not filed into backup/, so the
+            # text summary calls this out rather than reusing the plain
+            # "Sidecar Files" label the tables use.
+            label = "Sidecar (to delete)" if category is FileCategory.SIDECAR else info.label
+            summary_lines.append(f"  {label}: {stats[category.value]} files")
+        summary_lines.append(f"  Total: {stats['total']} files")
 
         return "\n".join(summary_lines)
 

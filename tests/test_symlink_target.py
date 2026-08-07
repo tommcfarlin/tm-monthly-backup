@@ -182,7 +182,7 @@ class TestSymlinkTargetArchiving(unittest.TestCase):
             os.path.lexists(link), "the symlink should be gone from export/"
         )
         # No stray .heic leaked into the backup tree.
-        for dirpath, _dirs, filenames in os.walk(self.backup_dir):
+        for _dirpath, _dirs, filenames in os.walk(self.backup_dir):
             for name in filenames:
                 self.assertFalse(
                     name.lower().endswith(".heic"),

@@ -3,12 +3,10 @@ Rich CLI interface with progress bars and beautiful output
 """
 
 import re
-import sys
 import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 
-import click
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 from rich.table import Table
@@ -19,6 +17,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from .file_processor import FileProcessor, ProgressReporter, Settings
+from .file_categorizer import FileCategory, get_category_display_info
 
 # Initialize rich console
 console = Console()
@@ -212,11 +211,22 @@ def setup_logging(verbose: bool = False):
     # they reach the terminal, at one boundary for every log record.
     rich_handler.addFilter(_SanitizingLogFilter())
 
+    # force=True (issue #48): basicConfig() silently does nothing -- applying
+    # neither ``level`` nor ``handlers`` -- if the root logger already has a
+    # handler installed, per the stdlib's own documented behavior. Today
+    # main.py is the only caller and always runs against a pristine root, so
+    # this is latent; it stops being latent the moment anything (a test
+    # module, a future --log-file option, a library import that configures
+    # logging first) installs a handler before this call, at which point
+    # --verbose would silently fail to raise the level and the sanitizing
+    # rich_handler above would silently fail to be installed at all -- the
+    # untrusted-filename-escaping boundary this function exists to set up.
     logging.basicConfig(
         level=log_level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[rich_handler]
+        handlers=[rich_handler],
+        force=True
     )
 
     # Reduce pillow logging noise
@@ -294,7 +304,7 @@ class CLIInterface:
         safe_export = safe_markup(export_path)
         if not export_path.exists():
             self.console.print(f"[red]Error: Export directory does not exist: {safe_export}[/red]")
-            self.console.print(f"[yellow]Please create the directory and place your exported photos there:[/yellow]")
+            self.console.print("[yellow]Please create the directory and place your exported photos there:[/yellow]")
             self.console.print(f"[dim]  mkdir {safe_export}[/dim]")
             self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {safe_export}/[/dim]")
             return False
@@ -361,6 +371,19 @@ class CLIInterface:
         ``FileProcessor`` already performed -- no second ``batch_categorize``
         (issue #13).
 
+        Rows are driven by iterating ``FileCategory`` itself, looking up
+        each member's copy via :func:`FileCategorizer.get_category_display_info`
+        (issue #19, corrected in issue #59 fix-round-1 to iterate the enum
+        rather than the fixed ``CATEGORY_DISPLAY_ORDER`` tuple, so a member
+        added to the enum after this tuple was last edited still gets a
+        row) rather than a hand-written list that omitted Generated: a
+        category earns an unconditional row when ``scan_always`` is set
+        (Photos/Videos/Screenshots/Sidecar), otherwise only when its count
+        is non-zero -- the style already used for Unknown here, now applied
+        to Generated too, so an all-photos run does not carry a permanent
+        "Generated: 0" line implying generated content is as routine a
+        category as Photos.
+
         Args:
             stats: Categorization counts from
                 :meth:`FileCategorizer.get_categorization_stats`.
@@ -371,13 +394,13 @@ class CLIInterface:
         table.add_column("Count", justify="right", style="green")
         table.add_column("Description", style="dim")
 
-        table.add_row("Photos", str(stats['photos']), "JPEG, PNG, HEIC, etc.")
-        table.add_row("Videos", str(stats['videos']), "MOV, MP4, M4V, etc.")
-        table.add_row("Screenshots", str(stats['screenshots']), "PNG files with screenshot patterns")
-        table.add_row("Sidecar Files", str(stats['sidecar']), "Apple .aae files (validated, then deleted)")
-
-        if stats['unknown'] > 0:
-            table.add_row("Unknown", str(stats['unknown']), "Unrecognized file types", style="yellow")
+        for category in FileCategory:
+            info = get_category_display_info(category)
+            count = stats.get(category.value, 0)
+            if not info.scan_always and count == 0:
+                continue
+            style = "yellow" if category is FileCategory.UNKNOWN else None
+            table.add_row(info.label, str(count), info.scan_description, style=style)
 
         table.add_row("", "", "", style="dim")
         table.add_row("Total", str(stats['total']), "Files to process", style="bold")
@@ -500,7 +523,12 @@ class CLIInterface:
             title_style = "bold green"
 
         # Create results table
-        table = Table(title=title, show_header=True, header_style="bold magenta")
+        table = Table(
+            title=title,
+            title_style=title_style,
+            show_header=True,
+            header_style="bold magenta",
+        )
         table.add_column("Metric", style="cyan", width=25)
         table.add_column("Count", justify="right", style="green")
 
@@ -546,15 +574,29 @@ class CLIInterface:
             breakdown_table.add_column("Files", justify="right", style="green")
             breakdown_table.add_column("Location", style="dim")
 
-            breakdown_table.add_row("Photos", str(stats.get('photos', 0)), "backup/photos/")
-            breakdown_table.add_row("Videos", str(stats.get('videos', 0)), "backup/videos/")
-            breakdown_table.add_row("Screenshots", str(stats.get('screenshots', 0)), "backup/screenshots/")
-
-            if stats.get('generated', 0) > 0:
-                breakdown_table.add_row("Generated", str(stats['generated']), "backup/generated/", style="magenta")
-
-            if stats.get('unknown', 0) > 0:
-                breakdown_table.add_row("Unknown", str(stats['unknown']), "backup/unknown/", style="yellow")
+            # Driven by iterating FileCategory itself and looking up each
+            # member's copy (issue #19, corrected in issue #59 fix-round-1
+            # to iterate the enum rather than the fixed
+            # CATEGORY_DISPLAY_ORDER tuple -- see get_category_display_info's
+            # own docstring), the same as the pre-run discovery table and
+            # the text summary. SIDECAR is skipped via its empty
+            # ``org_location``: sidecar candidates are deleted, never
+            # organized into a ``backup/<category>/`` directory, so it has
+            # no row here.
+            for category in FileCategory:
+                info = get_category_display_info(category)
+                if not info.org_location:
+                    continue
+                count = stats.get(category.value, 0)
+                if not info.org_always and count == 0:
+                    continue
+                if category is FileCategory.GENERATED:
+                    style = "magenta"
+                elif category is FileCategory.UNKNOWN:
+                    style = "yellow"
+                else:
+                    style = None
+                breakdown_table.add_row(info.label, str(count), info.org_location, style=style)
 
             if quarantine_count > 0:
                 breakdown_table.add_row(

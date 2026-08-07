@@ -89,7 +89,7 @@ class TestHiddenFileIsCountedNotDropped(unittest.TestCase):
         ``files_failed``, and every other bucket, which is exactly the
         "absent from every count" defect this issue fixes.
         """
-        ordinary = make_exif_jpeg(
+        make_exif_jpeg(
             os.path.join(self.export_dir, "IMG_0001.jpg"),
             date_time_original="2024:01:15 14:30:45",
             color="green",
