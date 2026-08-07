@@ -57,3 +57,6 @@ htmlcov/
 *.temp
 # Git worktrees
 .worktrees/
+
+# Short-lived subagent workspace (task briefs, reports, review packages)
+.superpowers/
