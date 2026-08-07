@@ -155,14 +155,21 @@ class FileCategorizer:
         if ext in self.sidecar_exts:
             return FileCategory.SIDECAR
 
-        # Check for screenshots (PNG files with screenshot patterns)
+        # Check for screenshots (PNG files with screenshot patterns).
+        #
+        # Precedence, decided (issue #22): AI/C2PA provenance wins over the
+        # screenshot filename convention, not the other way around. A
+        # filename match is a guess about how a file was produced; provenance
+        # metadata is evidence a generation tool actually wrote. A PNG named
+        # like a screenshot can still be genuinely AI-generated -- e.g. a
+        # screenshot taken OF a generated image, or a save-as tool that
+        # happens to apply screenshot-style naming -- and such a file must
+        # land in GENERATED rather than being waved through as SCREENSHOT on
+        # name alone. ``_categorize_image_or_generated`` reads this file's
+        # metadata exactly once (issue #24) and checks provenance before ever
+        # consulting the ``filename`` fallback passed to it below.
         if ext in self.screenshot_exts:
-            # Additional heuristics for screenshot detection
-            if self._is_likely_screenshot(filename):
-                return FileCategory.SCREENSHOT
-            # If PNG but not clearly a screenshot, treat as photo unless it's
-            # AI-generated or heavily edited content.
-            return self._categorize_image_or_generated(file_path)
+            return self._categorize_image_or_generated(file_path, filename)
 
         # Check for photos
         if ext in self.photo_exts:
@@ -176,9 +183,12 @@ class FileCategorizer:
         logger.warning("Unknown file type: %s", file_path)
         return FileCategory.UNKNOWN
 
-    def _categorize_image_or_generated(self, file_path: str) -> FileCategory:
+    def _categorize_image_or_generated(
+        self, file_path: str, filename: Optional[str] = None
+    ) -> FileCategory:
         """
-        Resolve a photo/screenshot-extension file to PHOTO or GENERATED.
+        Resolve a photo/screenshot-extension file to GENERATED, SCREENSHOT,
+        or PHOTO.
 
         Reads the file's EXIF + PNG-text metadata exactly once via
         :meth:`_read_image_metadata` (issue #24), hands it to
@@ -187,26 +197,49 @@ class FileCategorizer:
         ``ExifHandler.extract_timestamp`` can reuse it later in the same run
         instead of reopening the file.
 
+        Precedence (issue #22): AI/C2PA provenance is checked FIRST and wins
+        outright -- a file with a genuine generator marker is GENERATED
+        regardless of its name. Only once provenance says "no marker found"
+        does the screenshot filename convention (:meth:`_is_likely_screenshot`)
+        get a vote, and only when ``filename`` is supplied at all (the
+        non-screenshot-extension photo call site below passes none, since
+        those extensions never carry that convention). This is a single
+        metadata read either way: the same ``exif``/``ifd0``/``png_info``
+        already fetched for the provenance check is reused for the
+        filename-fallback branch, never triggering a second
+        ``_read_image_metadata`` call or a second ``Image.open``.
+
         Args:
             file_path: Path to the candidate photo/screenshot file.
+            filename: Lowercase filename to test against the screenshot
+                naming convention if provenance finds no AI/C2PA marker, or
+                ``None`` to skip that fallback entirely (non-screenshot
+                extensions have no such convention to fall back to).
 
         Returns:
-            FileCategory.GENERATED or FileCategory.PHOTO.
+            FileCategory.GENERATED, FileCategory.SCREENSHOT (only when
+            ``filename`` is given and matches), or FileCategory.PHOTO.
         """
         metadata = self._read_image_metadata(file_path)
         if metadata is None:
             # Unreadable as an image (corrupt, zero-byte, or a format Pillow
-            # has no codec for, e.g. RAW) -- nothing to cache, and nothing to
-            # flag as generated. Mirrors _is_generated_content's previous
-            # try/except-swallows-and-returns-False behavior.
+            # has no codec for, e.g. RAW) -- nothing to cache, and no
+            # provenance evidence to weigh. The filename convention is the
+            # only signal left, so it decides alone. Mirrors
+            # _is_generated_content's previous try/except-swallows-and-
+            # returns-False behavior for the GENERATED side of this.
+            if filename is not None and self._is_likely_screenshot(filename):
+                return FileCategory.SCREENSHOT
             return FileCategory.PHOTO
 
         exif, ifd0, png_info = metadata
-        category = (
-            FileCategory.GENERATED
-            if self._is_generated_content(file_path, exif, ifd0, png_info)
-            else FileCategory.PHOTO
-        )
+        if self._is_generated_content(file_path, exif, ifd0, png_info):
+            category = FileCategory.GENERATED
+        elif filename is not None and self._is_likely_screenshot(filename):
+            category = FileCategory.SCREENSHOT
+        else:
+            category = FileCategory.PHOTO
+
         self.image_metadata[file_path] = ImageMetadata(
             exif=exif, png_info=png_info, category=category
         )
@@ -339,6 +372,30 @@ class FileCategorizer:
         """
         Determine if a file is likely a screenshot based on filename patterns.
 
+        One coherent rule per pattern (issue #22): this used to carry THREE
+        overlapping checks for the same ``IMG_`` convention -- a bare
+        ``'img_'`` substring, a redundant ``'img_3'`` entry it already
+        subsumed, and a ``filename.startswith('img_3') and
+        filename.endswith('.png')`` branch that could never fire before the
+        bare substring already returned True. There is now exactly one
+        ``'img_'`` entry, below, and the stale docstring claim that only an
+        ``IMG_3XXX`` numbering was matched is gone -- the implementation, both
+        before and after this fix, matches ANY ``img_`` prefix, not just
+        stems starting with digit 3.
+
+        ``'img_'`` earns its place in this list for a reason specific to this
+        tool's input: this method is only ever consulted for extensions in
+        :attr:`SCREENSHOT_EXTENSIONS`, which is ``{'.png'}`` -- so in
+        practice the rule this implements is not "any file named ``IMG_``"
+        but "a PNG named ``IMG_`` in an Apple Photos export." Apple's
+        cameras never emit PNG for a captured photo (camera output is HEIC or
+        JPG); the only common source of a camera-style ``IMG_####.PNG`` is
+        iOS/macOS's own screenshot pipeline, which reuses the camera's
+        ``IMG_`` numbering sequence for its own PNG output. A PNG carrying
+        that name is therefore almost certainly a screenshot, not a photo --
+        dropping this entry would misfile every one of those as an ordinary
+        image.
+
         Args:
             filename: Lowercase filename
 
@@ -348,18 +405,12 @@ class FileCategorizer:
         screenshot_patterns = [
             'screenshot',
             'screen shot',
-            'img_',  # iOS screenshot pattern
             'simulator screen shot',  # iOS Simulator
             'screen recording',
-            'img_3',  # iOS screenshot pattern (IMG_3XXX)
             'screen_',
             'capture',
+            'img_',  # Apple export convention -- see docstring above.
         ]
-
-        # iOS screenshots often have specific patterns
-        # IMG_XXXX.PNG where XXXX is 4+ digits starting with 3
-        if filename.startswith('img_3') and filename.endswith('.png'):
-            return True
 
         return any(pattern in filename for pattern in screenshot_patterns)
 

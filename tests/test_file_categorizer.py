@@ -572,6 +572,139 @@ class TestGeneratedContentDetection(unittest.TestCase):
         self.assertTrue(_is_generated(self.categorizer, file_path))
 
 
+class TestScreenshotVsProvenancePrecedence(unittest.TestCase):
+    """
+    Issue #22: routing precedence between screenshot filename detection and
+    AI/C2PA provenance detection, exercised through the real
+    ``categorize_file`` entry point (not the private helpers directly), so
+    these tests pin the actual routing decision a run makes.
+
+    Decided precedence: provenance wins. A PNG carrying a genuine AI/C2PA
+    marker resolves to GENERATED even when its name matches the screenshot
+    convention -- metadata is evidence a generation tool actually wrote, a
+    filename match is only a naming guess. Before this fix,
+    ``categorize_file`` checked the screenshot filename pattern first and
+    returned immediately on a match, so ``_is_generated_content`` was never
+    even consulted for a screenshot-named PNG.
+    """
+
+    def setUp(self):
+        self.categorizer = FileCategorizer()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_ai_provenance_with_screenshot_filename_lands_in_generated(self):
+        """A genuine AI marker outranks a screenshot-style filename.
+
+        Fails against the old code: the old ``categorize_file`` matched
+        ``'screenshot'`` in the filename and returned FileCategory.SCREENSHOT
+        before ``_is_generated_content`` ever ran, so the AI marker below was
+        detected but never consulted (confirmed by stashing this fix and
+        rerunning -- see the task report).
+        """
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        file_path = os.path.join(self.temp_dir, "Screenshot 2024-01-15.png")
+        image = Image.new('RGB', (10, 10), color='green')
+        pnginfo = PngInfo()
+        pnginfo.add_text("Software", "ChatGPT / OpenAI DALL-E")
+        image.save(file_path, pnginfo=pnginfo)
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.GENERATED)
+
+    def test_ai_provenance_with_img_underscore_filename_lands_in_generated(self):
+        """The same precedence holds for the IMG_ screenshot convention, not
+        just the literal 'screenshot' pattern."""
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        file_path = os.path.join(self.temp_dir, "IMG_1001.png")
+        image = Image.new('RGB', (10, 10), color='green')
+        pnginfo = PngInfo()
+        pnginfo.add_text("parameters", "Steps: 20, Sampler: Euler a, Model: sd-v1")
+        image.save(file_path, pnginfo=pnginfo)
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.GENERATED)
+
+    def test_screenshot_style_png_without_provenance_still_lands_in_screenshot(self):
+        """No AI marker present: the screenshot filename fallback still applies.
+
+        This is regression coverage, not new-behavior coverage -- it cannot
+        fail against the old code, which reached FileCategory.SCREENSHOT for
+        this exact input via the same filename check, just earlier in the
+        function. It is here to pin that the reordering did not lose the
+        ordinary (no-provenance) case.
+        """
+        from PIL import Image
+
+        file_path = os.path.join(self.temp_dir, "Screenshot 2024-01-15.png")
+        Image.new('RGB', (10, 10), color='green').save(file_path)
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.SCREENSHOT)
+
+    def test_img_underscore_png_still_classifies_as_screenshot(self):
+        """IMG_1001.PNG-style names still resolve to SCREENSHOT (issue #22
+        acceptance criterion), even now that provenance is checked first.
+
+        The owner's real export directory has 21 ``IMG_*.PNG`` files, 13 of
+        them at exactly the iPhone 15/15 Pro screen resolution
+        (1179x2556) -- unambiguously genuine screenshots. Apple cameras never
+        emit PNG for a captured photo (camera output is HEIC/JPG), so a PNG
+        carrying that camera-style name is not mistaken for a real photo by
+        this rule; dropping the ``img_`` pattern would misfile files like
+        this one as photos. This test uses the exact resolution to mirror
+        that real-world case.
+
+        This is regression coverage, not new-behavior coverage -- it cannot
+        fail against the old code, which already matched this filename via
+        the (redundant, three-times-repeated) ``img_`` checks. It pins that
+        collapsing those three checks into one did not narrow what matches.
+        """
+        from PIL import Image
+
+        file_path = os.path.join(self.temp_dir, "IMG_1001.PNG")
+        Image.new('RGB', (1179, 2556), color='white').save(file_path)
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.SCREENSHOT)
+
+    def test_img_underscore_camera_jpg_never_reaches_screenshot_logic(self):
+        """IMG_1001.JPG (camera-extension, not PNG) never goes through the
+        screenshot filename check at all -- SCREENSHOT_EXTENSIONS is PNG-only,
+        so this always resolved to PHOTO, before and after this fix."""
+        from PIL import Image
+
+        file_path = os.path.join(self.temp_dir, "IMG_1001.JPG")
+        Image.new('RGB', (10, 10), color='green').save(file_path, format="JPEG")
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.PHOTO)
+
+    def test_unreadable_screenshot_named_png_falls_back_to_filename_alone(self):
+        """A PNG that cannot be opened at all has no provenance evidence, so
+        the filename convention is the only signal and must still decide it.
+        """
+        file_path = os.path.join(self.temp_dir, "IMG_9999.png")
+        with open(file_path, "wb") as handle:
+            handle.write(b"not actually a png")
+
+        category = self.categorizer.categorize_file(file_path)
+
+        self.assertEqual(category, FileCategory.SCREENSHOT)
+
+
 class TestGeneratedContentPrecision(unittest.TestCase):
     """Precise AI/generated detection: no caption bleed, real UUID parsing (#8).
 
