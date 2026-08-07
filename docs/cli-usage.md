@@ -49,7 +49,7 @@ tm-monthly-backup --verbose
 | `--dry-run` | | Preview operations without making changes | `False` |
 | `--yes` | `-y` | Assume yes for all prompts (required for non-interactive use) | `False` |
 | `--verbose` | `-v` | Enable detailed logging output | `False` |
-| `--help` | | Show help message and exit | |
+| `--help` | `-h` | Show help message and exit | |
 | `--version` | | Show version information | |
 
 ### Directory Configuration

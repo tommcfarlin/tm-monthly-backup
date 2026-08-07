@@ -95,6 +95,34 @@ class TestMainCli(unittest.TestCase):
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertIn("--yes", result.output)
 
+    def test_dash_h_is_a_help_alias(self):
+        """-h prints the same help text as --help and exits 0 (issue #64).
+
+        click only registers ``--help`` by default; ``-h`` was an unknown
+        option until ``context_settings={"help_option_names": [...]}`` was
+        added to the command. ``CliRunner`` never presents stdin as a tty
+        (pinned by ``test_yes_flag.TestNonInteractiveGate``), so this bare
+        invocation -- no ``--export-dir``/``--backup-dir``, no ``--yes``, no
+        ``--dry-run`` -- doubles as proof that ``-h`` is resolved eagerly by
+        click's help mechanism *before* ``main()``'s body runs, rather than
+        being caught by the issue #33 no-terminal precondition gate (which
+        would otherwise exit 2 with "No terminal available").
+        """
+        result = self.runner.invoke(main, ["-h"])
+
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertIn("--yes", result.output)
+        self.assertNotIn("No terminal available", result.output)
+
+    def test_dash_h_output_matches_dash_dash_help(self):
+        """-h and --help produce byte-identical output (issue #64)."""
+        short_result = self.runner.invoke(main, ["-h"])
+        long_result = self.runner.invoke(main, ["--help"])
+
+        self.assertEqual(short_result.exit_code, EXIT_SUCCESS)
+        self.assertEqual(long_result.exit_code, EXIT_SUCCESS)
+        self.assertEqual(short_result.output, long_result.output)
+
     def test_console_entry_point_target_resolves(self):
         """The ``src.main:main`` console entry point (pyproject.toml) resolves.
 
