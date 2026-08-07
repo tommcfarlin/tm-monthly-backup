@@ -272,7 +272,24 @@ class FileProcessor:
     # "anything hidden is junk" -- a real photo can carry a leading dot too
     # (an interrupted ``rsync``/``scp`` partial, a cloud-sync conflict copy),
     # and that file must still be accounted for rather than silently dropped.
-    HIDDEN_FILE_DENYLIST = frozenset({'.DS_Store', '.localized', 'Thumbs.db'})
+    # Compared case-insensitively (see ``_is_denylisted_junk``). These names
+    # arrive from filesystems that do not preserve case the way the canonical
+    # spelling suggests: a Windows-originated export can carry ``thumbs.db``
+    # lowercase, and macOS's own case-insensitive APFS will happily hand back
+    # ``.ds_store``. A case-sensitive match would let those fall through to
+    # ``UNKNOWN`` and be filed into ``backup/unknown/`` as if they were the
+    # user's data.
+    HIDDEN_FILE_DENYLIST = frozenset({'.ds_store', '.localized', 'thumbs.db'})
+
+    def _is_denylisted_junk(self, filename: str) -> bool:
+        """
+        Is this basename one of the known-junk names the scan always ignores?
+
+        Case-insensitive: see :attr:`HIDDEN_FILE_DENYLIST` for why. The
+        denylist itself is stored pre-lowercased so this is a plain membership
+        test rather than a set comprehension per file.
+        """
+        return filename.lower() in self.HIDDEN_FILE_DENYLIST
 
     def __init__(
         self,
@@ -659,7 +676,7 @@ class FileProcessor:
                 # dot alone does not prove a file is junk (an interrupted
                 # rsync/scp partial or a cloud-sync conflict copy can carry
                 # real photo content under a dotted name).
-                if filename in self.HIDDEN_FILE_DENYLIST:
+                if self._is_denylisted_junk(filename):
                     skip_reason = 'junk'
                 elif filename.startswith('.'):
                     skip_reason = 'hidden'

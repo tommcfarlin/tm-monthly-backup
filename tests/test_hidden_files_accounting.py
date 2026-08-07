@@ -153,6 +153,44 @@ class TestHiddenFileIsCountedNotDropped(unittest.TestCase):
         reasons = {reason for reason, _path in results["skipped_files"]}
         self.assertEqual(reasons, {"junk"})
 
+    def test_denylist_matching_is_case_insensitive(self):
+        """Junk names arrive in whatever case the source filesystem used.
+
+        A Windows-originated export can carry ``thumbs.db`` lowercase, and
+        macOS's case-insensitive APFS will hand back ``.ds_store``. A
+        case-sensitive match would let those fall through to ``UNKNOWN`` and
+        file them into ``backup/unknown/`` as though they were the user's own
+        data -- reported, but reported as something they are not.
+        """
+        # Directories are numbered, not named after the file: this machine's
+        # APFS volume is itself case-insensitive, so `export_.DS_STORE` and
+        # `export_.ds_store` would collide and the fixture would fail before
+        # the assertion ran.
+        for i, name in enumerate((".DS_STORE", ".ds_store", "THUMBS.DB",
+                                  "thumbs.db", ".Localized")):
+            with self.subTest(name=name):
+                export = os.path.join(self.temp_dir, f"export_case{i}")
+                backup = os.path.join(self.temp_dir, f"backup_case{i}")
+                os.makedirs(export)
+                with open(os.path.join(export, name), "w") as fh:
+                    fh.write("junk")
+
+                processor = FileProcessor(export, backup)
+                results = processor.process_all_files(dry_run=False)
+
+                self.assertEqual(
+                    results["files_skipped"], 1,
+                    f"{name} was not skipped as junk",
+                )
+                self.assertEqual(
+                    [reason for reason, _ in results["skipped_files"]], ["junk"],
+                    f"{name} was skipped but not labelled junk",
+                )
+                self.assertFalse(
+                    os.path.isdir(os.path.join(backup, "unknown")),
+                    f"{name} was filed into backup/unknown/ instead of skipped",
+                )
+
 
 class TestDottedDirectoryMatchesDottedFilePolicy(unittest.TestCase):
     """Acceptance criterion 3 (regression coverage -- see module docstring).
