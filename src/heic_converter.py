@@ -119,7 +119,10 @@ class HeicConverter:
                     'optimize': self.optimize
                 }
 
-                # Preserve EXIF data if present
+                # Preserve EXIF data if present.
+                # Deliberate: this is a personal archive, so the full EXIF block --
+                # including GPS and device identifiers -- is preserved. See README,
+                # "What Ends Up in backup/". Do not strip without changing that contract.
                 if exif_data:
                     save_kwargs['exif'] = exif_data
 
