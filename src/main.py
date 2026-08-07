@@ -81,7 +81,7 @@ def determine_exit_code(results: dict) -> int:
     return EXIT_SUCCESS
 
 
-@click.command()
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option('--dry-run', is_flag=True, help='Show what would be done without making changes')
 @click.option('--yes', '-y', is_flag=True,
               help='Assume yes for all prompts (required for non-interactive use)')
