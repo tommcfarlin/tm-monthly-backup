@@ -26,9 +26,8 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from src.cli_interface import CLIInterface, setup_logging
+from src.cli_interface import setup_logging
 from src.file_processor import FileProcessor
 from tests.fixtures import make_exif_jpeg
 

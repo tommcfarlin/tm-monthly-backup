@@ -43,17 +43,9 @@ class CategoryDisplayInfo(NamedTuple):
     org_always: bool
 
 
-# Single ordered source of category display metadata, read by
-# ``get_file_summary`` (this module) and by ``CLIInterface``'s pre-run
-# discovery table (``display_categorization_summary``) and post-run
-# category breakdown (``display_results``). Before this issue, each of
-# those three renderings hand-wrote its own list of which categories to
-# show: ``get_categorization_stats`` carried a ``generated`` key from the
-# day it was added, but two of the three renderings silently never grew a
-# Generated row, so a run that filed files into ``backup/generated/``
-# reported a ``Total`` that did not reconcile with any visible line. Adding
-# a future ``FileCategory`` member now means adding one entry here; every
-# renderer that iterates this tuple picks it up without a separate edit.
+# Authored category display metadata -- the ONE place a human decides the
+# label/description/location copy for a category (issue #19; scope
+# corrected in issue #59 fix-round-1, see get_category_display_info below).
 # ``org_location`` is ``""`` for ``SIDECAR``: sidecar candidates are
 # validated and deleted, never organized into a ``backup/<category>/``
 # directory, so the post-run breakdown table has nothing to show for them
@@ -61,7 +53,7 @@ class CategoryDisplayInfo(NamedTuple):
 # ``org_always`` say whether a category earns an unconditional row in that
 # rendering or only a conditional one, shown solely when its count is
 # non-zero -- the style ``display_results`` already used for Unknown
-# before this issue, now also applied to Generated and to the discovery
+# before issue #19, now also applied to Generated and to the discovery
 # table's own Unknown/Generated rows for the same reason: an all-photos
 # run should not carry a permanent "Generated: 0" line implying generated
 # content is a routine category the way Photos/Videos/Screenshots are.
@@ -91,6 +83,54 @@ CATEGORY_DISPLAY_ORDER: tuple[CategoryDisplayInfo, ...] = (
         "", True, True,
     ),
 )
+
+# Keyed view of the tuple above, built once for O(1) lookup by
+# get_category_display_info.
+_CATEGORY_DISPLAY_BY_CATEGORY: dict[FileCategory, CategoryDisplayInfo] = {
+    info.category: info for info in CATEGORY_DISPLAY_ORDER
+}
+
+
+def get_category_display_info(category: FileCategory) -> CategoryDisplayInfo:
+    """
+    Return ``category``'s authored display metadata, or a generic fallback.
+
+    Issue #59 fix-round-1 correction: the original issue #19 fix claimed a
+    future ``FileCategory`` member would need one new entry "here" (in
+    ``CATEGORY_DISPLAY_ORDER``) and nowhere else -- false as written, since
+    ``get_categorization_stats`` and the ``categorized_files`` init dict
+    were each still a separate hand-written list of members, unaffected by
+    adding to this tuple. Both are now derived from ``FileCategory`` itself
+    (see ``__init__`` and ``get_categorization_stats``), and every renderer
+    that shows a per-category row (``get_file_summary``,
+    ``CLIInterface.display_categorization_summary``,
+    ``CLIInterface.display_results``) now iterates ``FileCategory`` too,
+    calling this function instead of reading ``CATEGORY_DISPLAY_ORDER``
+    directly -- so a category present in the enum but absent from this
+    tuple (a brand new member nobody has authored copy for yet) still gets
+    a sensible generic row everywhere: a title-cased label derived from its
+    own ``.value``, a ``backup/<value>/`` location, and the conditional
+    (only-when-non-zero) style rather than an unconditional one, since a
+    category with no authored judgment call about its typical volume should
+    not default to looking as routine as Photos. ``CATEGORY_DISPLAY_ORDER``
+    remains the one place a human adds nicer, category-specific copy --
+    but nothing breaks or needs an edit anywhere else in the meantime.
+
+    Args:
+        category: The FileCategory member to look up.
+
+    Returns:
+        The authored CategoryDisplayInfo if one exists, otherwise a
+        generated fallback.
+    """
+    info = _CATEGORY_DISPLAY_BY_CATEGORY.get(category)
+    if info is not None:
+        return info
+    label = category.value.replace('_', ' ').title()
+    return CategoryDisplayInfo(
+        category, label, f"{label} files",
+        f"backup/{category.value}/", False, False,
+    )
 
 
 class ImageMetadata(NamedTuple):
@@ -233,14 +273,14 @@ class FileCategorizer:
     )
 
     def __init__(self):
-        self.categorized_files = {
-            FileCategory.PHOTO: [],
-            FileCategory.VIDEO: [],
-            FileCategory.SCREENSHOT: [],
-            FileCategory.GENERATED: [],
-            FileCategory.UNKNOWN: [],
-            FileCategory.SIDECAR: []
-        }
+        # Derived from FileCategory itself, the same derive-from-the-enum
+        # pattern issue #43 established for get_target_directory/
+        # ensure_target_directories (issue #59 fix-round-1): a future
+        # FileCategory member is picked up here with no edit, the moment it
+        # is added to the enum, since this dict comprehension iterates
+        # whatever FileCategory resolves to at __init__ time rather than
+        # naming each member.
+        self.categorized_files = {category: [] for category in FileCategory}
 
         # Per-file EXIF + PNG-text metadata, read once per photo/screenshot-
         # extension file inside categorize_file and handed forward to
@@ -876,29 +916,41 @@ class FileCategorizer:
         """
         Get statistics about file categorization.
 
+        Derived from ``self.categorized_files`` -- itself derived from
+        ``FileCategory`` (issue #59 fix-round-1) -- by ``category.value``
+        rather than one hand-written key per member, so a future
+        ``FileCategory`` member's count appears here with no edit, the
+        moment ``__init__`` sees it. ``FileCategory.PHOTO.value == "photos"``
+        etc. (issue #43), so this reproduces the exact key spelling every
+        existing caller already depends on.
+
         Returns:
             Dictionary with categorization counts
         """
-        return {
-            'photos': len(self.categorized_files[FileCategory.PHOTO]),
-            'videos': len(self.categorized_files[FileCategory.VIDEO]),
-            'screenshots': len(self.categorized_files[FileCategory.SCREENSHOT]),
-            'generated': len(self.categorized_files[FileCategory.GENERATED]),
-            'unknown': len(self.categorized_files[FileCategory.UNKNOWN]),
-            'sidecar': len(self.categorized_files[FileCategory.SIDECAR]),
-            'total': sum(len(files) for files in self.categorized_files.values())
+        stats = {
+            category.value: len(files)
+            for category, files in self.categorized_files.items()
         }
+        stats['total'] = sum(len(files) for files in self.categorized_files.values())
+        return stats
 
     def get_file_summary(self) -> str:
         """
         Get human-readable summary of categorized files.
 
-        Every category in :data:`CATEGORY_DISPLAY_ORDER` gets an
-        unconditional line here (issue #19), including ``Generated`` --
-        omitted before this fix even though :meth:`get_categorization_stats`
-        had carried its count from the day that key was added, so a run
-        that filed files into ``backup/generated/`` reported a ``Total``
-        that did not reconcile with any visible line above it.
+        Every category gets an unconditional line here (issue #19),
+        including ``Generated`` -- omitted before that fix even though
+        :meth:`get_categorization_stats` had carried its count from the day
+        that key was added, so a run that filed files into
+        ``backup/generated/`` reported a ``Total`` that did not reconcile
+        with any visible line above it.
+
+        Iterates ``FileCategory`` directly and looks up each member's
+        display copy via :func:`get_category_display_info` (issue #59
+        fix-round-1), rather than iterating ``CATEGORY_DISPLAY_ORDER`` --
+        the fixed tuple built once at import time can never itself gain a
+        new member merely by extending the enum, so a caller who swaps in a
+        ``FileCategory`` with an extra member still gets a line for it here.
 
         Returns:
             Formatted string summary
@@ -906,12 +958,13 @@ class FileCategorizer:
         stats = self.get_categorization_stats()
 
         summary_lines = ["File Categorization Summary:"]
-        for info in CATEGORY_DISPLAY_ORDER:
+        for category in FileCategory:
+            info = get_category_display_info(category)
             # Sidecar candidates are deleted, not filed into backup/, so the
             # text summary calls this out rather than reusing the plain
             # "Sidecar Files" label the tables use.
-            label = "Sidecar (to delete)" if info.category is FileCategory.SIDECAR else info.label
-            summary_lines.append(f"  {label}: {stats[info.category.value]} files")
+            label = "Sidecar (to delete)" if category is FileCategory.SIDECAR else info.label
+            summary_lines.append(f"  {label}: {stats[category.value]} files")
         summary_lines.append(f"  Total: {stats['total']} files")
 
         return "\n".join(summary_lines)

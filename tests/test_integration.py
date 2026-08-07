@@ -6,10 +6,8 @@ import unittest
 import tempfile
 import os
 import shutil
-import json
-from pathlib import Path
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from PIL import Image
 

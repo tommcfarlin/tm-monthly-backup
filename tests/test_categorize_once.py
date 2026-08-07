@@ -143,7 +143,7 @@ class TestGeneratedContentProbedOnce(unittest.TestCase):
         call_counts = self._run_real_flow_counting_probe(dry_run=True)
 
         self.assertEqual(len(call_counts), len(eligible))
-        for path, count in call_counts.items():
+        for _path, count in call_counts.items():
             self.assertEqual(count, 1)
 
     def test_png_provenance_probe_also_runs_at_most_once_per_file(self):

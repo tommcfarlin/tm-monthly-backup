@@ -1070,7 +1070,7 @@ class TestExifHandlerIntegration(unittest.TestCase):
         existing_files = set()
         results = []
 
-        for i, timestamp in enumerate(timestamps):
+        for timestamp in timestamps:
             # Handle duplicates
             adjusted = self.handler.handle_duplicate_timestamp(timestamp, existing_files)
             formatted = self.handler.format_timestamp_filename(adjusted)

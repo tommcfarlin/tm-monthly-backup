@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from src.file_categorizer import FileCategory
 from src.file_processor import FileProcessor
-from tests.fixtures import make_corrupt_jpeg, make_exif_jpeg, make_no_exif_jpeg
+from tests.fixtures import make_corrupt_jpeg, make_exif_jpeg
 
 
 class TestScanAndOverlap(unittest.TestCase):

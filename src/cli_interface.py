@@ -17,7 +17,7 @@ from rich.logging import RichHandler
 from rich.prompt import Confirm
 
 from .file_processor import FileProcessor, ProgressReporter, Settings
-from .file_categorizer import CATEGORY_DISPLAY_ORDER, FileCategory
+from .file_categorizer import FileCategory, get_category_display_info
 
 # Initialize rich console
 console = Console()
@@ -371,9 +371,13 @@ class CLIInterface:
         ``FileProcessor`` already performed -- no second ``batch_categorize``
         (issue #13).
 
-        Rows are driven by :data:`FileCategorizer.CATEGORY_DISPLAY_ORDER`
-        (issue #19) rather than a hand-written list that omitted Generated:
-        a category earns an unconditional row when ``scan_always`` is set
+        Rows are driven by iterating ``FileCategory`` itself, looking up
+        each member's copy via :func:`FileCategorizer.get_category_display_info`
+        (issue #19, corrected in issue #59 fix-round-1 to iterate the enum
+        rather than the fixed ``CATEGORY_DISPLAY_ORDER`` tuple, so a member
+        added to the enum after this tuple was last edited still gets a
+        row) rather than a hand-written list that omitted Generated: a
+        category earns an unconditional row when ``scan_always`` is set
         (Photos/Videos/Screenshots/Sidecar), otherwise only when its count
         is non-zero -- the style already used for Unknown here, now applied
         to Generated too, so an all-photos run does not carry a permanent
@@ -390,11 +394,12 @@ class CLIInterface:
         table.add_column("Count", justify="right", style="green")
         table.add_column("Description", style="dim")
 
-        for info in CATEGORY_DISPLAY_ORDER:
-            count = stats[info.category.value]
+        for category in FileCategory:
+            info = get_category_display_info(category)
+            count = stats.get(category.value, 0)
             if not info.scan_always and count == 0:
                 continue
-            style = "yellow" if info.category is FileCategory.UNKNOWN else None
+            style = "yellow" if category is FileCategory.UNKNOWN else None
             table.add_row(info.label, str(count), info.scan_description, style=style)
 
         table.add_row("", "", "", style="dim")
@@ -569,20 +574,25 @@ class CLIInterface:
             breakdown_table.add_column("Files", justify="right", style="green")
             breakdown_table.add_column("Location", style="dim")
 
-            # Driven by the same shared registry as the pre-run discovery
-            # table and the text summary (issue #19). SIDECAR is skipped via
-            # its empty ``org_location``: sidecar candidates are deleted,
-            # never organized into a ``backup/<category>/`` directory, so
-            # it has no row here.
-            for info in CATEGORY_DISPLAY_ORDER:
+            # Driven by iterating FileCategory itself and looking up each
+            # member's copy (issue #19, corrected in issue #59 fix-round-1
+            # to iterate the enum rather than the fixed
+            # CATEGORY_DISPLAY_ORDER tuple -- see get_category_display_info's
+            # own docstring), the same as the pre-run discovery table and
+            # the text summary. SIDECAR is skipped via its empty
+            # ``org_location``: sidecar candidates are deleted, never
+            # organized into a ``backup/<category>/`` directory, so it has
+            # no row here.
+            for category in FileCategory:
+                info = get_category_display_info(category)
                 if not info.org_location:
                     continue
-                count = stats.get(info.category.value, 0)
+                count = stats.get(category.value, 0)
                 if not info.org_always and count == 0:
                     continue
-                if info.category is FileCategory.GENERATED:
+                if category is FileCategory.GENERATED:
                     style = "magenta"
-                elif info.category is FileCategory.UNKNOWN:
+                elif category is FileCategory.UNKNOWN:
                     style = "yellow"
                 else:
                     style = None

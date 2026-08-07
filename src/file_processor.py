@@ -813,6 +813,12 @@ class FileProcessor:
                 self._skipped_sidecars.append(('not_plist', file_path))
                 continue
 
+            # Kept at INFO, not demoted with this method's other per-file
+            # lines (issue #48): the results table only ever shows a COUNT
+            # of deleted sidecars, never which files, so this line (and its
+            # dry-run counterpart below) is the only per-file trace of an
+            # irreversible deletion of the user's own edit history. Deleting
+            # nothing is unrecoverable in a way an ordinary "Moved:" is not.
             if dry_run:
                 logger.info("[DRY RUN] Would delete sidecar file: %s", file_path)
                 self._deleted_sidecars.append(file_path)

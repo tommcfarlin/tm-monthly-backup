@@ -7,7 +7,7 @@ import tempfile
 import os
 from enum import Enum
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from src.file_categorizer import FileCategorizer, FileCategory
 from tests.fixtures import make_exif_jpeg, make_png_with_text
