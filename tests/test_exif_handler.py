@@ -204,17 +204,6 @@ class TestExifHandler(unittest.TestCase):
         expected = datetime(2024, 1, 15, 14, 31, 0)
         self.assertEqual(result, expected)
 
-    def test_get_missing_exif_files(self):
-        """Test retrieving list of missing EXIF files"""
-        # Add some test files to missing list
-        self.handler.missing_exif_files.extend(["file1.jpg", "file2.jpg"])
-
-        result = self.handler.get_missing_exif_files()
-
-        self.assertEqual(result, ["file1.jpg", "file2.jpg"])
-        # Should return a copy, not the original list
-        self.assertIsNot(result, self.handler.missing_exif_files)
-
     def test_clear_missing_files_log(self):
         """Test clearing missing files log"""
         # Add some test files
@@ -457,7 +446,7 @@ class TestBoundaryTimestampFixtures(unittest.TestCase):
         result = self.handler.extract_timestamp(path)
 
         self.assertIsNone(result)
-        self.assertIn(path, self.handler.get_missing_exif_files())
+        self.assertIn(path, self.handler.missing_exif_files)
 
 
 class TestPlausibleCaptureTime(unittest.TestCase):

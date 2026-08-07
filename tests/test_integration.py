@@ -506,7 +506,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         self.assertEqual(result, datetime(2024, 1, 15, 14, 30, 45))
         self.assertNotIn(
-            photo_path, self.processor.exif_handler.get_missing_exif_files()
+            photo_path, self.processor.exif_handler.missing_exif_files
         )
 
     def test_no_exif_helper_falls_back(self):
@@ -520,7 +520,7 @@ class TestWorkflowIntegration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertIn(
-            photo_path, self.processor.exif_handler.get_missing_exif_files()
+            photo_path, self.processor.exif_handler.missing_exif_files
         )
 
     def test_directory_creation(self):
@@ -827,7 +827,7 @@ class TestWorkflowIntegration(unittest.TestCase):
         self.assertEqual(self.processor._used_timestamps, {})
         self.assertEqual(self.processor._failed_files, [])
         self.assertEqual(self.processor._conversion_log, [])
-        self.assertEqual(self.processor.exif_handler.get_missing_exif_files(), [])
+        self.assertEqual(self.processor.exif_handler.missing_exif_files, [])
         self.assertEqual(self.processor.heic_converter.converted_files, [])
         self.assertEqual(self.processor._deleted_sidecars, [])
         self.assertEqual(self.processor._skipped_sidecars, [])

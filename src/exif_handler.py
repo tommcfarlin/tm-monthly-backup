@@ -1024,10 +1024,6 @@ class ExifHandler:
         logger.error("Could not resolve timestamp conflict after %s attempts", max_attempts)
         return adjusted
 
-    def get_missing_exif_files(self) -> list:
-        """Return list of files that had missing/invalid EXIF data"""
-        return self.missing_exif_files.copy()
-
     def clear_missing_files_log(self):
         """Clear the missing EXIF files log"""
         self.missing_exif_files.clear()

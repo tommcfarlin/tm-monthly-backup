@@ -521,9 +521,9 @@ class FileCategorizer:
 
         return False
 
-    def _png_text_has_ai_provenance(self, img) -> bool:
+    def _png_info_has_ai_provenance(self, png_info: Optional[Dict[str, Any]]) -> bool:
         """
-        Report whether a PNG's text chunks carry genuine AI/C2PA provenance.
+        Report whether a PNG-info-shaped mapping carries AI/C2PA provenance.
 
         A chunk is provenance if its KEY is a known generator key
         (:attr:`GENERATED_TEXT_KEYS`) or if its VALUE contains a high-signal
@@ -532,7 +532,7 @@ class FileCategorizer:
         identifiable keys -- while the value match is confined to whole-word
         product names so ordinary caption text can no longer trip it (issue #8).
 
-        Reads ``img.info`` rather than ``img.text`` (issue #44). Pillow's
+        Operates on ``img.info`` rather than ``img.text`` (issue #44). Pillow's
         ``PngImageFile.text`` property calls ``self.load()`` before returning,
         because tEXt/iTXt chunks are legally allowed to follow IDAT and Pillow
         will not report a partial answer -- so merely probing ``.text`` forces
@@ -557,25 +557,11 @@ class FileCategorizer:
         a binary chunk like an ICC profile can never widen what gets matched,
         the way scanning ``str(value)`` over every ``info`` entry would.
 
-        Args:
-            img: An open :class:`PIL.Image.Image`.
-
-        Returns:
-            True if any text chunk indicates AI-generated provenance.
-        """
-        png_info = getattr(img, 'info', None)
-        return self._png_info_has_ai_provenance(png_info)
-
-    def _png_info_has_ai_provenance(self, png_info: Optional[Dict[str, Any]]) -> bool:
-        """
-        Report whether a PNG-info-shaped mapping carries AI/C2PA provenance.
-
-        The no-I/O core of :meth:`_png_text_has_ai_provenance` (issue #24):
-        operates directly on an already-read ``img.info``-shaped mapping so
-        :meth:`_is_generated_content` can call it with
-        :class:`FileCategorizer`'s once-per-file cached ``png_info`` instead
-        of a live ``Image``. See that method's docstring for why ``img.info``
-        (rather than ``img.text``) is the right thing to read (issue #44).
+        This is the no-I/O core :meth:`_is_generated_content` calls with
+        :class:`FileCategorizer`'s once-per-file cached ``png_info`` (issue
+        #24); a live-``Image``-taking wrapper of the same name used to sit in
+        front of it but was removed as dead code (issue #49) once #24 routed
+        every production caller through the cached-dict form directly.
 
         Args:
             png_info: A mapping shaped like PIL's ``Image.info`` (or falsy).
@@ -851,7 +837,7 @@ class FileCategorizer:
         stats = self.get_categorization_stats()
 
         summary_lines = [
-            f"File Categorization Summary:",
+            "File Categorization Summary:",
             f"  Photos: {stats['photos']} files",
             f"  Videos: {stats['videos']} files",
             f"  Screenshots: {stats['screenshots']} files",

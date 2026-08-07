@@ -252,6 +252,56 @@ class TestDisplayResults(unittest.TestCase):
         )
         self.assertIn("Dry Run Results", self.cli.console.export_text())
 
+    def test_dry_run_title_renders_blue(self):
+        """The dry-run title is styled bold blue (issue #49), not left the
+        default table-title style. ANSI SGR 1;34 is bold+blue; export_text's
+        styles=True is the only way to observe rich's applied style rather
+        than just the title's text, which the previous, unwired
+        ``title_style`` local left indistinguishable from every other run."""
+        self.cli.display_results(
+            {"status": "completed", "files_processed": 3}, dry_run=True
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;34m", styled, "dry-run title was not rendered bold blue")
+
+    def test_clean_success_title_renders_green(self):
+        """A clean, unqualified-success run's title is styled bold green."""
+        self.cli.display_results(
+            {
+                "status": "completed",
+                "files_processed": 3,
+                "files_failed": 0,
+                "files_quarantined": 0,
+                "categorization_stats": {
+                    "photos": 3, "videos": 0, "screenshots": 0,
+                    "generated": 0, "unknown": 0,
+                },
+            }
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;32m", styled, "success title was not rendered bold green")
+
+    def test_failure_title_renders_yellow_not_green(self):
+        """A run with failures is styled bold yellow, distinct from a clean
+        run's green -- this is the exact defect issue #49 reports: before the
+        fix, ``title_style`` was computed but never passed to ``Table(...)``,
+        so a failing run rendered in the identical style as a clean one."""
+        self.cli.display_results(
+            {
+                "status": "completed",
+                "files_processed": 1,
+                "files_failed": 1,
+                "files_quarantined": 0,
+                "categorization_stats": {
+                    "photos": 1, "videos": 0, "screenshots": 0,
+                    "generated": 0, "unknown": 0,
+                },
+            }
+        )
+        styled = self.cli.console.export_text(styles=True)
+        self.assertIn("\x1b[1;33m", styled, "failure title was not rendered bold yellow")
+        self.assertNotIn("\x1b[1;32m", styled, "failure title rendered the success green")
+
     def test_quarantine_title_and_rows(self):
         """Quarantined-but-no-failure renders the quarantine banner and rows."""
         results = {

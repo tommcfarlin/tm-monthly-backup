@@ -292,7 +292,7 @@ class CLIInterface:
         safe_export = safe_markup(export_path)
         if not export_path.exists():
             self.console.print(f"[red]Error: Export directory does not exist: {safe_export}[/red]")
-            self.console.print(f"[yellow]Please create the directory and place your exported photos there:[/yellow]")
+            self.console.print("[yellow]Please create the directory and place your exported photos there:[/yellow]")
             self.console.print(f"[dim]  mkdir {safe_export}[/dim]")
             self.console.print(f"[dim]  # Then copy your iCloud Photos export files to {safe_export}/[/dim]")
             return False
@@ -498,7 +498,12 @@ class CLIInterface:
             title_style = "bold green"
 
         # Create results table
-        table = Table(title=title, show_header=True, header_style="bold magenta")
+        table = Table(
+            title=title,
+            title_style=title_style,
+            show_header=True,
+            header_style="bold magenta",
+        )
         table.add_column("Metric", style="cyan", width=25)
         table.add_column("Count", justify="right", style="green")
 
