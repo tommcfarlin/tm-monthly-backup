@@ -25,8 +25,18 @@ These tests pin:
   + (files_skipped + sidecars_skipped) + files_failed`` holds after a mixed
   non-dry run (acceptance criterion 4).
 * Neither the results banner nor ``main.py``'s standalone success line claims
-  an unqualified "All files processed successfully!" while a skipped file
-  remains in ``export/`` (acceptance criterion 5).
+  an unqualified "All files processed successfully!" while an UNEXPECTED
+  (non-junk) file remains in ``export/`` (acceptance criterion 5) -- but a
+  junk-only skip (``.DS_Store``/``.localized``/``Thumbs.db``) does NOT
+  withhold that claim (fix round 1): essentially every macOS export tree
+  carries a ``.DS_Store``, so treating it as disqualifying would make the
+  unqualified-success banner never fire in ordinary use, the same reasoning
+  behind issue #39's DEBUG-not-WARNING call and issue #57's own banner
+  demotion being acceptable specifically because it cannot fire spuriously
+  for a user's real (valid) sidecars. The decision lives in exactly one place
+  -- ``cli_interface.is_unqualified_success`` -- consulted by both
+  ``CLIInterface.display_results`` and ``main.py`` rather than each
+  recomputing its own answer.
 * Dry-run parity (issue #10): a dry run makes the same skip decisions, with
   the same counts, a real run over the same input would.
 
@@ -347,6 +357,61 @@ class TestSkippedFileDemotesTheSuccessBanner(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("All files processed successfully", result.output)
+        self.assertIn("Files Skipped", result.output)
+
+    def test_display_results_title_still_reads_success_for_a_junk_only_skip(self):
+        """A .DS_Store-only skip must NOT withhold the "Success!" title.
+
+        Every macOS export tree carries a `.DS_Store`; if that alone withheld
+        the headline it would never read "Success!" in ordinary use and the
+        signal would carry no information (fix round 1). The skip is still
+        fully counted and named in its own row/detail table -- only the
+        headline is unaffected.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "good.jpg"),
+            date_time_original="2024:03:30 03:30:03",
+            color="green",
+        )
+        ds_store = os.path.join(self.export_dir, ".DS_Store")
+        with open(ds_store, "wb") as handle:
+            handle.write(b"junk")
+
+        results = self.processor.process_all_files(dry_run=False)
+        self.assertEqual(results["files_skipped"], 1)  # precondition
+
+        cli = CLIInterface(self.export_dir, self.backup_dir)
+        with cli.console.capture() as capture:
+            cli.display_results({**results, "status": "completed"}, dry_run=False)
+        rendered = capture.get()
+
+        self.assertIn("Success!", rendered)
+        # The skip is still reported -- counting is unconditional, only the
+        # headline's "clean run" claim is unaffected by junk.
+        self.assertIn("Files Skipped", rendered)
+
+    def test_main_prints_unqualified_success_for_a_junk_only_skip(self):
+        """``main.py``'s standalone success line also survives a junk-only skip."""
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "good.jpg"),
+            date_time_original="2024:03:31 03:31:03",
+            color="green",
+        )
+        with open(os.path.join(self.export_dir, ".DS_Store"), "wb") as handle:
+            handle.write(b"junk")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "--export-dir", self.export_dir,
+                "--backup-dir", self.backup_dir,
+                "--yes",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("All files processed successfully", result.output)
         self.assertIn("Files Skipped", result.output)
 
     def test_success_still_prints_with_no_skips_or_other_issues(self):

@@ -7,7 +7,7 @@ import logging
 import sys
 import click
 
-from src.cli_interface import CLIInterface, setup_logging
+from src.cli_interface import CLIInterface, is_unqualified_success, setup_logging
 from src.file_processor import Settings
 
 logger = logging.getLogger(__name__)
@@ -173,23 +173,25 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality):
         cli.display_results(results, dry_run=dry_run)
 
         # Report and exit with the code the taxonomy chose. The unqualified
-        # "success" message additionally requires that nothing was
-        # quarantined (issue #58), no sidecar candidate was kept rather than
-        # deleted (issue #57), and no hidden/junk file was left behind by the
-        # scan (issue #30) -- each of those is a deliberately-handled, non-
-        # error outcome (so it does not affect exit_code), but it DOES mean a
-        # file remains in export/ or backup/corrupt/ that this message would
-        # otherwise falsely claim is fully, unremarkably done. This mirrors
-        # the same three conditions CLIInterface.display_results already
-        # checks to retitle its own results table.
-        clean_success = (
-            results.get('files_quarantined', 0) == 0
-            and results.get('sidecars_skipped', 0) == 0
-            and results.get('files_skipped', 0) == 0
-        )
+        # "success" message consults the exact same predicate
+        # ``CLIInterface.display_results`` uses to decide its own title
+        # (``is_unqualified_success``) rather than recomputing its own
+        # answer -- issue #30's fix round 1 caught this file independently
+        # re-deriving "does this run look clean," which is precisely the
+        # kind of duplicated decision that drifts the moment one side
+        # changes and the other does not. A quarantined file or a kept
+        # sidecar candidate is not an unqualified success (issues #58/#57),
+        # and neither is a file the scan skipped for an unexpected
+        # (non-junk) reason (issue #30); a junk-only skip
+        # (.DS_Store/.localized/Thumbs.db) does not disqualify a run --
+        # see ``is_unqualified_success``'s docstring.
         if exit_code == EXIT_PARTIAL_FAILURE:
             cli.console.print(f"\n[yellow]Completed with {results['files_failed']} failures.[/yellow]")
-        elif not dry_run and results.get('files_processed', 0) > 0 and clean_success:
+        elif (
+            not dry_run
+            and results.get('files_processed', 0) > 0
+            and is_unqualified_success(results)
+        ):
             cli.console.print("\n[bold green]All files processed successfully![/bold green]")
         elif dry_run:
             cli.console.print("\n[blue]Dry run completed. Use without --dry-run to process files.[/blue]")

@@ -85,6 +85,73 @@ def safe_markup(value: object) -> str:
     return escape(sanitize_for_display(value))
 
 
+def _has_unexpected_skip(results: Dict) -> bool:
+    """
+    Report whether ``results`` contains a skipped file for an unexpected reason.
+
+    "Unexpected" means anything other than ``'junk'`` -- a basename that
+    matched :data:`FileProcessor.HIDDEN_FILE_DENYLIST`
+    (``.DS_Store``/``.localized``/``Thumbs.db``). Practically every macOS
+    export tree carries a ``.DS_Store``, so treating a junk-only skip as
+    noteworthy would make the signal fire on essentially every run and carry
+    no information (the same principle behind issue #39 keeping a routine
+    RAW-open failure at DEBUG rather than WARNING, and behind issue #57's
+    banner demotion being acceptable specifically because a user's real
+    sidecars are all valid and so it cannot fire spuriously for them). A
+    ``'hidden'`` reason -- any other dotted name -- IS unexpected: it means a
+    real file the tool declined to handle sits in ``export/`` with nothing
+    else to explain it, which is exactly acceptance criterion 5's concern (a
+    *photo* left behind, not a `.DS_Store`).
+
+    Args:
+        results: The dict returned by :meth:`FileProcessor.process_all_files`
+            (read via ``results.get('skipped_files', [])``, so a caller that
+            omits the key -- an older/partial results dict -- is treated as
+            having no unexpected skips rather than raising).
+
+    Returns:
+        ``True`` if at least one ``(reason, path)`` pair in
+        ``results['skipped_files']`` has a reason other than ``'junk'``.
+    """
+    return any(
+        reason != 'junk' for reason, _path in results.get('skipped_files', [])
+    )
+
+
+def is_unqualified_success(results: Dict) -> bool:
+    """
+    Report whether a completed run's results represent a clean, unremarkable run.
+
+    This is the SINGLE source of truth for "does this run look like an
+    unqualified success" -- :meth:`CLIInterface.display_results` consults it
+    (via the same underlying conditions) to choose its results-table title,
+    and ``main.py`` consults this exact function to decide whether to print
+    its own standalone "All files processed successfully!" line, so the two
+    can never drift out of sync the way they briefly did during issue #30's
+    own review (``main.py`` had grown a second, independently-recomputed
+    gate). A run is NOT an unqualified success when any per-file failure was
+    recorded (issue #31), a file was quarantined as undecodable (issue #58),
+    an Apple sidecar candidate was kept rather than deleted (issue #57), or a
+    file was skipped by the scan for an unexpected (non-junk) reason (issue
+    #30 -- see :func:`_has_unexpected_skip`). A junk-only skip
+    (``.DS_Store``/``.localized``/``Thumbs.db``) does NOT disqualify a run:
+    see :func:`_has_unexpected_skip`'s docstring for why.
+
+    Args:
+        results: The dict returned by :meth:`FileProcessor.process_all_files`.
+
+    Returns:
+        ``True`` if the run had zero failures, zero quarantined files, zero
+        kept sidecar candidates, and no unexpectedly-skipped file.
+    """
+    return (
+        results.get('files_failed', 0) == 0
+        and results.get('files_quarantined', 0) == 0
+        and results.get('sidecars_skipped', 0) == 0
+        and not _has_unexpected_skip(results)
+    )
+
+
 class _SanitizingLogFilter(logging.Filter):
     """
     Strip ANSI/control sequences from fully rendered log messages.
@@ -397,15 +464,22 @@ class CLIInterface:
             # in backup/corrupt/ to review -- so the banner says so (issue #58).
             title = "Processing Complete - Files Quarantined"
             title_style = "bold yellow"
-        elif skipped_count > 0:
-            # A hidden or known-junk file (issue #30) never left export/ at
-            # all -- deliberately, by policy, not because anything errored --
-            # but "Success!" still overclaims: a file remains in export/ that
-            # the user was never told about anywhere before this banner. Kept
-            # as its own title/reason (see the __init__ comment on
-            # _skipped_files) rather than folded into "Sidecars Kept" below:
-            # a skipped file was never even categorized, let alone considered
-            # for deletion, so the two answer different questions.
+        elif _has_unexpected_skip(results):
+            # A hidden (non-junk) dotted file never left export/ at all --
+            # deliberately, by policy, not because anything errored -- but
+            # "Success!" still overclaims: a real file remains in export/
+            # that the user was never told about anywhere before this
+            # banner (issue #30, acceptance criterion 5). Kept as its own
+            # title/reason (see the __init__ comment on _skipped_files)
+            # rather than folded into "Sidecars Kept" below: a skipped file
+            # was never even categorized, let alone considered for deletion,
+            # so the two answer different questions. Deliberately does NOT
+            # fire for a junk-only skip (.DS_Store/.localized/Thumbs.db):
+            # see _has_unexpected_skip's docstring -- every macOS export
+            # tree carries a .DS_Store, so that alone would make this
+            # banner never read "Success!" in ordinary use. The row below
+            # still reports every skip, junk included; only the headline
+            # withholds "Success!" and only for an unexpected one.
             title = "Processing Complete - Files Skipped"
             title_style = "bold yellow"
         elif sidecars_skipped > 0:
