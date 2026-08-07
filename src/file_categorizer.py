@@ -568,17 +568,17 @@ class FileCategorizer:
         # Check for C2PA/AI provenance in PNG text chunks.
         if file_path.lower().endswith('.png'):
             if self._png_info_has_ai_provenance(png_info):
-                logger.info("Detected AI-generated content: %s", file_path)
+                logger.debug("Detected AI-generated content: %s", file_path)
                 return True
 
         # Editing software present with no genuine capture timestamp.
         if self._exif_shows_synthetic_edit(exif, ifd0):
-            logger.info("Detected heavily edited content: %s", file_path)
+            logger.debug("Detected heavily edited content: %s", file_path)
             return True
 
         # UUID-style stems are a common convention for generated output.
         if self._has_uuid_stem(file_path):
-            logger.info("Detected UUID filename (likely generated): %s", file_path)
+            logger.debug("Detected UUID filename (likely generated): %s", file_path)
             return True
 
         return False

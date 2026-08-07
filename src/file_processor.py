@@ -527,7 +527,7 @@ class FileProcessor:
 
         # Categorize files
         categorized = self.categorizer.batch_categorize(all_files)
-        logger.info(f"Categorization complete:\n{self.categorizer.get_file_summary()}")
+        logger.info("Categorization complete:\n%s", self.categorizer.get_file_summary())
 
         # Compute the processable set now -- before the confirmation gate --
         # so its HEIC count can ride along on the ``on_categorized`` report
@@ -1185,7 +1185,7 @@ class FileProcessor:
             # the ONLY difference is whether the conversion side effect runs.
             planned_extension = '.jpg'
             if dry_run:
-                logger.info("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
+                logger.debug("[DRY RUN] Would convert HEIC to JPEG: %s", file_path)
                 # ``current_path`` deliberately stays the ``.heic``: its EXIF
                 # timestamp is identical to the converted JPEG's (conversion
                 # preserves EXIF), so the timestamp read below matches a real run
@@ -1203,7 +1203,7 @@ class FileProcessor:
                     # preserved EXIF -- against the actual mkstemp path from #26.
                     if not self.heic_converter.verify_conversion(file_path, converted_path):
                         logger.error(
-                            f"HEIC conversion verification failed, keeping original: {file_path}"
+                            "HEIC conversion verification failed, keeping original: %s", file_path
                         )
                         # Remove the unverifiable artifact so a corrupt JPEG is not
                         # left in export to be re-ingested on a later run. The
@@ -1275,7 +1275,7 @@ class FileProcessor:
             adjusted_timestamp, target_path = self._resolve_destination_dry_run(
                 target_dir, timestamp, file_extension
             )
-            logger.info("[DRY RUN] Would move: %s -> %s", current_path, target_path)
+            logger.debug("[DRY RUN] Would move: %s -> %s", current_path, target_path)
             if exif_was_missing:
                 # A dry run never moves anything, so ``original_path`` is the
                 # only path that actually exists on disk right now -- the
@@ -1339,7 +1339,7 @@ class FileProcessor:
                     # placeholder so a 0-byte stub is not left behind in backup/.
                     self._discard_reservation(target_path)
                     raise
-                logger.info("Moved: %s -> %s", current_path, target_path)
+                logger.debug("Moved: %s -> %s", current_path, target_path)
 
                 # The verified-good JPEG is now safely filed in backup/, so it is
                 # finally safe to delete the original HEIC. Route through the
@@ -1406,7 +1406,7 @@ class FileProcessor:
                 target_dir, original_name
             )
             logger.info(
-                f"[DRY RUN] Would move unrecognized file: {file_path} -> {target_path}"
+                "[DRY RUN] Would move unrecognized file: %s -> %s", file_path, target_path
             )
             return
 

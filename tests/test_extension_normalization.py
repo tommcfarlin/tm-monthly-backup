@@ -440,12 +440,18 @@ class TestExtensionNormalizationDryRunParity(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _capture_dry_run_plan(self, export_dir: str, backup_dir: str) -> Set[str]:
+        """Captured at DEBUG, not INFO (issue #48): the per-file planned-move
+        log lines this scrapes are exactly the per-file chatter that issue
+        demotes to DEBUG, dry-run mode included -- see the identical helper's
+        longer comment in ``test_dry_run_parity.py`` for the full reasoning.
+        The property under test (dry-run plan equals real-run landings) is
+        unchanged; only the observation level moved."""
         processor = FileProcessor(export_dir, backup_dir)
         capture = _PlanCapture()
         logger = logging.getLogger("src.file_processor")
         previous_level = logger.level
         logger.addHandler(capture)
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         try:
             processor.process_all_files(dry_run=True)
         finally:

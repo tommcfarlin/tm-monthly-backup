@@ -635,8 +635,8 @@ class ExifHandler:
         # hachoir, so it works even when hachoir cannot be imported.
         local_creation = self._extract_quicktime_creationdate(file_path)
         if local_creation is not None:
-            logger.info(
-                f"Extracted local video creation date: {file_path} -> {local_creation}"
+            logger.debug(
+                "Extracted local video creation date: %s -> %s", file_path, local_creation
             )
             return local_creation
 
@@ -674,7 +674,7 @@ class ExifHandler:
         parsed = parse_local_creationdate(value)
         if parsed is None:
             logger.warning(
-                f"Unparseable QuickTime creationdate in {file_path}: {value!r}"
+                "Unparseable QuickTime creationdate in %s: %r", file_path, value
             )
             return None
 
@@ -729,7 +729,7 @@ class ExifHandler:
                         payload_len = offset + size - body_offset
                         if payload_len < 0 or payload_len > _MAX_MOOV_BYTES:
                             logger.debug(
-                                f"moov atom too large or invalid in {file_path}"
+                                "moov atom too large or invalid in %s", file_path
                             )
                             return None
                         return handle.read(payload_len)
@@ -834,7 +834,7 @@ class ExifHandler:
                         break
 
                 if creation_date:
-                    logger.info("Extracted video creation date: %s -> %s", file_path, creation_date)
+                    logger.debug("Extracted video creation date: %s -> %s", file_path, creation_date)
                     return creation_date
                 else:
                     logger.warning("No creation date found in video metadata: %s", file_path)
@@ -897,7 +897,7 @@ class ExifHandler:
         # Try to extract date from filename first
         filename_timestamp = self._extract_timestamp_from_filename(file_path)
         if filename_timestamp:
-            logger.info("Extracted timestamp from filename: %s -> %s", file_path, filename_timestamp)
+            logger.debug("Extracted timestamp from filename: %s -> %s", file_path, filename_timestamp)
             return filename_timestamp
 
         try:
@@ -1010,6 +1010,15 @@ class ExifHandler:
                         reading, filename, parsed,
                     )
                     continue
+                # Kept at INFO, not demoted with this module's other per-file
+                # success lines (issue #48): this narrates WHICH of two
+                # genuinely ambiguous day-first/month-first readings of the
+                # filename was chosen (issue #51) -- a wrong choice silently
+                # misfiles the photo under the other valid date, and unlike
+                # an ordinary successful move/conversion, the archived
+                # filename alone does not announce that a *choice* was made
+                # between two plausible interpretations. Pinned by an
+                # existing test (test_pattern_day_first_logs_chosen_interpretation).
                 logger.info(
                     "Extracted timestamp from filename using %s interpretation: %s -> %s",
                     reading, filename, parsed,
@@ -1060,7 +1069,7 @@ class ExifHandler:
 
             formatted = self.format_timestamp_filename(adjusted)
             if formatted not in existing_files:
-                logger.info("Resolved timestamp conflict: %s -> %s", base_format, formatted)
+                logger.debug("Resolved timestamp conflict: %s -> %s", base_format, formatted)
                 return adjusted
 
             attempts += 1

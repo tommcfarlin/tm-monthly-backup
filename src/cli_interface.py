@@ -211,11 +211,22 @@ def setup_logging(verbose: bool = False):
     # they reach the terminal, at one boundary for every log record.
     rich_handler.addFilter(_SanitizingLogFilter())
 
+    # force=True (issue #48): basicConfig() silently does nothing -- applying
+    # neither ``level`` nor ``handlers`` -- if the root logger already has a
+    # handler installed, per the stdlib's own documented behavior. Today
+    # main.py is the only caller and always runs against a pristine root, so
+    # this is latent; it stops being latent the moment anything (a test
+    # module, a future --log-file option, a library import that configures
+    # logging first) installs a handler before this call, at which point
+    # --verbose would silently fail to raise the level and the sanitizing
+    # rich_handler above would silently fail to be installed at all -- the
+    # untrusted-filename-escaping boundary this function exists to set up.
     logging.basicConfig(
         level=log_level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[rich_handler]
+        handlers=[rich_handler],
+        force=True
     )
 
     # Reduce pillow logging noise

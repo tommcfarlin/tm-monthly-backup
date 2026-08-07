@@ -142,15 +142,27 @@ class TestDryRunParity(unittest.TestCase):
         """Run a dry run and return the planned destinations, relative to backup.
 
         The plan is recovered from the processor's own ``[DRY RUN] ... -> dest``
-        log lines -- the exact output a user relies on -- then made relative to
-        ``backup_dir`` so it can be compared against a real run's on-disk tree.
+        log lines -- the exact output ``--verbose`` shows a user -- then made
+        relative to ``backup_dir`` so it can be compared against a real run's
+        on-disk tree.
+
+        Captured at DEBUG, not INFO (issue #48): per-file planned-move lines
+        are exactly the per-file chatter that issue demotes to DEBUG so a
+        default-level run emits a summary instead of one line per file --
+        dry-run mode is not exempt from that, since an unfiltered dry run
+        over hundreds of files would otherwise flood the default level the
+        same way a real run's per-file ``Moved:`` lines did. The property
+        this test verifies -- dry-run plan equals real-run landings -- is
+        unchanged; only the level at which the plan is observed moved,
+        exactly as ``--verbose`` now restores it for a human running the
+        tool directly.
         """
         processor = FileProcessor(export_dir, backup_dir)
         capture = _PlanCapture()
         logger = logging.getLogger("src.file_processor")
         previous_level = logger.level
         logger.addHandler(capture)
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         try:
             processor.process_all_files(dry_run=True)
         finally:
