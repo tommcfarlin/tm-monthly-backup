@@ -78,6 +78,59 @@ class FileCategorizer:
         '.aae'  # Apple's sidecar files
     }
 
+    # Canonical output spelling for extensions that have more than one common
+    # alias (issue #55). This module already treats both spellings of each
+    # pair as equivalent for categorization -- both live in ``PHOTO_EXTENSIONS``
+    # or ``VIDEO_EXTENSIONS`` above -- and ``HeicConverter`` always writes
+    # lowercase ``.jpg`` for its converted output, so the codebase has already
+    # decided lowercase-and-one-spelling is canonical everywhere except the one
+    # place a human actually sees it: the filename ``FileProcessor`` composes
+    # for ``backup/``. This map is that decision made explicit and centralized,
+    # rather than inlined in ``FileProcessor._process_single_file``, so every
+    # aliased pair collapses to a single on-disk spelling:
+    #   .jpeg -> .jpg   (matches the spelling HeicConverter already writes)
+    #   .tiff -> .tif   (same short-form convention as .jpg, for consistency)
+    #   .mpeg -> .mpg   (same container/codec as .mpg, same short-form pattern;
+    #                    both live in VIDEO_EXTENSIONS as the same format, so
+    #                    leaving this pair unmapped would leave exactly the
+    #                    two-spellings-per-format defect this issue exists to
+    #                    remove, just in videos/ instead of photos/)
+    # Every other extension is intentionally absent and passes through
+    # unchanged apart from lowercasing: ``.heif`` is a distinct format from
+    # ``.heic`` (a differently-boxed HEIF still, but not what this tool's HEIC
+    # converter produces) and must never be folded into it, and the raw formats
+    # (``.cr2``, ``.nef``, ``.arw``, ``.orf``, ``.rw2``) are each a genuinely
+    # distinct format with no common alias to collapse.
+    EXTENSION_ALIASES = {
+        '.jpeg': '.jpg',
+        '.tiff': '.tif',
+        '.mpeg': '.mpg',
+    }
+
+    @classmethod
+    def normalize_extension(cls, extension: str) -> str:
+        """
+        Lowercase an output extension and collapse it to its canonical alias.
+
+        Used by :class:`FileProcessor` when composing the final on-disk
+        filename for a photo/screenshot/generated/video file (issue #55), so
+        ``backup/photos/`` ends up with one spelling per format instead of the
+        source file's raw, arbitrarily-cased suffix (``IMG_1.JPG`` next to
+        ``IMG_2.jpg`` next to a HEIC-converted ``.jpg``). Lowercasing is
+        unconditional; the alias collapse is limited to :attr:`EXTENSION_ALIASES`
+        so formats with no common alias (RAW, ``.heif``) are left alone apart
+        from case.
+
+        Args:
+            extension: A suffix including the leading dot (e.g. ``".JPG"``),
+                in whatever case the source file carried.
+
+        Returns:
+            The lowercased, alias-collapsed extension (e.g. ``".jpg"``).
+        """
+        lowered = extension.lower()
+        return cls.EXTENSION_ALIASES.get(lowered, lowered)
+
     # PNG text-chunk KEYS whose mere presence is itself provenance. C2PA writes
     # its manifest under a 'c2pa' key; Stable Diffusion / AUTOMATIC1111 write the
     # full generation settings under a 'parameters' key. Neither key appears in

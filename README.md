@@ -133,7 +133,7 @@ Identifies iOS and macOS screenshots:
 - **HEIC files**: Converted to JPEG (default quality 98, configurable with `--jpeg-quality`; lossy at any setting) with EXIF preservation; the original HEIC is deleted after a verified conversion
 - **Apple sidecar files (.aae)**: Deleted automatically once their content validates as a genuine plist; a look-alike that merely shares the extension is kept and reported
 - **Hidden files**: Known OS junk (`.DS_Store`, `.localized`, `Thumbs.db`) and any other dotted filename (e.g. `.hidden_photo.jpg`) are skipped rather than archived — matching the policy already applied to hidden directories, which are never walked at all — but never silently dropped: every skip is counted (`files_skipped`) and named in the results, so a real photo that happens to carry a leading dot is never absent from every total the way it used to be
-- **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS)
+- **Naming convention**: Files renamed using EXIF/metadata timestamps (YYYY.MM.DD.HH.MM.SS); the extension is lowercased and normalized to one spelling per format (`.jpeg` -> `.jpg`, `.tiff` -> `.tif`), so the same format never appears under two spellings in the same backup folder. Quarantined (`backup/corrupt/`) and unrecognized (`backup/unknown/`) files are the exception: they keep their exact original filename, case included
 - **Video metadata**: Extracts creation timestamps from video file headers
 - **Duplicate handling**: Timestamp conflicts resolved by incrementing seconds
 - **AI content separation**: Generated and heavily edited content goes to dedicated folder
