@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tm-monthly-backup"
-version = "1.0.0"
+# Read from src/__init__.py's __version__ so pip metadata and `--version`
+# cannot drift apart -- see [tool.setuptools.dynamic] below. They had drifted:
+# both were hardcoded "1.0.0" through three completed milestones.
+dynamic = ["version"]
 description = "CLI utility for organizing Apple Photos exports by type and EXIF timestamp"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -87,6 +90,13 @@ tm-monthly-backup = "src.main:main"
 # which would otherwise treat `src/` as a layout root and drop the package name.
 [tool.setuptools]
 packages = ["src"]
+
+# The one place the version is declared is src/__init__.py's __version__.
+# setuptools reads it statically (no import of the package at build time), and
+# src/main.py passes the same attribute to click.version_option, so `pip show`
+# and `tm-monthly-backup --version` are the same string by construction.
+[tool.setuptools.dynamic]
+version = { attr = "src.__version__" }
 
 # Deliberately narrow (issue #20 fix-round-1): the default rule set reports
 # 341 findings across src/ and tests/ today, almost all pre-existing style

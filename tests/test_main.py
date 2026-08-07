@@ -80,12 +80,49 @@ class TestMainCli(unittest.TestCase):
         ]
 
     def test_version_option(self):
-        """--version prints the program name/version and exits cleanly."""
+        """--version reports the package's own version and exits cleanly.
+
+        Asserted against ``src.__version__`` rather than a literal, for two
+        reasons. It is the property that actually matters -- that ``--version``
+        is wired to the one place the version is declared, not that the version
+        happens to be some particular string -- and a hardcoded literal here
+        breaks on every release bump, which is how this test came to assert
+        "1.0.0" against a build carrying three completed milestones.
+        """
+        from src import __version__
+
         result = self.runner.invoke(main, ["--version"])
 
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertIn("tm-monthly-backup", result.output)
-        self.assertIn("1.0.0", result.output)
+        self.assertIn(__version__, result.output)
+
+    def test_reported_version_matches_the_installed_package_metadata(self):
+        """``--version`` and ``pip``'s metadata cannot disagree.
+
+        ``pyproject.toml`` declares ``dynamic = ["version"]`` reading
+        ``src.__version__``, so a build's metadata and its ``--version`` output
+        come from one attribute. This pins that: they were previously two
+        hardcoded literals and had drifted a full three milestones apart.
+
+        Skipped when the package is not installed in the running interpreter --
+        the repo is usually driven straight from source via ``python -m
+        src.main``, with no dist-info to read.
+        """
+        from importlib.metadata import PackageNotFoundError, version as pkg_version
+
+        from src import __version__
+
+        try:
+            installed = pkg_version("tm-monthly-backup")
+        except PackageNotFoundError:
+            self.skipTest("tm-monthly-backup is not pip-installed in this interpreter")
+
+        self.assertEqual(
+            installed, __version__,
+            "pip metadata and src.__version__ disagree -- the dynamic version "
+            "wiring in pyproject.toml is broken",
+        )
 
     def test_help_documents_yes_flag(self):
         """--help lists --yes: the issue's safety framing rests on the flag

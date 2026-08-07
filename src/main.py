@@ -7,6 +7,7 @@ import logging
 import sys
 import click
 
+from src import __version__
 from src.cli_interface import CLIInterface, is_unqualified_success, setup_logging
 from src.file_processor import Settings
 
@@ -90,7 +91,7 @@ def determine_exit_code(results: dict) -> int:
 @click.option('--backup-dir', default='backup', help='Directory for organized output (default: backup)')
 @click.option('--jpeg-quality', type=click.IntRange(1, 100), default=Settings().jpeg_quality,
               show_default=True, help='JPEG quality for HEIC conversion')
-@click.version_option(version='1.0.0', prog_name='tm-monthly-backup')
+@click.version_option(version=__version__, prog_name='tm-monthly-backup')
 def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality):
     """
     Process exported Apple Photos files and organize them by type.

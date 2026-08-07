@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.3.0] - 2026-08-07
+
+Milestones 1.1.0, 1.2.0 and 1.3.0 all ship here: 1.0.0 was the last tagged
+release, and no 1.1.0 or 1.2.0 release was ever cut, so everything below
+accumulated on top of 1.0.0. 60 issues closed.
+
+### Upgrading from 1.0.0 -- read this first
+
+**One behavior change can break an existing unattended run.** A non-interactive
+invocation (no terminal attached -- cron, a pipe, CI) now **requires
+`--yes`**. Without it the run refuses immediately with an actionable message
+and exits `2`, rather than hanging forever on a confirmation prompt nobody can
+answer, or consuming piped data as the answer. This also means a case that
+previously exited `0` can now exit `2`: an `export/` that is non-empty at the
+top level but contains nothing the tool can process. If you have a cron entry
+or script calling this tool, **add `--yes` to it before upgrading.**
+
+Two further changes are visible immediately but break nothing:
+
+- **A default run is much quieter.** It now prints warnings, errors and a
+  summary rather than one line per file. Anything that is your only trace of a
+  destructive or surprising decision -- a skipped non-regular file, a
+  quarantined undecodable file, a deleted sidecar, a file routed to
+  `backup/unknown/`, a failed HEIC verification, any recorded failure -- is
+  still shown. `--verbose` restores the per-file detail.
+- **Archived filenames now carry a single canonical extension.** Newly
+  processed files land as lowercase, with `.jpeg`/`.tiff`/`.mpeg` collapsed to
+  `.jpg`/`.tif`/`.mpg`. Files already in `backup/` keep the names they have;
+  nothing is renamed retroactively.
+
+And one default worth knowing about: **HEIC conversion quality is now 98**, up
+from 95. The original HEIC is still deleted after a verified conversion, so the
+archived JPEG is the only surviving copy -- 98 roughly halves the per-channel
+quantization error for about a third more disk. `--jpeg-quality` still accepts
+anything from 1 to 100.
+
+
 ### Added
 - **HEIC Conversion Runs In A Bounded Process Pool (Issue #42)**: HEIC decode + JPEG encode is 97.8% of a run's wall time, per-file independent, and releases the GIL — the textbook `ProcessPoolExecutor` case. The conversion is now split into two phases so this parallelism never touches the tool's correctness invariants. **Phase A (parallel)** maps every HEIC file through a process pool via a new module-level, picklable worker `_convert_heic_worker(heic_path, jpeg_quality, optimize) -> (heic_path, output_path, error)`: each worker builds its own `HeicConverter` and writes the transient `mkstemp` `.jpg` beside the source (issue #26), exactly as the sequential path does; no `self`, no Pillow objects, and no shared state cross the process boundary, and each spawned worker re-imports `src.heic_converter`, which registers the pillow-heif opener (macOS `spawn`). **Phase B (sequential, unchanged)** then walks the results in the *same deterministic scan/category order* a fully sequential run uses, and does all timestamp extraction, collision resolution (`used_timestamps`, the `O_CREAT | O_EXCL` reservation from issue #6), verify-before-delete (issue #7), moving, and original-deletion serially — so the `backup/` tree, which file lands where, and the failure records are byte-for-byte identical to sequential, a property pinned by a same-input parallel-vs-sequential equivalence test. The pool is capped at `min(6, os.cpu_count())` workers, never `os.cpu_count()`: the audit measured returns flattening at 4–6 and *regressing* at 8 because libheif is already internally threaded (~207% CPU sequential), and memory scales at ~0.5 GB/worker, so the cap bounds RSS too. The pool spawns only above a small threshold (8 HEIC files); smaller batches — and every dry run — convert inline on the untouched sequential path, since worker spawn (~65 ms of Pillow/pillow-heif import each) is not amortized for a handful of files. A conversion that fails in a worker is captured and recorded in `failed_files` as `('convert_heic', path, 'HEIC conversion failed')` exactly as before (issue #31 accounting and exit codes unchanged) without aborting the batch; a `BrokenProcessPool` (a worker dying) falls back to sequential conversion for any unfinished files rather than losing them; and `KeyboardInterrupt` cancels outstanding futures and shuts the pool down without orphaning workers. Dry-run parity (issue #10) is preserved — a dry run spawns no pool and reports the same plan. Measured on synthetic 12 MP HEIC fixtures the pool is ~1.76x faster (24 files: 1.88s → 1.07s); the performance audit's real-photo batch went 5m42s → 1m57s on 1,100 files at 4 workers.
 - **Packaging Metadata And A Console Entry Point (Issue #15)**: The project now ships a `pyproject.toml` declaring its name, version, description, author, `requires-python = ">=3.8"`, MIT license, and dependencies, so it can be installed with `pip install -e .`. A `[project.scripts]` entry point registers a `tm-monthly-backup` console command (`src.main:main`) that runs the tool from any directory once installed. The existing `src` package is installed as-is via an explicit `[tool.setuptools] packages = ["src"]` list rather than automatic src-layout discovery (which would treat `src/` as a layout root and drop the package name); renaming the package to `tm_monthly_backup` is deliberately left as a separate change since it would touch every import in `src/` and `tests/`.
