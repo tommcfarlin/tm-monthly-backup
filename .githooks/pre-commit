@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Refuse to commit image or video bytes into this repository.
+
+Why this exists
+---------------
+This project's whole subject is the owner's personal photo library, so the
+repository sits one ``git add -A`` away from publishing family photographs --
+and it is a PUBLIC repo, which makes that irreversible in practice. The
+directories the tool actually reads and writes (``export/``, ``backup/``,
+``export-*/``, ``backup-*/``) are in ``.gitignore``, and a media-extension
+block was added there too. Neither is sufficient on its own:
+
+* ``.gitignore`` matches by PATH. A photo saved anywhere it does not name --
+  a scratch file at the repo root, an accidental ``tests/`` fixture -- is
+  staged normally.
+* The extension rules match by NAME. A real JPEG named ``notes.txt`` is
+  invisible to them. That is not a contrived case: it is what a
+  screenshot-to-clipboard-to-file round trip or a mis-typed ``cp`` produces.
+
+So this hook checks CONTENT: it reads the leading bytes of every staged blob
+and rejects anything whose signature says image or video, whatever the file is
+called and wherever it sits.
+
+Escape hatch: ``ALLOW_MEDIA_COMMIT=1 git commit ...`` if a genuine image asset
+ever needs to be committed (a README screenshot, say). It is deliberately an
+explicit, per-commit override rather than a config setting, so it cannot be
+switched on once and silently forgotten.
+
+Installed via ``core.hooksPath=.githooks``, so it is version-controlled and a
+fresh clone gets it with one command:
+
+    git config core.hooksPath .githooks
+"""
+
+import os
+import subprocess
+import sys
+
+# (signature, offset, label). Offset 4 entries are ISO base-media brands, which
+# follow a 4-byte box length -- the same container family as .mov/.mp4/.heic.
+SIGNATURES = [
+    (b"\xff\xd8\xff", 0, "JPEG"),
+    (b"\x89PNG\r\n\x1a\n", 0, "PNG"),
+    (b"GIF87a", 0, "GIF"),
+    (b"GIF89a", 0, "GIF"),
+    (b"II*\x00", 0, "TIFF"),
+    (b"MM\x00*", 0, "TIFF"),
+    (b"BM", 0, "BMP"),
+    (b"ftypheic", 4, "HEIC"),
+    (b"ftypheix", 4, "HEIC"),
+    (b"ftyphevc", 4, "HEIC"),
+    (b"ftypmif1", 4, "HEIF"),
+    (b"ftypmsf1", 4, "HEIF"),
+    (b"ftypavif", 4, "AVIF"),
+    (b"ftypqt  ", 4, "QuickTime video"),
+    (b"ftypisom", 4, "MP4 video"),
+    (b"ftypmp4", 4, "MP4 video"),
+    (b"ftypM4V", 4, "M4V video"),
+    (b"ftyp3gp", 4, "3GP video"),
+    (b"\x1aE\xdf\xa3", 0, "Matroska/WebM video"),
+    (b"RIFF", 0, None),   # needs a sub-check; see _riff_kind
+]
+
+
+def _riff_kind(head):
+    """RIFF containers hold their real type at offset 8 (WEBP, AVI ...)."""
+    if len(head) < 12:
+        return None
+    kind = head[8:12]
+    if kind == b"WEBP":
+        return "WebP"
+    if kind == b"AVI ":
+        return "AVI video"
+    return None
+
+
+def staged_files():
+    """Return (mode, blob_sha, path) for every file added or modified."""
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--diff-filter=ACMR", "--raw", "-z"],
+        capture_output=True, text=False, check=True,
+    ).stdout
+    # -z output: ":<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0"
+    entries, fields = [], out.split(b"\x00")
+    i = 0
+    while i < len(fields) - 1:
+        meta = fields[i]
+        if not meta.startswith(b":"):
+            i += 1
+            continue
+        parts = meta.split()
+        if len(parts) < 5:
+            i += 2
+            continue
+        dst_sha = parts[3].decode()
+        path = fields[i + 1]
+        entries.append((dst_sha, path.decode("utf-8", "replace")))
+        i += 2
+    return entries
+
+
+def blob_head(sha, count=32):
+    """Read the first bytes of a staged blob from the object store."""
+    return subprocess.run(
+        ["git", "cat-file", "blob", sha],
+        capture_output=True, check=True,
+    ).stdout[:count]
+
+
+def detect(head):
+    for sig, offset, label in SIGNATURES:
+        if head[offset:offset + len(sig)] == sig:
+            return _riff_kind(head) if label is None else label
+    return None
+
+
+def main():
+    if os.environ.get("ALLOW_MEDIA_COMMIT") == "1":
+        return 0
+
+    offenders = []
+    for sha, path in staged_files():
+        if sha == "0" * 40:
+            continue
+        try:
+            kind = detect(blob_head(sha))
+        except subprocess.CalledProcessError:
+            continue
+        if kind:
+            offenders.append((path, kind))
+
+    if not offenders:
+        return 0
+
+    sys.stderr.write(
+        "\nCOMMIT REFUSED: image or video content is staged.\n\n"
+        "This repository is public and its subject is a personal photo\n"
+        "library. Photographs must never be committed -- detected by CONTENT,\n"
+        "so renaming the file will not help:\n\n"
+    )
+    for path, kind in offenders:
+        sys.stderr.write(f"    {kind:<20} {path}\n")
+    sys.stderr.write(
+        "\nIf these are your photos, unstage them:\n"
+        "    git restore --staged <path>\n\n"
+        "The tool's own directories (export/, backup/, export-*/, backup-*/)\n"
+        "are already gitignored -- a hit here means a file escaped them.\n\n"
+        "If this really is a legitimate image asset:\n"
+        "    ALLOW_MEDIA_COMMIT=1 git commit ...\n\n"
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

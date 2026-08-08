@@ -41,6 +41,60 @@ export-*/
 # each one holds gigabytes of the user's own photographs.
 backup-*/
 
+# Photographs and video, ANYWHERE in the tree -- not just in the directories
+# above. This repo is public and its subject is a personal photo library, so it
+# sits one `git add -A` away from publishing family photos. The path rules above
+# only help for files that stay inside those directories; a stray photo at the
+# repo root or an accidental fixture under tests/ is staged normally without
+# these.
+#
+# This is the second of three layers, and the weakest of them: it matches by
+# NAME, so a real JPEG called `notes.txt` slips straight through. The
+# content-inspecting pre-commit hook in .githooks/ is what catches that case --
+# enable it once per clone with `git config core.hooksPath .githooks`.
+#
+# Tests never need these rules relaxed: every fixture is generated at runtime
+# into a tempfile.mkdtemp() sandbox, never committed.
+*.heic
+*.HEIC
+*.heif
+*.HEIF
+*.jpg
+*.JPG
+*.jpeg
+*.JPEG
+*.png
+*.PNG
+*.gif
+*.GIF
+*.tif
+*.TIF
+*.tiff
+*.TIFF
+*.bmp
+*.webp
+*.avif
+*.dng
+*.DNG
+*.raw
+*.cr2
+*.nef
+*.arw
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.m4v
+*.M4V
+*.avi
+*.mkv
+*.webm
+*.3gp
+# Apple edit-history sidecars carry no image data, but they belong to the same
+# personal library and have no business in version control either.
+*.aae
+*.AAE
+
 # IDE
 .vscode/
 .idea/

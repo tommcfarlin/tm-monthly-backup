@@ -31,13 +31,27 @@ git clone https://github.com/tommcfarlin/tm-monthly-backup.git
 cd tm-monthly-backup
 ```
 
-2. Create and activate a virtual environment (recommended):
+2. Enable the repository's own commit guard:
+```bash
+git config core.hooksPath .githooks
+```
+This installs a `pre-commit` hook that refuses to commit image or video
+**content**. It is worth the one command: this repository's subject is a
+personal photo library, so it sits one `git add -A` away from publishing family
+photographs, and the repo is public. `.gitignore` covers the directories the
+tool reads and writes (`export/`, `backup/`, `export-*/`, `backup-*/`) plus
+media file extensions anywhere in the tree — but both of those match by *name*,
+so a real JPEG saved as `notes.txt` slips through. The hook inspects the leading
+bytes of every staged file, so renaming does not evade it. Git does not install
+hooks from a clone automatically, which is why this is a manual step.
+
+3. Create and activate a virtual environment (recommended):
 ```bash
 python3 -m venv tm-backup-env
 source tm-backup-env/bin/activate  # On Windows: tm-backup-env\Scripts\activate
 ```
 
-3. Install the package (editable install, recommended):
+4. Install the package (editable install, recommended):
 ```bash
 pip install -e .
 ```
