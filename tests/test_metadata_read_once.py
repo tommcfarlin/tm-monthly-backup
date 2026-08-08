@@ -497,25 +497,38 @@ class TestDecodeCountingMechanismDetectsGenuineDoubleDecode(unittest.TestCase):
             processor.process_all_files(dry_run=False)
 
         distinct_by_reference = len({id(o) for o in decoded_objects})
-        # >= 2, not == 2 (issue #68).
+        # Exactly 2, asserted as two one-sided bounds with direction-specific
+        # messages (phase 8 review restored the upper bound: issue #68's
+        # change to a bare assertGreaterEqual silently dropped it, so a
+        # regression adding a THIRD decode passed the one file whose whole
+        # purpose is catching redundant decodes).
         #
-        # This pins DELIBERATELY-DEFERRED behavior: PngImageFile.getexif() forces
-        # load() when the file carries no eXIf chunk, so an EXIF-less PNG is
-        # decoded twice. That is Pillow's behavior, not a bug in this project, and
-        # it is on the list to address. Asserting == 2 would turn the eventual FIX
-        # into a red test carrying the message below -- which would send the next
-        # reader hunting for an unsound counting mechanism that was never the
-        # problem. The assertion's real job is to prove the reference-identity
-        # counter can distinguish two decodes from one; a lower bound does that,
-        # and stays true whichever way the deferred behavior lands.
+        # This pins DELIBERATELY-DEFERRED behavior: PngImageFile.getexif()
+        # forces load() when the file carries no eXIf chunk, so an EXIF-less
+        # PNG is decoded twice. That is Pillow's behavior, not a bug in this
+        # project, and it is on the list to address. The pair of bounds keeps
+        # #68's concern answered without giving up the ceiling: whichever way
+        # the count moves, the message says what that direction means instead
+        # of sending the reader hunting for an unsound counting mechanism.
         #
-        # If you are here because this went red: the count DROPPED below 2, which
-        # means the double decode is gone. That is the improvement. Update this to
-        # assert the new exact count.
+        # If the LOWER bound went red: the count DROPPED below 2, which means
+        # the deferred double decode is gone. That is the improvement -- update
+        # both bounds to the new exact count.
         self.assertGreaterEqual(
             distinct_by_reference, 2,
-            "the known pre-existing double decode for an EXIF-less PNG was "
-            "not detected -- the counting mechanism itself is unsound",
+            "fewer distinct decodes than the two known ones -- either the "
+            "deferred EXIF-less-PNG double decode was fixed (good: update "
+            "both bounds to the new count) or the counting mechanism itself "
+            "is unsound",
+        )
+        # If the UPPER bound went red: a NEW redundant decode was introduced
+        # somewhere in the pipeline. That is the regression this file exists
+        # to catch -- find and remove the extra decode; do not raise this
+        # bound.
+        self.assertLessEqual(
+            distinct_by_reference, 2,
+            "more distinct decodes than the two known ones -- a new redundant "
+            "decode was introduced in the pipeline",
         )
 
 

@@ -378,9 +378,13 @@ class FileProcessor:
         # not match the magic bytes), 'unreadable' (the file could not be
         # opened/read at all -- a distinct reason from 'not_plist' because
         # its content was never actually inspected), 'delete_failed' (a
-        # validated sidecar's own os.remove raised), or
-        # 'run_archived_nothing' (every processable file this run attempted
-        # failed, so nothing is deleted at all -- see process_all_files).
+        # validated sidecar's own os.remove raised),
+        # 'run_archived_nothing' (a processable file this run attempted
+        # failed or did not verify, so nothing is deleted at all -- see
+        # process_all_files), or 'unexpected_skip' (the scan left a non-junk
+        # file behind in export/, which may be the very photo a candidate
+        # sidecar describes -- phase 8 review; see the gate in
+        # process_all_files).
         # Neither list feeds _processed_files or _failed_files: a sidecar was
         # never a processable file to begin with (it is excluded from
         # FileCategorizer.get_processable_files), so counting either outcome
@@ -419,12 +423,19 @@ class FileProcessor:
         # a `mkstemp` .jpg INSIDE the scanned export tree, so any such file left
         # behind is re-ingested by the next run -- archived as a duplicate of a
         # photo already in backup/, or quarantined into backup/corrupt/ as a
-        # false "your photos are corrupt" report. Four separate paths leaked
-        # them: a dying pool worker (BrokenProcessPool discards completed
-        # results, and the backfill converts again), Ctrl-C during either phase,
-        # and a move that fails after conversion. Tracking every output here and
-        # sweeping the survivors in `_sweep_transient_outputs` closes all four at
-        # one point instead of four.
+        # false "your photos are corrupt" report. An output is recorded here
+        # the moment its path is known -- an inline conversion's return, a pool
+        # result's arrival, or the completed-future harvest after a broken
+        # pool or an interrupt -- and the survivors are unlinked by
+        # `_sweep_transient_outputs`, which process_all_files runs in a
+        # ``finally`` spanning both phases so a Ctrl-C cannot skip it (phase 8
+        # review: the sweep originally ran only on normal completion, and pool
+        # outputs were recorded only when Phase B consumed them, so the
+        # interrupt cases this comment claimed were closed were not). The one
+        # leak that remains: a pool worker that dies after writing its JPEG
+        # but before returning -- that path never crossed the process
+        # boundary, so nothing in this process can know to sweep it (see
+        # `_sweep_transient_outputs` for why it is not closed).
         self._transient_outputs: Set[str] = set()
 
     # Read-only views onto the frozen settings (issue #67).
@@ -655,21 +666,34 @@ class FileProcessor:
         if not dry_run:
             self.categorizer.ensure_target_directories(self.backup_dir)
 
-        # Phase A (parallel): convert HEIC files up front in a bounded process
-        # pool (issue #42). This is a pure per-file map -- decode/encode/write,
-        # no shared state -- whose results feed the sequential place phase
-        # below. A dry run converts nothing, so it never enters here and never
-        # spawns a pool (#10 parity preserved).
-        if not dry_run:
-            self._prepare_heic_conversions(processable_files, progress)
+        try:
+            # Phase A (parallel): convert HEIC files up front in a bounded
+            # process pool (issue #42). This is a pure per-file map --
+            # decode/encode/write, no shared state -- whose results feed the
+            # sequential place phase below. A dry run converts nothing, so it
+            # never enters here and never spawns a pool (#10 parity preserved).
+            if not dry_run:
+                self._prepare_heic_conversions(processable_files, progress)
 
-        # Phase B (sequential): timestamp, resolve collisions, move, and delete
-        # originals in the SAME deterministic order as a fully sequential run,
-        # so ``_used_timestamps`` resolution and landing paths are byte-for-byte
-        # identical regardless of whether Phase A ran in a pool.
-        for category, files in processable_files.items():
-            if files:
-                self._process_category(category, files, dry_run, progress)
+            # Phase B (sequential): timestamp, resolve collisions, move, and
+            # delete originals in the SAME deterministic order as a fully
+            # sequential run, so ``_used_timestamps`` resolution and landing
+            # paths are byte-for-byte identical regardless of whether Phase A
+            # ran in a pool.
+            for category, files in processable_files.items():
+                if files:
+                    self._process_category(category, files, dry_run, progress)
+        finally:
+            # Sweep converted JPEGs that were produced but never placed, so the
+            # next run does not re-ingest this run's own leftovers -- archived
+            # as a duplicate photograph, or quarantined as a false "your photos
+            # are corrupt" report. In a ``finally``, not on the fall-through
+            # path (phase 8 review): the sweep used to run only on normal
+            # completion, so the very interrupt cases its own docstring claimed
+            # to close -- Ctrl-C during either phase -- skipped it entirely. On
+            # the normal path this is the same point in the order as before:
+            # sweep, then the landing audit, then the sidecar-deletion gate.
+            self._sweep_transient_outputs()
 
         # Validate and delete Apple sidecar (.aae) candidates only now that
         # every processable file has been filed in backup/ or recorded as
@@ -699,18 +723,14 @@ class FileProcessor:
         # its bytes DID land safely in backup/corrupt/, in both dry and real
         # runs) as "archived", which is correct: nothing was lost for it.
         #
-        # Sweep before auditing, and audit before deleting anything (whole-branch
-        # review): both orderings were wrong.
-        #
-        # The sweep removes converted JPEGs that were produced but never placed,
-        # so the drainage check below does not trip over this run's own leftovers.
-        #
-        # The audit ran AFTER sidecar deletion, which meant a run could
-        # permanently delete a user's edit history and only then discover its
-        # archive did not verify. That is issue #57's failure mode arriving by a
-        # different route, so the audit now runs first and its result is an input
-        # to the deletion decision.
-        self._sweep_transient_outputs()
+        # Audit before deleting anything (whole-branch review): the audit ran
+        # AFTER sidecar deletion, which meant a run could permanently delete a
+        # user's edit history and only then discover its archive did not
+        # verify. That is issue #57's failure mode arriving by a different
+        # route, so the audit now runs first and its result is an input to the
+        # deletion decision. The transient sweep (the ``finally`` above) has
+        # already run by this point, so the drainage check does not trip over
+        # this run's own leftovers.
         self._verify_landings(dry_run)
 
         attempted = sum(len(files) for files in processable_files.values())
@@ -729,19 +749,46 @@ class FileProcessor:
         # The alternative cost is unrecoverable.
         blocking_failures = len(self._failed_files)
         blocking_discrepancies = len(self._landing_discrepancies)
-        if attempted > 0 and (
+        # An unexpected scan skip holds this gate exactly as a failure does
+        # (phase 8 review). The gate read failures and landing discrepancies
+        # but not _skipped_files, so an export/ holding a dotted photo (e.g.
+        # `.IMG_1234.jpg` -- the interrupted-sync conflict copy issue #30
+        # warns may be real data) plus its `IMG_1234.aae` skipped the photo,
+        # then permanently deleted its edit history: issue #57's failure mode
+        # arriving through the one bucket the gate did not read. A 'junk' skip
+        # (.DS_Store/.localized/Thumbs.db) does NOT hold the gate -- every
+        # macOS export tree carries one, so blocking on it would stop sidecar
+        # cleanup on essentially every run forever (#30; the same non-junk
+        # line cli_interface._has_unexpected_skip draws for the banner and
+        # exit code). Checked regardless of `attempted`, unlike the
+        # run-outcome conditions below: an all-sidecar export (attempted ==
+        # 0, nothing skipped) must still delete its sidecars.
+        blocking_skips = [
+            path for reason, path in self._skipped_files if reason != 'junk'
+        ]
+        run_outcome_blocks = attempted > 0 and (
             archived <= 0 or blocking_failures > 0 or blocking_discrepancies > 0
-        ):
+        )
+        if run_outcome_blocks or blocking_skips:
             logger.warning(
-                "Not every processable file was safely archived (%s failed, %s "
-                "unverified, of %s attempted); keeping all %s sidecar "
-                "candidate(s) rather than delete a user's edit history for "
-                "photos that may never have landed in backup/",
-                blocking_failures, blocking_discrepancies, attempted,
+                "Not every file was safely archived or accounted for (%s "
+                "failed, %s unverified, %s unexpectedly skipped; %s "
+                "attempted); keeping all %s sidecar candidate(s) rather than "
+                "delete a user's edit history for photos that may never have "
+                "landed in backup/",
+                blocking_failures, blocking_discrepancies,
+                len(blocking_skips), attempted,
                 len(categorized[FileCategory.SIDECAR]),
             )
+            # 'unexpected_skip' when the skip is the only cause: the run may
+            # have archived everything it attempted, so recording
+            # 'run_archived_nothing' for it would be a lie.
+            reason = (
+                'run_archived_nothing' if run_outcome_blocks
+                else 'unexpected_skip'
+            )
             for file_path in categorized[FileCategory.SIDECAR]:
-                self._skipped_sidecars.append(('run_archived_nothing', file_path))
+                self._skipped_sidecars.append((reason, file_path))
         else:
             self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
 
@@ -1138,6 +1185,12 @@ class FileProcessor:
           silently lost.
         * ``KeyboardInterrupt`` cancels outstanding work and shuts the pool down
           without orphaning workers, then propagates to the top-level handler.
+        * Every output path that crosses the process boundary is recorded in
+          ``_transient_outputs`` as it arrives -- in the consuming loop, in the
+          backfill, and (via :meth:`_record_completed_transients`) for futures
+          that completed but were never consumed because the pool broke or the
+          run was interrupted -- so the end-of-run sweep can remove anything
+          that never reaches the place phase (phase 8 review).
 
         Args:
             heic_files: Source ``.heic`` paths to convert.
@@ -1151,6 +1204,7 @@ class FileProcessor:
         quality = self.heic_converter.jpeg_quality
         optimize = self.heic_converter.optimize
         results: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        futures: Dict[Any, str] = {}
 
         logger.info(
             "Converting %s HEIC files in a pool of %s workers",
@@ -1170,13 +1224,35 @@ class FileProcessor:
                         _src, output_path, error = future.result()
                         path = futures[future]
                         results[path] = (output_path, error)
+                        # Track the transient output the moment its path
+                        # crosses the process boundary, not lazily when Phase B
+                        # consumes it (phase 8 review): an interrupt between
+                        # here and the place phase used to leave this JPEG in
+                        # export/ untracked, so the end-of-run sweep could
+                        # never see it. Recorded BEFORE the progress callback,
+                        # which runs arbitrary presentation code and is the
+                        # obvious interrupt point in this loop.
+                        if output_path is not None:
+                            self._transient_outputs.add(output_path)
                         if progress is not None:
                             progress.on_heic_converted(path)
                 except KeyboardInterrupt:
-                    # Do not wait on in-flight work; cancel what has not started
-                    # and tear the pool down before re-raising so no worker is
-                    # orphaned. main.py catches the re-raised interrupt.
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    # Cancel what has not started, but WAIT for in-flight
+                    # conversions before re-raising (phase 8 review; this was
+                    # wait=False). Their outputs are already being written
+                    # into export/, and only a completed future carries the
+                    # path back across the process boundary for the harvest
+                    # in the outer handler below -- unwinding immediately
+                    # left those JPEGs both untracked and still being
+                    # written. wait=False did not even buy responsiveness:
+                    # shutdown() drops its manager-thread reference, so the
+                    # ``with`` block's own shutdown(wait=True) had nothing
+                    # left to join and the parent raced its own workers. The
+                    # wait is bounded by the in-flight batch (at most
+                    # MAX_HEIC_WORKERS conversions), and a terminal Ctrl-C
+                    # reaches the workers' process group too, ending them
+                    # early. main.py catches the re-raised interrupt.
+                    executor.shutdown(wait=True, cancel_futures=True)
                     raise
         except BrokenProcessPool as exc:
             # A worker died unexpectedly (e.g. OOM-killed). Rather than lose the
@@ -1186,6 +1262,25 @@ class FileProcessor:
                 "sequentially",
                 exc,
             )
+            # A future that completed before the pool broke was never consumed
+            # by the loop above, and the backfill below converts its file
+            # AGAIN -- orphaning the completed output in export/ (phase 8
+            # review). Its path did cross the process boundary, so record it
+            # for the sweep. results is deliberately left alone: the backfill
+            # still reconverts, preserving the pre-existing broken-pool
+            # behavior (and its progress accounting) exactly.
+            self._record_completed_transients(futures)
+        except KeyboardInterrupt:
+            # By this point the pool has been waited out -- by the inner
+            # handler's shutdown(wait=True) when the interrupt landed in the
+            # consuming loop, or by the ``with`` block's own exit when it
+            # landed anywhere else in the block -- so every future is now done
+            # or cancelled. Futures that completed without being consumed hold
+            # output paths that exist on disk; record them so the caller's
+            # finally-sweep can remove them (phase 8 review), then let the
+            # interrupt continue to main.py's handler.
+            self._record_completed_transients(futures)
+            raise
 
         # Backfill any file the pool did not resolve -- a broken pool, or a
         # future cancelled on interrupt that we nonetheless reached here for --
@@ -1197,10 +1292,47 @@ class FileProcessor:
                     path, quality, optimize
                 )
                 results[path] = (output_path, error)
+                # Same rule as the pool loop above: track the transient the
+                # moment it exists (phase 8 review), not when Phase B consumes
+                # it.
+                if output_path is not None:
+                    self._transient_outputs.add(output_path)
                 if progress is not None:
                     progress.on_heic_converted(path)
 
         return results
+
+    def _record_completed_transients(self, futures: Dict[Any, str]) -> None:
+        """
+        Record transient outputs from completed-but-unconsumed pool futures.
+
+        Both abnormal exits from the pool loop -- a broken pool and a
+        ``KeyboardInterrupt`` -- can leave futures that DID complete (their
+        worker wrote a JPEG into ``export/`` and returned its path) without the
+        ``as_completed`` loop ever consuming them (phase 8 review). Those
+        outputs are real files this run created; adding them to
+        ``_transient_outputs`` is what lets ``_sweep_transient_outputs`` remove
+        them instead of leaving them for the next run to re-ingest.
+
+        Best effort by design: a future whose ``result()`` raises (the pool
+        broke before it produced anything) has no path to record, and a
+        cancelled future never ran at all. Neither wrote a file, so both are
+        skipped. What this can never cover is a worker that died AFTER
+        ``image.save`` but BEFORE returning -- that output's path never crossed
+        the process boundary; see ``_sweep_transient_outputs``.
+
+        Args:
+            futures: The pool's future-to-source-path map.
+        """
+        for future in futures:
+            if not future.done() or future.cancelled():
+                continue
+            try:
+                _src, output_path, _error = future.result()
+            except Exception:
+                continue
+            if output_path is not None:
+                self._transient_outputs.add(output_path)
 
     def _convert_heic(
         self, file_path: str, progress: Optional[ProgressReporter] = None
@@ -1234,9 +1366,12 @@ class FileProcessor:
             output_path, error = self._converted_heic[file_path]
             if output_path is not None:
                 # Mirror the bookkeeping convert_heic_to_jpeg records in-process
-                # so conversion stats (heic_conversions) match sequential.
+                # so conversion stats (heic_conversions) match sequential. The
+                # output itself was already recorded in _transient_outputs when
+                # the pool produced it (phase 8 review: recording it only here,
+                # at consume time, left an interrupt between the pool and this
+                # line with an untracked stray in export/).
                 self.heic_converter.converted_files.append((file_path, output_path))
-                self._transient_outputs.add(output_path)
                 return output_path
             self.heic_converter.failed_conversions.append(
                 (file_path, error or 'HEIC conversion failed')
@@ -2030,9 +2165,25 @@ class FileProcessor:
         a complete one is archived as a duplicate of a photo already in
         ``backup/``, and a truncated or empty one is quarantined into
         ``backup/corrupt/`` -- telling the user their photos are corrupt when
-        the tool wrote the file itself. Four paths leak them (a dying pool
-        worker, Ctrl-C in either phase, a move that fails after conversion), and
-        sweeping here closes all four at one point.
+        the tool wrote the file itself.
+
+        Coverage (phase 8 review tightened both halves of it): this runs in a
+        ``finally`` spanning the convert and place phases of
+        :meth:`process_all_files`, so it is reached on normal completion, on
+        Ctrl-C in either phase, and on any other abnormal unwind; and every
+        output whose path reached this process is tracked when it is produced
+        (inline conversion, pool-result arrival, the post-pool
+        completed-future harvest, and the broken-pool backfill), not when the
+        place phase consumes it. What it can NOT cover -- and the reason
+        "closes every leak" would be an overclaim -- is a pool worker that
+        dies after ``image.save`` but before returning: that orphan's path
+        never crossed the process boundary, so no in-process bookkeeping can
+        name it. Closing that would require the parent to pre-reserve each
+        output path (``mkstemp`` here, passed to the worker), which moves
+        output-path ownership out of ``HeicConverter`` for the pooled path
+        only and forks the parallel/sequential behavior issue #42's
+        equivalence guarantee exists to keep identical -- judged not worth it
+        for a window that requires a worker to be killed mid-return.
 
         Safety: this only ever unlinks paths recorded in ``_transient_outputs``,
         i.e. paths this run created. It never globs or pattern-matches the export

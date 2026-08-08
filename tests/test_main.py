@@ -316,6 +316,55 @@ class TestMainCli(unittest.TestCase):
         self.assertIn("Completed with", result.output)
         self.assertIn("failures", result.output)
 
+    def test_quarantine_only_run_names_the_reason_not_a_zero_count(self):
+        """A quarantine-only run must not announce 'Completed with 0 failures.'
+
+        ``determine_exit_code`` delegates to ``is_unqualified_success``, four
+        of whose five disqualifiers have nothing to do with ``files_failed``
+        -- so the old closing line, which always printed the failure count,
+        exited 1 while announcing zero failures (phase 8 review). The line
+        must name the condition that actually caused the exit code.
+        """
+        fake_results = {
+            "status": "completed",
+            "files_processed": 1,
+            "files_failed": 0,
+            "files_quarantined": 1,
+        }
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            return_value=fake_results,
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args("--yes"))
+
+        self.assertEqual(result.exit_code, EXIT_PARTIAL_FAILURE)
+        self.assertNotIn("0 failures", result.output)
+        self.assertIn("quarantined", result.output)
+
+    def test_closing_line_names_each_non_failure_condition(self):
+        """Kept sidecars, an unexpected skip, and an unverified landing are
+        each named -- single words asserted, since rich may wrap the line at
+        any space.
+        """
+        fake_results = {
+            "status": "completed",
+            "files_processed": 1,
+            "files_failed": 0,
+            "sidecars_skipped": 2,
+            "landing_discrepancies": 1,
+            "skipped_files": [("hidden", ".IMG_1.jpg")],
+        }
+        with patch(
+            "src.main.CLIInterface.process_with_progress",
+            return_value=fake_results,
+        ), patch("src.main.CLIInterface.check_directories", return_value=True):
+            result = self.runner.invoke(main, self._args("--yes"))
+
+        self.assertEqual(result.exit_code, EXIT_PARTIAL_FAILURE)
+        self.assertNotIn("0 failures", result.output)
+        for word in ("sidecars", "unexpectedly", "unverified"):
+            self.assertIn(word, result.output)
+
     def test_cancelled_status_skips_results_table(self):
         """A cancelled status exits 130 without rendering a results table."""
         with patch(

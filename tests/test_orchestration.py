@@ -187,7 +187,13 @@ class TestProgressReporterSeam(unittest.TestCase):
             date_time_original="2024:01:15 14:30:45",
         )
         sidecar = os.path.join(self.export, "a.aae")
-        open(sidecar, "wb").close()
+        # Real plist bytes, not a 0-byte stub (phase 8 review). Since issue
+        # #57 made content validation the deletion gate, a 0-byte candidate is
+        # skipped as 'not_plist' whether or not the run aborted, so the
+        # on-disk assertion below passed even when deletion ran -- it proved
+        # nothing. A VALID sidecar is deleted by a run that proceeds, so its
+        # survival is what actually demonstrates the abort.
+        _write_valid_sidecar(sidecar)
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = RecordingReporter(proceed=False)

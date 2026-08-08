@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The Apple-sidecar deletion gate now also holds when the scan skipped a file
+  for an unexpected (non-junk) reason. Previously an `export/` holding a real
+  photo under a dotted name plus its valid `.aae` deleted the edit history of
+  a photo that was never archived; the kept candidates are reported with a
+  new "unexpectedly left behind" reason. A junk-only skip (`.DS_Store`,
+  `.localized`, `Thumbs.db`) still does not block sidecar cleanup, and an
+  all-sidecar export still deletes its sidecars.
+- Transient converted JPEGs are now swept on every exit from the processing
+  phases, including Ctrl-C, and pool-produced outputs are tracked the moment
+  their paths arrive (including after a broken pool). Previously an interrupt
+  could leave a converted JPEG in `export/` for the next run to re-ingest as
+  a duplicate or a false "corrupt" quarantine. One narrow leak remains and is
+  now documented instead of overclaimed: a pool worker that dies after
+  writing its JPEG but before returning its path.
+- The exit-1 closing line now names the actual reason(s) -- failures,
+  quarantined files, kept sidecars, an unexpectedly skipped file, or an
+  unverified landing -- instead of always printing the failure count, which
+  announced "Completed with 0 failures." for a quarantine-only run. The exit
+  code documentation in `docs/cli-usage.md` now matches what exits `1`.
 
 ## [1.3.0] - 2026-08-07
 

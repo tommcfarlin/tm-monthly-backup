@@ -734,16 +734,19 @@ class CLIInterface:
         A candidate matches the ``.aae`` extension but was not unlinked --
         its content did not validate as a plist, it could not be read at all
         (a distinct reason from "not a plist": that content was never
-        actually inspected), a validated sidecar's own deletion failed, or
-        every processable file this run attempted failed outright, so
-        nothing at all was deleted this run. Either way the file is still
+        actually inspected), a validated sidecar's own deletion failed, a
+        processable file this run attempted failed or did not verify (so
+        nothing at all was deleted this run), or the scan left a non-junk
+        file behind in ``export/`` that may be the very photo a candidate
+        describes (phase 8 review). Either way the file is still
         sitting in ``export/`` and the user should know why it was not
         treated as one of their edit-history sidecars (issue #57).
 
         Args:
             skipped_sidecars: List of ``(reason, file_path)`` tuples, where
                 ``reason`` is ``'not_plist'``, ``'unreadable'``,
-                ``'delete_failed'``, or ``'run_archived_nothing'``.
+                ``'delete_failed'``, ``'run_archived_nothing'``, or
+                ``'unexpected_skip'``.
         """
         if not skipped_sidecars:
             return
@@ -757,6 +760,7 @@ class CLIInterface:
             'unreadable': "Could not be read (content never checked)",
             'delete_failed': "Deletion failed",
             'run_archived_nothing': "No files were successfully archived this run",
+            'unexpected_skip': "A file was unexpectedly left behind in export/",
         }
 
         skipped_table = Table(show_header=True, header_style="bold yellow")

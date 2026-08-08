@@ -487,6 +487,110 @@ class TestFailedRunLeavesSidecarsIntact(unittest.TestCase):
         self.assertFalse(os.path.exists(sidecar))
 
 
+class TestUnexpectedSkipHoldsSidecarGate(unittest.TestCase):
+    """An unexpected (non-junk) scan skip must hold the deletion gate.
+
+    Phase 8 review: the gate consulted failures and landing discrepancies but
+    not ``_skipped_files``, and its ``attempted > 0`` guard bypassed it
+    entirely when nothing was processable. An ``export/`` holding a real photo
+    under a dotted name (the interrupted-sync conflict copy issue #30 warns
+    may be real data) plus its valid ``.aae`` therefore skipped the photo and
+    permanently deleted its edit history -- issue #57's exact failure mode,
+    arriving through the one bucket the gate did not read.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.export_dir = os.path.join(self.temp_dir, "export")
+        self.backup_dir = os.path.join(self.temp_dir, "backup")
+        os.makedirs(self.export_dir, exist_ok=True)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_hidden_photo_skip_keeps_sidecar_when_nothing_was_processable(self):
+        """The review's reproduction: a dotted photo plus its valid sidecar.
+
+        Nothing is processable (``attempted == 0``), so the old gate never
+        even ran and the sidecar was deleted while the photo it describes sat
+        skipped in ``export/``.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, ".IMG_1234.jpg"),
+            date_time_original="2024:04:04 04:04:04",
+        )
+        sidecar = _write(
+            os.path.join(self.export_dir, "IMG_1234.aae"), XML_PLIST
+        )
+
+        results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 0)
+        self.assertEqual(results["files_skipped"], 1)
+        self.assertEqual(
+            results["sidecars_deleted"], 0,
+            "edit history deleted while its photo sat skipped in export/",
+        )
+        self.assertTrue(os.path.exists(sidecar))
+        reason, path = results["skipped_sidecar_files"][0]
+        # 'unexpected_skip', not 'run_archived_nothing': nothing failed here.
+        self.assertEqual(reason, "unexpected_skip")
+        self.assertEqual(path, sidecar)
+
+    def test_hidden_skip_keeps_sidecar_even_when_every_attempted_file_archived(self):
+        """A skip holds the gate even on a run that archived plenty.
+
+        This pins the reason code too: 'run_archived_nothing' would be a lie
+        for this run (it archived every file it attempted), which is why the
+        skip cause records 'unexpected_skip' instead.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "IMG_1.jpg"),
+            date_time_original="2024:04:04 04:04:04",
+        )
+        make_exif_jpeg(
+            os.path.join(self.export_dir, ".IMG_2.jpg"),
+            date_time_original="2024:04:04 04:04:05",
+        )
+        sidecar = _write(
+            os.path.join(self.export_dir, "IMG_2.aae"), XML_PLIST
+        )
+
+        results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 1)
+        self.assertEqual(results["files_failed"], 0)
+        self.assertEqual(results["sidecars_deleted"], 0)
+        self.assertTrue(os.path.exists(sidecar))
+        self.assertEqual(
+            results["skipped_sidecar_files"],
+            [("unexpected_skip", sidecar)],
+        )
+
+    def test_junk_only_skip_does_not_hold_the_gate(self):
+        """Settled policy (#30): every macOS export carries a .DS_Store.
+
+        Blocking on it would stop sidecar cleanup on essentially every run
+        forever, so a junk-only skip must still let a valid sidecar delete.
+        """
+        _write(os.path.join(self.export_dir, ".DS_Store"), b"junk")
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "IMG_1.jpg"),
+            date_time_original="2024:04:04 04:04:04",
+        )
+        sidecar = _write(
+            os.path.join(self.export_dir, "IMG_1.aae"), XML_PLIST
+        )
+
+        results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 1)
+        self.assertEqual(results["sidecars_deleted"], 1)
+        self.assertFalse(os.path.exists(sidecar))
+        self.assertEqual(results["skipped_sidecar_files"], [])
+
+
 class TestSkippedSidecarDisplay(unittest.TestCase):
     """display_results renders the new rows, escaping untrusted filenames."""
 
@@ -520,6 +624,18 @@ class TestSkippedSidecarDisplay(unittest.TestCase):
         rendered = capture.get()
         self.assertIn("Sidecar Files Deleted", rendered)
         self.assertIn("3", rendered)
+
+    def test_unexpected_skip_reason_renders_a_label_not_a_raw_code(self):
+        """The 'unexpected_skip' reason (phase 8 review) has a human label."""
+        with self.cli.console.capture() as capture:
+            self.cli.display_skipped_sidecars(
+                [("unexpected_skip", os.path.join(self.export_dir, "a.aae"))]
+            )
+        rendered = capture.get()
+        # A single word, not the full phrase: rich may wrap the table cell at
+        # a space, but never mid-word.
+        self.assertIn("unexpectedly", rendered)
+        self.assertNotIn("unexpected_skip", rendered)
 
     def test_kept_sidecar_demotes_the_success_banner(self):
         """A run with zero failures/quarantines but a kept sidecar must not

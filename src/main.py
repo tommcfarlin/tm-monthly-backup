@@ -8,7 +8,19 @@ import sys
 import click
 
 from src import __version__
-from src.cli_interface import CLIInterface, is_unqualified_success, setup_logging
+
+# ``_has_unexpected_skip`` is cli_interface's own building block for
+# ``is_unqualified_success``; importing it (private name and all) rather than
+# re-deriving "reason != 'junk'" here keeps the closing line's wording from
+# drifting away from the predicate that chose the exit code -- the exact
+# duplicated-decision drift issue #30's review caught in this file once
+# already.
+from src.cli_interface import (
+    CLIInterface,
+    _has_unexpected_skip,
+    is_unqualified_success,
+    setup_logging,
+)
 from src.file_processor import Settings
 
 logger = logging.getLogger(__name__)
@@ -17,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Exit code taxonomy. Each code carries exactly one meaning so a caller can act
 # on the result of a run (documented in ``docs/cli-usage.md``, issue #31).
 EXIT_SUCCESS = 0            # every discovered file was processed; no failures
-EXIT_PARTIAL_FAILURE = 1    # processing ran but one or more files failed
+EXIT_PARTIAL_FAILURE = 1    # completed, but not an unqualified success
 EXIT_PRECONDITION = 2       # cannot run: bad/overlapping dirs, unexpected error
 EXIT_CANCELLED = 130        # user declined the prompt or sent SIGINT (128 + 2)
 
@@ -99,6 +111,50 @@ def determine_exit_code(results: dict) -> int:
     if not is_unqualified_success(results):
         return EXIT_PARTIAL_FAILURE
     return EXIT_SUCCESS
+
+
+def _partial_failure_reasons(results: dict) -> str:
+    """
+    Name every condition that made a run exit :data:`EXIT_PARTIAL_FAILURE`.
+
+    The closing line used to print ``"Completed with {files_failed}
+    failures."`` whenever the exit code was 1 -- but the exit code delegates
+    to :func:`is_unqualified_success`, four of whose five disqualifiers have
+    nothing to do with ``files_failed``, so a quarantine-only run exited 1
+    while announcing "Completed with 0 failures." (phase 8 review). This
+    names the actual reason(s) instead, mirroring
+    ``is_unqualified_success`` clause for clause so the sentence can never
+    again disagree with the code it explains.
+
+    Args:
+        results: The dict returned by ``CLIInterface.process_with_progress``.
+
+    Returns:
+        A comma-joined phrase such as ``"2 failures, 1 quarantined file"``,
+        ready to complete "Completed with {phrase}.".
+    """
+    def counted(count: int, noun: str) -> str:
+        return f"{count} {noun}{'' if count == 1 else 's'}"
+
+    reasons = []
+    if results.get('files_failed', 0):
+        reasons.append(counted(results['files_failed'], 'failure'))
+    if results.get('files_quarantined', 0):
+        reasons.append(counted(results['files_quarantined'], 'quarantined file'))
+    if results.get('sidecars_skipped', 0):
+        reasons.append(counted(results['sidecars_skipped'], 'kept sidecar'))
+    if _has_unexpected_skip(results):
+        reasons.append('an unexpectedly skipped file')
+    if results.get('landing_discrepancies', 0):
+        reasons.append(
+            counted(results['landing_discrepancies'], 'unverified landing')
+        )
+    if not reasons:
+        # Unreachable while the clauses above mirror is_unqualified_success
+        # exactly, but a future disqualifier added there must degrade to a
+        # pointer at the summary, never to an empty "Completed with ." line.
+        return 'issues; see the summary above'
+    return ', '.join(reasons)
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -206,7 +262,10 @@ def main(dry_run, yes, verbose, export_dir, backup_dir, jpeg_quality):
         # (.DS_Store/.localized/Thumbs.db) does not disqualify a run --
         # see ``is_unqualified_success``'s docstring.
         if exit_code == EXIT_PARTIAL_FAILURE:
-            cli.console.print(f"\n[yellow]Completed with {results['files_failed']} failures.[/yellow]")
+            cli.console.print(
+                "\n[yellow]Completed with "
+                f"{_partial_failure_reasons(results)}.[/yellow]"
+            )
         elif (
             not dry_run
             and results.get('files_processed', 0) > 0
