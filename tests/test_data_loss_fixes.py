@@ -30,10 +30,10 @@ from unittest.mock import patch
 from PIL import Image, ImageFile
 
 from src.cli_interface import is_unqualified_success
-from src.file_processor import FileProcessor, Settings
+from src.file_processor import FileProcessor, ProgressReporter, Settings
 from src.heic_converter import HeicConverter
 from src.main import determine_exit_code
-from tests.fixtures import make_exif_jpeg
+from tests.fixtures import make_exif_heic, make_exif_jpeg
 
 PLIST = b'<?xml version="1.0"?><plist version="1.0"><dict/></plist>'
 
@@ -348,6 +348,86 @@ class TestNoTransientConversionIsLeftInExport(_Sandbox):
         self.processor._transient_outputs.add("/tmp/whatever.jpg")
         self.processor.clear_processing_state()
         self.assertEqual(self.processor._transient_outputs, set())
+
+
+class _InterruptOnFirstConversion(ProgressReporter):
+    """Raise the user's Ctrl-C from the first pool-phase progress callback.
+
+    The callback fires inside ``_convert_heic_files_parallel``'s
+    ``as_completed`` loop, so this lands the interrupt at the exact point a
+    real Ctrl-C hits the pool phase -- after at least one conversion has
+    written its transient JPEG into ``export/``.
+    """
+
+    def on_heic_converted(self, path: str) -> None:
+        raise KeyboardInterrupt("user pressed ctrl-c during the pool phase")
+
+
+class TestInterruptedRunStillSweepsTransients(_Sandbox):
+    """Ctrl-C in either phase must not leave a transient JPEG in export/.
+
+    Phase 8 review: the sweep ran only on the normal-completion path, and
+    pool outputs were only recorded when Phase B consumed them -- so both
+    interrupt cases the sweep's docstring claimed to close were open. A
+    KeyboardInterrupt in Phase B left a TRACKED transient in export/; one
+    during the pool phase left a transient that was not even tracked. Either
+    way the next run re-ingests it: a duplicate photograph, or a false
+    "your photos are corrupt" quarantine.
+    """
+
+    def test_interrupt_in_the_place_phase_sweeps_a_tracked_transient(self):
+        """A tracked transient survives Ctrl-C unless the sweep is in a finally."""
+        self._photo("photo_a.jpg", second=1)
+        stray = os.path.join(self.export, "photo_a-deadbeef.jpg")
+
+        def convert_then_interrupt(*args, **kwargs):
+            # Stand in for "the conversion happened, then Ctrl-C landed while
+            # the file was being placed": the transient exists on disk and is
+            # tracked, exactly as after a real inline conversion.
+            shutil.copyfile(os.path.join(self.export, "photo_a.jpg"), stray)
+            self.processor._transient_outputs.add(stray)
+            raise KeyboardInterrupt("user pressed ctrl-c")
+
+        with patch.object(
+            self.processor, "_process_single_file",
+            side_effect=convert_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                self.processor.process_all_files(dry_run=False)
+
+        self.assertFalse(
+            os.path.exists(stray),
+            "a tracked transient JPEG was left in export/ by an interrupted "
+            "run for the next run to re-ingest",
+        )
+
+    def test_interrupt_in_the_pool_phase_leaves_no_stray_jpeg(self):
+        """Pool outputs must be tracked as they arrive, not at consume time.
+
+        A real pool run (at the parallel threshold) interrupted from the
+        first conversion's progress callback: without arrival-time recording
+        plus the completed-future harvest plus the finally-sweep, at least
+        one converted JPEG stays in export/ next to its original HEIC.
+        """
+        for index in range(FileProcessor.HEIC_PARALLEL_THRESHOLD):
+            make_exif_heic(
+                os.path.join(self.export, f"IMG_{index:02d}.heic"),
+                date_time_original=f"2024:05:05 05:05:{index:02d}",
+            )
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.processor.process_all_files(
+                dry_run=False, progress=_InterruptOnFirstConversion()
+            )
+
+        strays = [
+            name for name in os.listdir(self.export) if name.endswith(".jpg")
+        ]
+        self.assertEqual(
+            strays, [],
+            "transient conversions from an interrupted pool phase were left "
+            "in export/",
+        )
 
 
 class TestSourceDrainageIsAudited(_Sandbox):

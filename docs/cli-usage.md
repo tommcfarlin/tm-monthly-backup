@@ -518,7 +518,7 @@ Each code carries exactly one meaning:
 | Code | Meaning | Description |
 |------|---------|-------------|
 | `0` | Success | Every discovered file was processed; zero failures (also returned for a dry run and for an empty export directory) |
-| `1` | Partial failure | Processing ran but one or more files failed; the failures are listed in the summary |
+| `1` | Partial failure | Processing ran but was not an unqualified success: one or more files failed, a file was quarantined as undecodable, an Apple sidecar candidate was kept rather than deleted, a file was skipped for an unexpected (non-junk) reason, or the post-run audit found a recorded landing the filesystem does not corroborate. The closing line and summary name which condition(s) applied. A junk-only skip (`.DS_Store`, `.localized`, `Thumbs.db`) does **not** trigger this -- it still exits `0` |
 | `2` | Precondition failure | The run could not start or was aborted before completing: a missing or unwritable directory, an export/backup overlap, no terminal available for confirmation without `--yes`/`--dry-run`, or an unexpected error. Nothing was processed |
 | `130` | Cancelled | The user declined the confirmation prompt or interrupted the run with `SIGINT` (Ctrl-C); follows the POSIX `128 + signal` convention |
 
@@ -532,9 +532,9 @@ if [ $? -eq 0 ]; then
 fi
 ```
 
-Any non-zero code means at least one file was not processed (`1`), the run never
-started (`2`), or it was cancelled (`130`) -- none of which should be treated as
-a completed, safe run.
+Any non-zero code means the run completed but was not an unqualified success
+(`1`), the run never started (`2`), or it was cancelled (`130`) -- none of which
+should be treated as a completed, safe run.
 
 ## Performance Notes
 

@@ -355,8 +355,14 @@ class TestAccountingIdentity(unittest.TestCase):
         self._write_aae("fake.aae", content=b"just some text, not a plist")
         with open(os.path.join(self.export_dir, ".DS_Store"), "wb") as handle:
             handle.write(b"junk")
-        with open(os.path.join(self.export_dir, ".hidden_note.txt"), "wb") as handle:
-            handle.write(b"not a photo")
+        # `.localized`, not the `.hidden_note.txt` this test used before the
+        # phase 8 review: an unexpected (non-junk) skip now holds the
+        # sidecar-deletion gate (the skipped file may be the very photo a
+        # candidate describes), so a clean run that DOES delete a sidecar can
+        # carry only junk skips. A second junk name keeps files_skipped == 2
+        # and the identity arithmetic below unchanged.
+        with open(os.path.join(self.export_dir, ".localized"), "wb") as handle:
+            handle.write(b"junk")
 
         results = self.processor.process_all_files(dry_run=False)
 
