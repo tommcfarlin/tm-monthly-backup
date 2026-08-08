@@ -354,21 +354,26 @@ class CLIInterface:
 
         return True
 
-    def display_file_scan_results(self, files: List[str]):
-        """
-        Display file scan results in a beautiful table.
-
-        Args:
-            files: List of discovered files
-        """
-        if not files:
-            self.console.print("[yellow]No files found to process[/yellow]")
-            return
-
-        # Categorize files for display
-        self.processor.categorizer.batch_categorize(files)
-        stats = self.processor.categorizer.get_categorization_stats()
-        self.display_categorization_summary(stats)
+    # ``display_file_scan_results`` was removed here (issue #73).
+    #
+    # Issue #13 established a single public entry point and made categorization
+    # happen exactly once per run, and it removed this method's CALL from the run
+    # path -- but not the method, which kept its own
+    # ``self.processor.categorizer.batch_categorize(files)``. That left a live
+    # second categorization entry point reaching past ``process_all_files`` into
+    # a collaborator: ``batch_categorize`` clears and refills
+    # ``categorized_files`` and ``image_metadata``, so any future caller invoking
+    # this after a run would silently rewrite the very state
+    # ``_generate_summary`` reads, and a discovery table rendered from it would
+    # not necessarily describe the run that just happened. Nothing in ``src/``
+    # called it; only tests did.
+    #
+    # ``display_categorization_summary`` below is the real path: it renders the
+    # same table from the stats ``FileProcessor`` already computed in its one
+    # pass, reported up through ``ProgressReporter.on_categorized`` (issue #14).
+    # The empty-input branch this method also carried lives in
+    # ``_CLIProgressReporter.on_no_files``, which is what the run path actually
+    # reaches when the scan finds nothing.
 
     def display_categorization_summary(self, stats: Dict[str, int]):
         """
@@ -470,9 +475,25 @@ class CLIInterface:
             results: Processing results dictionary
             dry_run: Whether this was a dry run
         """
-        # Nothing to render for an empty, cancelled, or no-work result: the
-        # relevant notice was already printed by ``process_with_progress``.
-        if not results or results.get('status') in ('cancelled', 'no_files'):
+        # Nothing to render for an empty or cancelled result: the relevant notice
+        # was already printed by ``process_with_progress``.
+        if not results or results.get('status') == 'cancelled':
+            return
+
+        # A ``no_files`` run is different (issue #73). "Nothing to process" and
+        # "everything was filtered out at the scan boundary" produce the same
+        # status, and this early return suppressed the whole report for both --
+        # so an export containing only `.IMG_1234.jpg` (an interrupted sync's
+        # conflict copy of a real photo) printed "No files found to process" and
+        # nothing else, while the summary had correctly recorded
+        # files_scanned=1, files_skipped=1 and was not an unqualified success.
+        # The one statement the user got was the only false one. When there is
+        # something to explain, explain it; when there genuinely was nothing on
+        # disk, the notice already said so and a table of zeroes adds nothing.
+        if results.get('status') == 'no_files':
+            skipped_files = results.get('skipped_files', [])
+            if skipped_files:
+                self.display_skipped_files(skipped_files)
             return
 
         # Success/failure summary
@@ -776,6 +797,7 @@ class CLIInterface:
         reason_labels = {
             'junk': "Known junk file (e.g. .DS_Store)",
             'hidden': "Hidden file (dotted name)",
+            'not_regular_file': "Not a regular file (pipe, socket, or broken link)",
         }
 
         skipped_table = Table(show_header=True, header_style="bold yellow")
