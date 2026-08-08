@@ -28,11 +28,14 @@ reports the resulting stats *up* to the CLI through
 ``CLIInterface.display_categorization_summary`` renders the discovery table
 from. ``process_with_progress`` no longer calls ``batch_categorize`` at all
 (call site 2 is gone outright); ``display_file_scan_results`` (call site 1)
-still exists and still calls ``batch_categorize`` itself, but is no longer
-invoked anywhere in the real run path (``process_with_progress`` renders the
-discovery table via ``display_categorization_summary`` instead) -- it is dead
-code in the pipeline, exercised only by tests that call it directly and in
-isolation. Profiling the SAME 60-file batch at the current HEAD confirmed
+was, at the time this file was written, still present and still calling
+``batch_categorize`` itself -- unreachable from the run path, but a live second
+entry point that anyone re-wiring it in from ``main()`` would have restored a
+second per-file pass with, and all the tests below still green. Issue #73 removed
+the method outright and added an AST-based guard
+(``tests/test_reporting_gaps.py::TestNoSecondCategorizationEntryPoint``) that
+fails if ``batch_categorize`` is ever called from outside the pipeline again, so
+that hole is closed by construction rather than by the counting below. Profiling the SAME 60-file batch at the current HEAD confirmed
 ``batch_categorize`` now runs exactly once, ``categorize_file`` exactly 60
 times (once per file), and ``_is_generated_content`` exactly 50 times (once
 per eligible file) -- a real, measured 3x reduction, not a projected one.
@@ -56,6 +59,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 from src.cli_interface import CLIInterface
+from src.file_categorizer import FileCategorizer
 from tests.fixtures import make_exif_jpeg, make_png_with_text, write_quicktime_mov
 
 
@@ -87,20 +91,29 @@ class TestGeneratedContentProbedOnce(unittest.TestCase):
         exercises, not just one internal call site.
         """
         cli = _recording_cli(self.export, self.backup)
-        categorizer = cli.processor.categorizer
+        # No instance handle needed any more: the patch is on the class (#68).
         call_counts = Counter()
-        original = categorizer._is_generated_content
+        # Patched on the CLASS with autospec, not on this instance (issue #68).
+        # An instance-level patch counts only calls through the object the test
+        # happens to hold, so a regression that categorized through a NEWLY
+        # CONSTRUCTED FileCategorizer would pass unnoticed -- which is precisely
+        # the shape a second categorization pass would take. The original is
+        # captured off the class (unbound) so it stays correct for whichever
+        # instance the call actually arrives on.
+        original = FileCategorizer._is_generated_content
 
         # Issue #24 gave _is_generated_content the pre-read metadata
         # (exif, ifd0, png_info) as arguments. Forward whatever it is called
         # with rather than pinning an arity, so counting the probe stays
         # independent of the probe's signature.
-        def counting(file_path, *args, **kwargs):
+        def counting(self_categorizer, file_path, *args, **kwargs):
             call_counts[file_path] += 1
-            return original(file_path, *args, **kwargs)
+            return original(self_categorizer, file_path, *args, **kwargs)
 
-        with patch.object(categorizer, "_is_generated_content", side_effect=counting), \
-                patch("src.cli_interface.Confirm.ask", return_value=True):
+        with patch.object(
+            FileCategorizer, "_is_generated_content",
+            autospec=True, side_effect=counting,
+        ), patch("src.cli_interface.Confirm.ask", return_value=True):
             cli.process_with_progress(dry_run=dry_run)
 
         return call_counts
@@ -201,16 +214,21 @@ class TestCategorizeFileCalledOncePerScannedFile(unittest.TestCase):
         all_files = {photo, video, screenshot, unknown, sidecar}
 
         cli = _recording_cli(self.export, self.backup)
-        categorizer = cli.processor.categorizer
+        # No instance handle needed any more: the patch is on the class (#68).
         call_counts = Counter()
-        original = categorizer.categorize_file
+        # Class-level + autospec, for the reason given on the probe test above
+        # (issue #68): an instance patch would miss a pass made through a freshly
+        # constructed categorizer.
+        original = FileCategorizer.categorize_file
 
-        def counting(file_path):
+        def counting(self_categorizer, file_path):
             call_counts[file_path] += 1
-            return original(file_path)
+            return original(self_categorizer, file_path)
 
-        with patch.object(categorizer, "categorize_file", side_effect=counting), \
-                patch("src.cli_interface.Confirm.ask", return_value=True):
+        with patch.object(
+            FileCategorizer, "categorize_file",
+            autospec=True, side_effect=counting,
+        ), patch("src.cli_interface.Confirm.ask", return_value=True):
             cli.process_with_progress(dry_run=False)
 
         self.assertEqual(

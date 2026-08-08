@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 import pillow_heif
 from PIL import Image
 from PIL.ExifTags import Base
+from src.file_processor import ProgressReporter
 
 # Register the HEIF opener so Image.open / Image.save handle HEIC/HEIF, mirroring
 # how src.heic_converter and src.exif_handler enable HEIF support at import time.
@@ -522,3 +523,42 @@ def _require(condition: bool, message: str) -> None:
     """Raise :class:`FixtureError` with ``message`` unless ``condition`` holds."""
     if not condition:
         raise FixtureError(message)
+
+
+class RecordingReporter(ProgressReporter):
+    """A ProgressReporter that records every hook invocation, in firing order.
+
+    One shared double (issue #68). Two near-identical copies lived in
+    ``test_orchestration.py`` and ``test_progress_reporting.py``, each recording
+    the subset its own file happened to assert on -- so every addition to the
+    ``ProgressReporter`` seam had to be mirrored twice or the copies would drift.
+    This is the union of what both needed: the ``on_no_files`` counter the
+    orchestration tests use, and the HEIC/ordering log the progress tests use.
+
+    ``events`` is the combined ordered log -- ``('heic', path)`` or
+    ``('file', path, category, action)`` -- which is what makes assertions about
+    hook ORDERING (not just counts) possible.
+    """
+
+    def __init__(self, proceed=True):
+        self.proceed = proceed
+        self.no_files_calls = 0
+        self.categorized_calls = []   # list of (total, stats)
+        self.files = []               # list of (path, category, action)
+        self.heic_converted = []      # list of paths, in call order
+        self.events = []              # combined ordered log
+
+    def on_no_files(self):
+        self.no_files_calls += 1
+
+    def on_categorized(self, total, stats):
+        self.categorized_calls.append((total, dict(stats)))
+        return self.proceed
+
+    def on_heic_converted(self, path):
+        self.heic_converted.append(path)
+        self.events.append(('heic', path))
+
+    def on_file(self, path, category, action):
+        self.files.append((path, category, action))
+        self.events.append(('file', path, category, action))

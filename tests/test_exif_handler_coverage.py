@@ -465,6 +465,13 @@ class TestHachoirFallbackBranches(unittest.TestCase):
 
 class TestHachoirCreationDateHelper(unittest.TestCase):
     """
+
+    Coverage, not regression evidence (issue #68). These "fail" against pre-#16
+    code only by ``ImportError``, because the symbol under test did not exist
+    yet -- which is true of any new symbol and is not evidence that they
+    discriminate the bug #16 fixed. The behavior they pin is real and otherwise
+    untested, which is why they earn their place; just do not read them as
+    having caught anything.
     _hachoir_creation_date: the get() guard, date->datetime promotion, and
     rejection of any other type (#16).
 

@@ -25,8 +25,27 @@ from unittest.mock import patch
 from rich.console import Console
 
 from src.cli_interface import CLIInterface
-from src.file_processor import FileProcessor, ProgressReporter, Settings
-from tests.fixtures import make_exif_jpeg
+from src.file_processor import FileProcessor, Settings
+
+
+# Real property-list bytes, not a 0-byte file (issue #68).
+#
+# Since issue #57 a sidecar is deleted only when its CONTENT validates as a
+# plist, so a 0-byte `.aae` is skipped as 'not_plist' regardless of any gate --
+# which made the abort test's `assertTrue(os.path.exists(sidecar))` decorative:
+# it would have passed even if the deletion had run. With valid bytes the on-disk
+# assertion discriminates again, alongside the delete_spy that was already
+# load-bearing.
+_SIDECAR_PLIST = b'<?xml version="1.0"?><plist version="1.0"><dict/></plist>'
+
+
+def _write_valid_sidecar(path):
+    """Write an `.aae` whose content actually validates as a plist."""
+    with open(path, "wb") as handle:
+        handle.write(_SIDECAR_PLIST)
+    return path
+
+from tests.fixtures import RecordingReporter, make_exif_jpeg
 
 
 def _recording_cli(export_dir, backup_dir):
@@ -34,26 +53,6 @@ def _recording_cli(export_dir, backup_dir):
     cli = CLIInterface(export_dir, backup_dir)
     cli.console = Console(file=io.StringIO(), record=True, width=120)
     return cli
-
-
-class _RecordingReporter(ProgressReporter):
-    """A ProgressReporter that records every hook invocation."""
-
-    def __init__(self, proceed=True):
-        self.proceed = proceed
-        self.no_files_calls = 0
-        self.categorized_calls = []  # list of (total, stats)
-        self.files = []              # list of (path, category, action)
-
-    def on_no_files(self):
-        self.no_files_calls += 1
-
-    def on_categorized(self, total, stats):
-        self.categorized_calls.append((total, dict(stats)))
-        return self.proceed
-
-    def on_file(self, path, category, action):
-        self.files.append((path, category, action))
 
 
 class TestExactlyOncePerRun(unittest.TestCase):
@@ -74,7 +73,7 @@ class TestExactlyOncePerRun(unittest.TestCase):
             os.path.join(self.export, "b.jpg"),
             date_time_original="2024:02:16 15:31:46",
         )
-        open(os.path.join(self.export, "a.aae"), "wb").close()
+        _write_valid_sidecar(os.path.join(self.export, "a.aae"))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -144,10 +143,10 @@ class TestProgressReporterSeam(unittest.TestCase):
         )
         # A sidecar is deleted, not processed: it counts toward the scanned
         # total but must NOT produce an on_file event.
-        open(os.path.join(self.export, "a.aae"), "wb").close()
+        _write_valid_sidecar(os.path.join(self.export, "a.aae"))
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter(proceed=True)
+        reporter = RecordingReporter(proceed=True)
         processor.process_all_files(dry_run=False, progress=reporter)
 
         # on_categorized fired exactly once, carrying the scanned total (3).
@@ -174,7 +173,7 @@ class TestProgressReporterSeam(unittest.TestCase):
     def test_no_files_fires_on_no_files_only(self):
         """An empty export fires on_no_files and neither of the other hooks."""
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 
         self.assertEqual(reporter.no_files_calls, 1)
@@ -191,7 +190,7 @@ class TestProgressReporterSeam(unittest.TestCase):
         open(sidecar, "wb").close()
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter(proceed=False)
+        reporter = RecordingReporter(proceed=False)
 
         with patch.object(
             processor, "_delete_sidecar_files", wraps=processor._delete_sidecar_files
