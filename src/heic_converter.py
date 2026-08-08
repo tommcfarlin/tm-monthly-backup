@@ -7,7 +7,7 @@ import logging
 import tempfile
 from pathlib import Path
 from typing import Optional
-from PIL import Image
+from PIL import Image, ImageFile
 import pillow_heif
 
 from .media_types import HEIC_EXTENSIONS
@@ -153,14 +153,38 @@ class HeicConverter:
 
     def verify_conversion(self, original_heic: str, converted_jpeg: str) -> bool:
         """
-        Verify that conversion preserved important metadata.
+        Verify a conversion well enough to authorize deleting the original.
+
+        This is the sole gate on an irreversible delete (issue #7): the caller
+        removes the ``.heic`` on a ``True`` return, after which the JPEG is the
+        only surviving copy of that photograph. So the bar is not "does the
+        output look plausible" but "can the output's pixels actually be read
+        back".
+
+        The whole-file decode is the point (whole-branch review). This method
+        previously checked only ``Image.open`` + ``getexif()`` + ``size``, all of
+        which are header reads: a JPEG truncated to half its bytes still reports
+        the correct dimensions and EXIF and so passed, the original was deleted,
+        and the archive kept a file that raises ``OSError: image file is
+        truncated`` the moment anyone opens it -- with the run reporting
+        unqualified success. ``load()`` forces the full decode that catches it,
+        the same reasoning ``FileProcessor._is_decodable_image`` documents for
+        the input side; a header check is not sufficient evidence to destroy the
+        only other copy of a photo.
+
+        Pillow's ``ImageFile.LOAD_TRUNCATED_IMAGES`` would defeat this by making
+        a truncated decode succeed, so it is explicitly forced off for the
+        duration of the decode and restored afterwards rather than trusting the
+        global default -- this gate must not depend on unrelated code (or a
+        dependency) having left that flag alone.
 
         Args:
             original_heic: Path to original HEIC file
             converted_jpeg: Path to converted JPEG file
 
         Returns:
-            True if conversion appears successful
+            True only if the JPEG exists, fully decodes, matches the source
+            dimensions, and preserved EXIF when the source had any.
         """
         try:
             # Check that both files exist
@@ -172,9 +196,18 @@ class HeicConverter:
                 heic_exif = heic_img.getexif()
                 heic_size = heic_img.size
 
-            with Image.open(converted_jpeg) as jpeg_img:
-                jpeg_exif = jpeg_img.getexif()
-                jpeg_size = jpeg_img.size
+            previous_truncated_policy = ImageFile.LOAD_TRUNCATED_IMAGES
+            ImageFile.LOAD_TRUNCATED_IMAGES = False
+            try:
+                with Image.open(converted_jpeg) as jpeg_img:
+                    jpeg_exif = jpeg_img.getexif()
+                    jpeg_size = jpeg_img.size
+                    # The decode that makes this gate meaningful. Raises on a
+                    # truncated or otherwise unreadable JPEG, which the except
+                    # below turns into a False return, keeping the original.
+                    jpeg_img.load()
+            finally:
+                ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated_policy
 
             # Check size preservation
             if heic_size != jpeg_size:

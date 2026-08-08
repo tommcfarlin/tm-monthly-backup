@@ -306,10 +306,20 @@ class TestAccountingIdentity(unittest.TestCase):
 
         # Sanity: every bucket this test set out to populate is actually
         # non-zero, so the identity check below is not vacuously true.
+        #
+        # sidecars_deleted is 0 rather than 1 here, and BOTH candidates land in
+        # sidecars_skipped, because this scenario contains a forced failure: the
+        # whole-branch review found that the old gate let one success unlock
+        # deletion of every .aae while the failed photos sat un-archived in
+        # export/ with their edit history permanently gone, so any failure now
+        # keeps all of them. A deleted sidecar and a failed file can no longer
+        # coexist in one run by design -- the clean-run half of this identity is
+        # asserted in the companion test below, which is where sidecars_deleted
+        # is exercised.
         self.assertEqual(results["files_processed"], 1)
         self.assertEqual(results["files_failed"], 1)
-        self.assertEqual(results["sidecars_deleted"], 1)
-        self.assertEqual(results["sidecars_skipped"], 1)
+        self.assertEqual(results["sidecars_deleted"], 0)
+        self.assertEqual(results["sidecars_skipped"], 2)
         self.assertEqual(results["files_skipped"], 2)
         self.assertEqual(results["files_quarantined"], 0)
 
@@ -324,9 +334,51 @@ class TestAccountingIdentity(unittest.TestCase):
             moved + deleted + skipped + failed,
             "files_scanned must equal moved + deleted + skipped + failed",
         )
-        # And concretely: 1 processed + 1 failed + 1 deleted-sidecar +
-        # 1 skipped-sidecar + 2 scan-skipped = 6 paths on disk.
+        # And concretely: 1 processed + 1 failed + 0 deleted-sidecar +
+        # 2 skipped-sidecar + 2 scan-skipped = 6 paths on disk.
         self.assertEqual(scanned, 6)
+
+    def test_identity_holds_on_a_clean_run_that_does_delete_a_sidecar(self):
+        """The other half: no failure, so the sidecar IS deleted.
+
+        The scenario above can no longer populate ``sidecars_deleted`` (any
+        failure keeps every candidate), so the deleted-sidecar term of the
+        identity is exercised here instead. Together the two cover both sidecar
+        dispositions rather than only the one the old gate happened to allow.
+        """
+        make_exif_jpeg(
+            os.path.join(self.export_dir, "good.jpg"),
+            date_time_original="2024:01:01 01:01:01",
+            color="green",
+        )
+        self._write_aae("good.aae")
+        self._write_aae("fake.aae", content=b"just some text, not a plist")
+        with open(os.path.join(self.export_dir, ".DS_Store"), "wb") as handle:
+            handle.write(b"junk")
+        with open(os.path.join(self.export_dir, ".hidden_note.txt"), "wb") as handle:
+            handle.write(b"not a photo")
+
+        results = self.processor.process_all_files(dry_run=False)
+
+        self.assertEqual(results["files_processed"], 1)
+        self.assertEqual(results["files_failed"], 0)
+        self.assertEqual(results["sidecars_deleted"], 1)
+        self.assertEqual(results["sidecars_skipped"], 1)
+        self.assertEqual(results["files_skipped"], 2)
+        self.assertEqual(results["files_quarantined"], 0)
+        # No failure and nothing unverified, so the archive is trustworthy.
+        self.assertEqual(results["landing_discrepancies"], 0)
+
+        scanned = results["files_scanned"]
+        moved = results["files_processed"] + results["files_quarantined"]
+        skipped = results["files_skipped"] + results["sidecars_skipped"]
+        self.assertEqual(
+            scanned,
+            moved + results["sidecars_deleted"] + skipped + results["files_failed"],
+            "files_scanned must equal moved + deleted + skipped + failed",
+        )
+        # 1 processed + 1 deleted-sidecar + 1 skipped-sidecar + 2 scan-skipped = 5
+        self.assertEqual(scanned, 5)
 
 
 class TestSkippedFileDemotesTheSuccessBanner(unittest.TestCase):
@@ -393,7 +445,16 @@ class TestSkippedFileDemotesTheSuccessBanner(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        # Exit 1, not 0 (whole-branch review). This assertion used to require 0,
+        # which encoded the very inconsistency the review found: the banner and
+        # the standalone success line were both correctly withheld, while
+        # determine_exit_code consulted only files_failed and told a script the
+        # run was clean. A real photo named `.hidden.jpg` -- an interrupted
+        # sync's conflict copy -- is still sitting in export/, so "no file was
+        # left behind" (the documented meaning of 0) is false. The exit code now
+        # delegates to is_unqualified_success, the same predicate driving both
+        # pieces of output asserted below.
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertNotIn("All files processed successfully", result.output)
         self.assertIn("Files Skipped", result.output)
 

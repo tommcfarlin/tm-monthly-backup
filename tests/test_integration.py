@@ -803,6 +803,18 @@ class TestWorkflowIntegration(unittest.TestCase):
         with patch('src.file_processor.shutil.move', side_effect=flaky_move):
             self.processor.process_all_files(dry_run=False)
 
+        # This run forces a move failure, and since the whole-branch review a
+        # failure keeps EVERY sidecar candidate rather than deleting any -- one
+        # success must not unlock deleting the edit history of photos that never
+        # landed. So _deleted_sidecars and _failed_files can no longer both be
+        # populated by a single run, and this test's subject is
+        # clear_processing_state, not the deletion gate. Seeding the one
+        # container directly keeps the emptiness assertions below non-vacuous
+        # for every container the method owns, which is the property under test.
+        self.processor._deleted_sidecars.append(
+            os.path.join(self.export_dir, "seeded-for-reset-coverage.aae")
+        )
+
         # Precondition: every container the method clears is actually populated,
         # otherwise asserting emptiness afterward would be vacuous.
         self.assertTrue(self.processor._processed_files)

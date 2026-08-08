@@ -58,12 +58,31 @@ def determine_exit_code(results: dict) -> int:
     """
     Map a processing-results dict to a process exit code.
 
-    The result is classified before its failure count is consulted so a
-    cancelled run is never reported as a success:
+    The result is classified before its outcome is consulted so a cancelled run
+    is never reported as a success:
 
     * ``status == "cancelled"`` -> :data:`EXIT_CANCELLED`.
-    * any recorded per-file failure -> :data:`EXIT_PARTIAL_FAILURE`.
+    * anything that is not an unqualified success -> :data:`EXIT_PARTIAL_FAILURE`.
     * otherwise (including an empty or dry run) -> :data:`EXIT_SUCCESS`.
+
+    The second rule delegates to :func:`~src.cli_interface.is_unqualified_success`
+    rather than re-deriving a condition (whole-branch review). This function
+    previously consulted only ``files_failed``, which made it a SECOND, weaker
+    success gate that disagreed with the banner the user was looking at: a run
+    that quarantined a file, kept a sidecar whose delete failed, skipped a real
+    hidden file, or -- worst -- detected a landing discrepancy (issue #69) printed
+    a red "the counts above cannot be trusted" panel and then exited ``0``.
+    ``docs/cli-usage.md`` promises a ``0`` means "no file was left behind, so a
+    script can safely act on it", and this release added ``--yes`` specifically
+    for cron and CI, where the exit code is the ONLY signal a caller sees. A
+    caller gated on ``$? -eq 0`` would have cleared ``export/`` on the strength of
+    a run that had just told a human not to trust it.
+
+    Note the deliberate asymmetry with ``files_failed``: junk-only skips
+    (``.DS_Store`` and friends) still exit ``0``, because
+    ``is_unqualified_success`` excludes them for the reasons issue #30 documents
+    -- every macOS export tree carries one, so treating that as a failure would
+    make every ordinary run exit non-zero.
 
     Precondition failures (missing/overlapping directories, unexpected
     exceptions) are decided by the caller before or around processing and map to
@@ -77,7 +96,7 @@ def determine_exit_code(results: dict) -> int:
     """
     if results.get('status') == 'cancelled':
         return EXIT_CANCELLED
-    if results.get('files_failed', 0) > 0:
+    if not is_unqualified_success(results):
         return EXIT_PARTIAL_FAILURE
     return EXIT_SUCCESS
 

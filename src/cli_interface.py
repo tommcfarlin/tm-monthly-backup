@@ -825,6 +825,7 @@ class CLIInterface:
         reason_labels = {
             'missing_landing': "Recorded as filed, but not on disk",
             'duplicate_landing': "Two files recorded to one path",
+            'source_not_drained': "Archived, but the original is still in export/",
         }
 
         discrepancy_table = Table(show_header=True, header_style="bold red")

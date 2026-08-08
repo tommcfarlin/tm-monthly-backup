@@ -404,6 +404,18 @@ class FileProcessor:
         # it is a cross-check rather than a fifth outcome bucket -- see
         # ``_verify_landings`` and the identity note in ``_generate_summary``.
         self._landing_discrepancies: List[Tuple[str, str]] = []
+        # Transient converted-JPEG paths that have been produced but not yet
+        # placed into backup/ (whole-branch review). Every HEIC conversion writes
+        # a `mkstemp` .jpg INSIDE the scanned export tree, so any such file left
+        # behind is re-ingested by the next run -- archived as a duplicate of a
+        # photo already in backup/, or quarantined into backup/corrupt/ as a
+        # false "your photos are corrupt" report. Four separate paths leaked
+        # them: a dying pool worker (BrokenProcessPool discards completed
+        # results, and the backfill converts again), Ctrl-C during either phase,
+        # and a move that fails after conversion. Tracking every output here and
+        # sweeping the survivors in `_sweep_transient_outputs` closes all four at
+        # one point instead of four.
+        self._transient_outputs: Set[str] = set()
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:
@@ -432,17 +444,51 @@ class FileProcessor:
         export_root = Path(export_dir).resolve()
         backup_root = Path(backup_dir).resolve()
 
-        if export_root == backup_root:
+        # Path comparison alone is not sufficient on this tool's primary
+        # platform (whole-branch review). ``resolve()`` expands symlinks and
+        # ``..`` but does not case-fold, and macOS ships case-INSENSITIVE APFS by
+        # default, so ``.../Export`` and ``.../export`` are one directory on disk
+        # that compares unequal as strings. A case-mismatched
+        # ``--export-dir``/``--backup-dir`` pair therefore sailed through every
+        # check below and the run consumed its own archive: archived ``.aae``
+        # files permanently deleted, already-filed photos re-ingested and
+        # re-timestamped a second later on every subsequent run, and
+        # ``unknown/`` accreting ``(1)`` suffixes -- all reported as success.
+        #
+        # ``os.path.samefile`` compares st_dev/st_ino, i.e. the filesystem's own
+        # answer, so it is right on case-insensitive and case-sensitive volumes
+        # alike without this code having to guess which it is on. Guessing via
+        # ``casefold()`` would be actively wrong on Linux, where ``export`` and
+        # ``Export`` really are two directories and rejecting them would break a
+        # legitimate configuration.
+        def _is_same_dir(first: Path, second: Path) -> bool:
+            try:
+                return os.path.samefile(first, second)
+            except OSError:
+                # One of them does not exist yet (a first run creates backup/).
+                # Nothing to alias, so fall back to the string comparison.
+                return first == second
+
+        if _is_same_dir(export_root, backup_root):
             return (
                 "--export-dir and --backup-dir must not be the same directory: "
                 f"{export_root}"
             )
-        if backup_root.is_relative_to(export_root):
+
+        # Nesting has the same case problem, and the same fix: walk each root's
+        # ancestors and ask the filesystem whether any of them IS the other root,
+        # rather than comparing path strings that may differ only in case.
+        def _is_inside(inner: Path, outer: Path) -> bool:
+            if inner.is_relative_to(outer):
+                return True
+            return any(_is_same_dir(ancestor, outer) for ancestor in inner.parents)
+
+        if _is_inside(backup_root, export_root):
             return (
                 f"--backup-dir ({backup_root}) must not be inside --export-dir "
                 f"({export_root}); each run would re-ingest and destroy the archive"
             )
-        if export_root.is_relative_to(backup_root):
+        if _is_inside(export_root, backup_root):
             return (
                 f"--export-dir ({export_root}) must not be inside --backup-dir "
                 f"({backup_root}); the source tree would be consumed from within "
@@ -612,28 +658,52 @@ class FileProcessor:
         # counts a quarantined file (issue #58; genuinely undecodable, but
         # its bytes DID land safely in backup/corrupt/, in both dry and real
         # runs) as "archived", which is correct: nothing was lost for it.
+        #
+        # Sweep before auditing, and audit before deleting anything (whole-branch
+        # review): both orderings were wrong.
+        #
+        # The sweep removes converted JPEGs that were produced but never placed,
+        # so the drainage check below does not trip over this run's own leftovers.
+        #
+        # The audit ran AFTER sidecar deletion, which meant a run could
+        # permanently delete a user's edit history and only then discover its
+        # archive did not verify. That is issue #57's failure mode arriving by a
+        # different route, so the audit now runs first and its result is an input
+        # to the deletion decision.
+        self._sweep_transient_outputs()
+        self._verify_landings(dry_run)
+
         attempted = sum(len(files) for files in processable_files.values())
         archived = attempted - len(self._failed_files)
-        if attempted > 0 and archived <= 0:
+        # Any failure at all keeps every sidecar, not just an all-fail run.
+        #
+        # The old gate was `archived <= 0`: run-level all-or-nothing, so ONE
+        # success out of four unlocked deletion of ALL four .aae files while the
+        # other three photos sat un-archived in export/ with their edit history
+        # permanently gone. Sidecars are not paired to their photos anywhere in
+        # this pipeline, so the only honest gate is a run-level one that is
+        # actually conservative: if anything failed, or the archive did not
+        # verify, keep all of them. The cost is that an unrelated single failure
+        # postpones sidecar cleanup to the next clean run -- they stay on disk,
+        # reported by name in the Kept table, which is the recoverable direction.
+        # The alternative cost is unrecoverable.
+        blocking_failures = len(self._failed_files)
+        blocking_discrepancies = len(self._landing_discrepancies)
+        if attempted > 0 and (
+            archived <= 0 or blocking_failures > 0 or blocking_discrepancies > 0
+        ):
             logger.warning(
-                "Every processable file failed (%s of %s); keeping all %s "
-                "sidecar candidate(s) rather than delete a user's edit "
-                "history for photos that never safely landed in backup/",
-                len(self._failed_files), attempted,
+                "Not every processable file was safely archived (%s failed, %s "
+                "unverified, of %s attempted); keeping all %s sidecar "
+                "candidate(s) rather than delete a user's edit history for "
+                "photos that may never have landed in backup/",
+                blocking_failures, blocking_discrepancies, attempted,
                 len(categorized[FileCategory.SIDECAR]),
             )
             for file_path in categorized[FileCategory.SIDECAR]:
                 self._skipped_sidecars.append(('run_archived_nothing', file_path))
         else:
             self._delete_sidecar_files(categorized[FileCategory.SIDECAR], dry_run)
-
-        # Audit the run's own bookkeeping against the filesystem before
-        # reporting it (issue #69). Deliberately placed here rather than inside
-        # _generate_summary: the two early returns above are reached before any
-        # file was processed (a missing export directory, or a caller declining
-        # the on_categorized gate), so there is nothing to verify on those paths,
-        # and _generate_summary stays a pure reader of the accumulators.
-        self._verify_landings(dry_run)
 
         # Generate summary
         return self._generate_summary()
@@ -1113,6 +1183,7 @@ class FileProcessor:
                 # Mirror the bookkeeping convert_heic_to_jpeg records in-process
                 # so conversion stats (heic_conversions) match sequential.
                 self.heic_converter.converted_files.append((file_path, output_path))
+                self._transient_outputs.add(output_path)
                 return output_path
             self.heic_converter.failed_conversions.append(
                 (file_path, error or 'HEIC conversion failed')
@@ -1120,6 +1191,8 @@ class FileProcessor:
             return None
         # No pooled result: convert inline, exactly as the pre-#42 code did.
         result = self.heic_converter.convert_heic_to_jpeg(file_path)
+        if result is not None:
+            self._transient_outputs.add(result)
         if progress is not None:
             progress.on_heic_converted(file_path)
         return result
@@ -1357,12 +1430,29 @@ class FileProcessor:
                     # symlink's target bytes and removes only the link, so the
                     # archive holds the real photo rather than a pointer (#63).
                     self._place_source_content(current_path, target_path)
-                except Exception:
+                except BaseException:
                     # The move failed after the name was reserved; drop the empty
                     # placeholder so a 0-byte stub is not left behind in backup/.
+                    #
+                    # BaseException, not Exception (whole-branch review): the
+                    # window between the O_EXCL reservation and the move
+                    # completing is exactly where a user's Ctrl-C lands, and
+                    # KeyboardInterrupt is not an Exception. Catching only
+                    # Exception left a 0-byte file in backup/ that is
+                    # indistinguishable from an archived photo, permanently
+                    # claims that timestamp stem (_taken_names seeds it, so the
+                    # real photo lands a second later on the next run), and is
+                    # never reported. The interrupt is re-raised unchanged.
                     self._discard_reservation(target_path)
                     raise
                 logger.debug("Moved: %s -> %s", current_path, target_path)
+
+                # The transient JPEG has left export/ for backup/, so it is no
+                # longer a stray for the end-of-run sweep to clean up. Discarded
+                # only after the move succeeded: on the failure path above it is
+                # still sitting in export/ and MUST stay tracked, which is the
+                # leak the sweep exists to catch (whole-branch review).
+                self._transient_outputs.discard(current_path)
 
                 # The verified-good JPEG is now safely filed in backup/, so it is
                 # finally safe to delete the original HEIC. Route through the
@@ -1371,9 +1461,26 @@ class FileProcessor:
                 # A conversion that failed verification is recorded as a failure
                 # above and never reaches this line (issue #7).
                 if heic_original_to_delete is not None:
-                    self.heic_converter.cleanup_original_heic(
+                    # The return value is load-bearing (whole-branch review): a
+                    # failed unlink (EPERM, a locked or immutable file) used to be
+                    # discarded, so the run reported unqualified success with the
+                    # original still sitting in export/ -- and the next run
+                    # archived that photo a SECOND time under a bumped timestamp.
+                    # A source that did not drain is not a clean success.
+                    if not self.heic_converter.cleanup_original_heic(
                         heic_original_to_delete, verify_first=False
-                    )
+                    ):
+                        # Logged here, where the specific cause is known, but NOT
+                        # recorded here: the source is this file's own
+                        # ``original_path``, so ``_verify_landings``' drainage
+                        # check records it once. Appending in both places would
+                        # double-report one file.
+                        logger.error(
+                            "Archived the converted JPEG but could not delete the "
+                            "original: %s remains in the export directory and "
+                            "would be archived again by the next run",
+                            heic_original_to_delete,
+                        )
 
                 # Record successful processing
                 self._processed_files.append({
@@ -1442,9 +1549,13 @@ class FileProcessor:
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
                 self._place_source_content(file_path, target_path)
-            except Exception:
+            except BaseException:
                 # The move failed after the name was reserved; drop the empty
                 # placeholder so a 0-byte stub is not left behind in backup/.
+                # BaseException, not Exception: KeyboardInterrupt lands in this
+                # exact window and is not an Exception, so catching only
+                # Exception left an unreported 0-byte stub squatting on the
+                # reserved name (whole-branch review). Re-raised unchanged.
                 self._discard_reservation(target_path)
                 raise
             logger.info("Moved unrecognized file: %s -> %s", file_path, target_path)
@@ -1582,9 +1693,13 @@ class FileProcessor:
             target_path = self._reserve_named_destination(target_dir, original_name)
             try:
                 self._place_source_content(file_path, target_path)
-            except Exception:
+            except BaseException:
                 # The move failed after the name was reserved; drop the empty
                 # placeholder so a 0-byte stub is not left behind in backup/.
+                # BaseException, not Exception: KeyboardInterrupt lands in this
+                # exact window and is not an Exception, so catching only
+                # Exception left an unreported 0-byte stub squatting on the
+                # reserved name (whole-branch review). Re-raised unchanged.
                 self._discard_reservation(target_path)
                 raise
             logger.warning(
@@ -1836,6 +1951,45 @@ class FileProcessor:
         else:
             shutil.move(source, destination)
 
+    def _sweep_transient_outputs(self) -> None:
+        """
+        Delete any converted JPEG that was produced but never placed.
+
+        A HEIC conversion writes its output with ``mkstemp`` **inside the scanned
+        export tree** (issue #26 keeps it on the same filesystem so the later move
+        stays a cheap rename). Anything still there when the run ends is an
+        artifact of this run that the NEXT run would ingest as a photograph:
+        a complete one is archived as a duplicate of a photo already in
+        ``backup/``, and a truncated or empty one is quarantined into
+        ``backup/corrupt/`` -- telling the user their photos are corrupt when
+        the tool wrote the file itself. Four paths leak them (a dying pool
+        worker, Ctrl-C in either phase, a move that fails after conversion), and
+        sweeping here closes all four at one point.
+
+        Safety: this only ever unlinks paths recorded in ``_transient_outputs``,
+        i.e. paths this run created. It never globs or pattern-matches the export
+        tree, because ``mkstemp``'s ``<stem>-XXXXXXXX.jpg`` shape is
+        indistinguishable from a real user file like ``IMG_1003-edited.jpg`` --
+        deleting one of those would be the very class of bug this method exists
+        to prevent.
+        """
+        for path in sorted(self._transient_outputs):
+            try:
+                os.unlink(path)
+                logger.debug("Removed unplaced transient conversion: %s", path)
+            except FileNotFoundError:
+                # Already gone (moved, or removed by the converter's own failure
+                # cleanup). Nothing to do.
+                pass
+            except OSError as error:
+                # Best effort: a stray temp file is a problem for the next run,
+                # but failing to remove it must not mask the run's real outcome.
+                logger.warning(
+                    "Could not remove unplaced transient conversion %s: %s",
+                    path, error,
+                )
+        self._transient_outputs.clear()
+
     def _verify_landings(self, dry_run: bool) -> None:
         """
         Cross-check every recorded landing against the filesystem (issue #69).
@@ -1925,6 +2079,34 @@ class FileProcessor:
                     final_path,
                 )
                 self._landing_discrepancies.append(('missing_landing', final_path))
+
+        # Third property: the SOURCE actually drained (whole-branch review).
+        #
+        # The two checks above audit backup/ only, which left a whole family of
+        # failures invisible: a HEIC original whose unlink failed, and any file
+        # whose source survived the move, stay in export/ while the run reports
+        # unqualified success -- and the next run archives that photo a SECOND
+        # time under a bumped timestamp that is not its capture time. "export/ is
+        # fully drained" is a documented invariant of a successful run, so it is
+        # audited like one rather than assumed.
+        #
+        # ``lexists``, not ``exists``: for a symlink source only the link is
+        # removed (issue #63), and a leftover broken link is still an undrained
+        # source that the next scan would revisit.
+        for record in recorded:
+            original_path = record.get('original_path')
+            if not original_path:
+                continue
+            if os.path.lexists(original_path):
+                logger.error(
+                    "Accounting check failed: %s was recorded as successfully "
+                    "filed but its source is still present in the export "
+                    "directory, and would be archived again by the next run",
+                    original_path,
+                )
+                self._landing_discrepancies.append(
+                    ('source_not_drained', original_path)
+                )
 
     def _generate_summary(self) -> Dict[str, Any]:
         """
@@ -2087,6 +2269,7 @@ class FileProcessor:
         self._skipped_sidecars.clear()
         self._skipped_files.clear()
         self._landing_discrepancies.clear()
+        self._transient_outputs.clear()
         self._converted_heic = {}
         self.exif_handler.clear_missing_files_log()
         self.heic_converter.clear_stats()
