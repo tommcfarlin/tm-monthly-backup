@@ -1164,5 +1164,157 @@ class TestExifHandlerIntegration(unittest.TestCase):
         self.assertEqual(results, expected)
 
 
+class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
+    """Issue #72: a filename's local time wins over mvhd when it is the same instant.
+
+    Before this, a real screen recording whose name carried the correct LOCAL
+    time was archived from the UTC mvhd instead -- four hours late, and on the
+    wrong calendar DAY for any capture after 20:00 EDT.
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _path(self, name):
+        path = os.path.join(self.temp_dir, name)
+        open(path, "wb").close()
+        return path
+
+    def test_edt_offset_is_recognized_and_the_local_reading_used(self):
+        """The real case: mvhd 12:58:01 UTC, filename 08:58:01 local."""
+        path = self._path("ScreenRecording_03-05-2024 09-15-00_1.mp4")
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir",
+            return_value=datetime(2026, 7, 1, 12, 58, 1),
+        ):
+            result = self.handler._extract_video_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+
+    def test_a_late_evening_capture_keeps_the_correct_calendar_day(self):
+        """The consequence that matters: 22:30 EDT is 02:30 UTC the NEXT day."""
+        path = self._path("ScreenRecording_03-05-2024 22-30-00.mp4")
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir",
+            return_value=datetime(2026, 7, 2, 2, 30, 0),
+        ):
+            result = self.handler._extract_video_timestamp(path)
+        self.assertEqual(
+            result, datetime(2026, 7, 1, 22, 30, 0),
+            "the capture was filed under the following day",
+        )
+
+    def test_a_sub_hour_offset_zone_is_accepted(self):
+        """India is +5:30; rejecting non-whole-hour offsets would exclude it."""
+        path = self._path("Screen Recording 03-05-2024 18-45-00.mp4")
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir",
+            return_value=datetime(2026, 7, 1, 12, 58, 1),
+        ):
+            result = self.handler._extract_video_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 1, 18, 28, 1))
+
+    def test_unrelated_filename_digits_do_not_outrank_the_container(self):
+        """The cross-check is what makes preferring the filename safe."""
+        path = self._path("dji_fly_20240115_101112_105_1700000000000_photo.mp4")
+        mvhd = datetime(2026, 7, 1, 12, 58, 1)
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
+        ):
+            result = self.handler._extract_video_timestamp(path)
+        self.assertEqual(
+            result, mvhd,
+            "an unrelated number pattern was allowed to outrank real metadata",
+        )
+
+    def test_an_implausible_offset_is_rejected(self):
+        """Beyond +/-14h cannot be a zone; keep the container reading."""
+        path = self._path("ScreenRecording_03-05-2024 09-15-00.mp4")
+        mvhd = datetime(2026, 7, 3, 4, 0, 0)
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
+        ):
+            self.assertEqual(self.handler._extract_video_timestamp(path), mvhd)
+
+    def test_an_offset_that_is_not_a_quarter_hour_is_rejected(self):
+        path = self._path("ScreenRecording_03-05-2024 09-15-00.mp4")
+        mvhd = datetime(2026, 7, 1, 17, 58, 30)
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
+        ):
+            self.assertEqual(self.handler._extract_video_timestamp(path), mvhd)
+
+    def test_no_container_time_leaves_the_filename_to_the_normal_fallback(self):
+        """With no mvhd there is nothing to confirm against."""
+        path = self._path("ScreenRecording_03-05-2024 09-15-00.mp4")
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir", return_value=None
+        ):
+            self.assertIsNone(self.handler._extract_video_timestamp(path))
+        # ...and the chain still reaches the filename on its own.
+        self.assertEqual(
+            self.handler.get_fallback_timestamp(path),
+            datetime(2026, 7, 1, 8, 58, 1),
+        )
+
+    def test_the_apple_key_still_outranks_both(self):
+        """Issue #28's precedence is unchanged: a real local key wins outright."""
+        path = os.path.join(self.temp_dir, "ScreenRecording_03-05-2024 09-15-00.mov")
+        write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
+        with patch.object(
+            self.handler, "_extract_video_timestamp_hachoir",
+            return_value=datetime(2026, 7, 1, 12, 58, 1),
+        ):
+            result = self.handler._extract_video_timestamp(path)
+        self.assertEqual(result, datetime(2026, 7, 29, 19, 23, 34))
+
+
+class TestQuickTimeEpochSentinelOnTheAppleKey(unittest.TestCase):
+    """Issue #72: the 1904 sentinel can arrive through the Apple key too."""
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_zero_epoch_in_the_apple_key_is_rejected(self):
+        """A re-muxer synthesizing this key from a zeroed mvhd writes 1904.
+
+        The check was scoped to the mvhd path on the reasoning that this field
+        "has no zero-epoch encoding of its own" -- true of the encoding, not of
+        the value, which parses fine and would be filed as 1904.01.01.00.00.00.
+        """
+        path = os.path.join(self.temp_dir, "remuxed.mov")
+        write_quicktime_mov(path, "1904-01-01T00:00:00+0000")
+        self.assertIsNone(self.handler._extract_quicktime_creationdate(path))
+
+    def test_a_real_local_creationdate_is_still_accepted(self):
+        """The sentinel check must not reject genuine Apple metadata."""
+        path = os.path.join(self.temp_dir, "real.mov")
+        write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
+        self.assertEqual(
+            self.handler._extract_quicktime_creationdate(path),
+            datetime(2026, 7, 29, 19, 23, 34),
+        )
+
+    def test_a_1904_date_that_is_not_the_sentinel_instant_is_untouched(self):
+        """Only the zero-epoch instant is a sentinel, not the whole year.
+
+        A genuine (if improbable) 1904 date that is not midnight on Jan 1 is not
+        the QuickTime zero value and must survive the plausibility floor, which
+        issue #62 deliberately set at 1826 to protect scanned family photos.
+        """
+        self.assertFalse(
+            self.handler._is_quicktime_epoch_sentinel(datetime(1904, 6, 15, 12, 0, 0))
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
