@@ -37,12 +37,25 @@ class Settings:
     path can mutate configuration mid-run: every stage of a run reads the same
     values from the initial scan through the final summary.
 
+    Issue #67 completed what #41 started. The directories used to be positional
+    parameters on ``FileProcessor.__init__`` while everything else lived here,
+    which left two configuration channels on one constructor and made the
+    immutability guarantee partial: ``jpeg_quality`` could not change mid-run,
+    but ``self.export_dir`` and ``self.backup_dir`` were plain mutable
+    attributes. They now live here too, so "settings are immutable for the
+    duration of a run" is true of all of them, and this record is the single
+    thing a caller constructs.
+
     Args:
+        export_dir: Directory containing exported files.
+        backup_dir: Directory for organized output files.
         jpeg_quality: JPEG quality (1-100) passed to
             :class:`HeicConverter` for HEIC->JPEG conversion. Default 98
             matches `HeicConverter`'s own default (issue #40).
     """
 
+    export_dir: str = "export"
+    backup_dir: str = "backup"
     jpeg_quality: int = 98
 
 
@@ -291,25 +304,22 @@ class FileProcessor:
         """
         return filename.lower() in self.HIDDEN_FILE_DENYLIST
 
-    def __init__(
-        self,
-        export_dir: str = "export",
-        backup_dir: str = "backup",
-        settings: Optional[Settings] = None,
-    ):
+    def __init__(self, settings: Optional[Settings] = None):
         """
         Initialize file processor.
 
+        One argument, one configuration channel (issue #67). Issue #41 bundled
+        the tunables into :class:`Settings` but left the directories as
+        positional parameters, so a reader had to reason about two shapes and
+        only some of the configuration was actually immutable. There is no
+        backward-compatible two-positional form: keeping one would have
+        preserved exactly the mixed shape this change exists to remove.
+
         Args:
-            export_dir: Directory containing exported files
-            backup_dir: Directory for organized output files
-            settings: Immutable HEIC conversion tunables (issue
-                #41) -- see :class:`Settings`. Defaults to ``Settings()``
-                (quality 98, originals deleted) when omitted, so every
-                existing caller is unaffected.
+            settings: Immutable run configuration -- directories and HEIC
+                conversion tunables. See :class:`Settings`. Defaults to
+                ``Settings()`` (``export/``, ``backup/``, quality 98).
         """
-        self.export_dir = export_dir
-        self.backup_dir = backup_dir
         self.settings = settings if settings is not None else Settings()
 
         # Initialize component handlers
@@ -416,6 +426,24 @@ class FileProcessor:
         # sweeping the survivors in `_sweep_transient_outputs` closes all four at
         # one point instead of four.
         self._transient_outputs: Set[str] = set()
+
+    # Read-only views onto the frozen settings (issue #67).
+    #
+    # These are properties rather than attributes assigned in __init__ so the
+    # immutability claim actually holds: ``processor.export_dir = ...`` now
+    # raises AttributeError instead of silently repointing a run at a different
+    # directory partway through. Kept as attribute-shaped names because dozens of
+    # internal references and several tests read ``self.export_dir`` /
+    # ``self.backup_dir``, and there is no reason to churn those for a rename.
+    @property
+    def export_dir(self) -> str:
+        """Directory containing exported files (immutable for the run)."""
+        return self.settings.export_dir
+
+    @property
+    def backup_dir(self) -> str:
+        """Directory for organized output files (immutable for the run)."""
+        return self.settings.backup_dir
 
     @staticmethod
     def directory_overlap_error(export_dir: str, backup_dir: str) -> Optional[str]:

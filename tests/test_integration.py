@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.file_categorizer import FileCategory
 from src.cli_interface import CLIInterface
 from tests.fixtures import make_exif_heic, make_exif_jpeg, make_no_exif_jpeg
@@ -30,7 +30,7 @@ class TestWorkflowIntegration(unittest.TestCase):
         os.makedirs(self.export_dir, exist_ok=True)
 
         # Initialize file processor
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Clean up test environment"""
@@ -940,7 +940,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
         os.makedirs(self.export_dir, exist_ok=True)
 
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Clean up test environment"""

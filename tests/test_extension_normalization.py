@@ -33,7 +33,7 @@ from PIL import Image
 from PIL.ExifTags import Base
 
 from src.file_categorizer import FileCategorizer
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_heic, make_exif_jpeg
 
 
@@ -126,7 +126,7 @@ class TestExtensionNormalizationEndToEnd(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -446,7 +446,7 @@ class TestExtensionNormalizationDryRunParity(unittest.TestCase):
         longer comment in ``test_dry_run_parity.py`` for the full reasoning.
         The property under test (dry-run plan equals real-run landings) is
         unchanged; only the observation level moved."""
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
         capture = _PlanCapture()
         logger = logging.getLogger("src.file_processor")
         previous_level = logger.level
@@ -502,7 +502,7 @@ class TestExtensionNormalizationDryRunParity(unittest.TestCase):
 
         dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_processor.process_all_files(dry_run=False)
         real_tree = self._relative_backup_tree(self.real_backup)
 
@@ -544,7 +544,7 @@ class TestExtensionNormalizationDryRunParity(unittest.TestCase):
 
         dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_processor.process_all_files(dry_run=False)
         real_new_file = os.path.join(
             self.real_backup, "photos", "2024.01.15.14.30.46.jpg"

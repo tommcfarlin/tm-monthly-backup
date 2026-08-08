@@ -263,8 +263,13 @@ class CLIInterface:
                 this default and ``Settings``'s own default cannot drift
                 apart silently.
         """
-        settings = Settings(jpeg_quality=jpeg_quality)
-        self.processor = FileProcessor(export_dir, backup_dir, settings=settings)
+        self.processor = FileProcessor(
+            Settings(
+                export_dir=export_dir,
+                backup_dir=backup_dir,
+                jpeg_quality=jpeg_quality,
+            )
+        )
         self.console = console
 
     def display_welcome(self):

@@ -34,6 +34,7 @@ and, for the CLI-level tests, through `src.main.main` via `CliRunner`):
   originals identically.
 """
 
+from dataclasses import replace
 import os
 import shutil
 import tempfile
@@ -135,9 +136,7 @@ class TestJpegQualityReachesConverter(unittest.TestCase):
         backup_dir = os.path.join(self.temp_dir, f"backup_{quality}")
         os.makedirs(export_dir)
         _noisy_heic(os.path.join(export_dir, "noisy.heic"))
-        processor = FileProcessor(
-            export_dir, backup_dir, settings=Settings(jpeg_quality=quality)
-        )
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir, jpeg_quality=quality))
         summary = processor.process_all_files(dry_run=False)
         self.assertEqual(summary["files_failed"], 0)
         photos_dir = os.path.join(backup_dir, "photos")
@@ -163,7 +162,7 @@ class TestJpegQualityReachesConverter(unittest.TestCase):
         """Omitting jpeg_quality from Settings still reaches HeicConverter."""
         export_dir = os.path.join(self.temp_dir, "export_default")
         os.makedirs(export_dir)
-        processor = FileProcessor(export_dir, os.path.join(self.temp_dir, "backup_default"))
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=os.path.join(self.temp_dir, "backup_default")))
         self.assertEqual(processor.heic_converter.jpeg_quality, 98)
 
 
@@ -184,7 +183,7 @@ class TestHeicOriginalIsDeletedAfterConversion(unittest.TestCase):
             os.path.join(self.export_dir, "IMG_0101.heic"),
             date_time_original="2024:02:02 08:01:00",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         summary = processor.process_all_files(dry_run=False)
 
@@ -237,7 +236,7 @@ class TestVerifyBeforeDelete(unittest.TestCase):
             date_time_original="2024:02:02 09:00:00",
         )
         original_bytes = Path(heic).read_bytes()
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with mock.patch.object(
             processor.heic_converter,
@@ -299,7 +298,7 @@ class TestPooledVsSequentialWithOptions(unittest.TestCase):
         export_dir = os.path.join(self.root, f"{tag}_export")
         backup_dir = os.path.join(self.root, f"{tag}_backup")
         self._build_export(export_dir)
-        processor = FileProcessor(export_dir, backup_dir, settings=settings)
+        processor = FileProcessor(replace(settings, export_dir=export_dir, backup_dir=backup_dir))
         original_parallel = FileProcessor._convert_heic_files_parallel
         with mock.patch.object(
             FileProcessor, "_convert_heic_files_parallel", autospec=True

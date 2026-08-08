@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.cli_interface import CLIInterface
 from tests.fixtures import make_exif_jpeg
 
@@ -69,7 +69,7 @@ class TestContentValidationBeforeDeletion(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -200,7 +200,7 @@ class TestDeletionRunsAfterCategoryProcessing(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -228,7 +228,7 @@ class TestDeletionRunsAfterCategoryProcessing(unittest.TestCase):
                 )
                 _write(os.path.join(export_dir, "IMG_2000.aae"), XML_PLIST)
 
-                processor = FileProcessor(export_dir, backup_dir)
+                processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
                 order = []
                 real_process_category = processor._process_category
                 real_delete = processor._delete_sidecar_files
@@ -317,10 +317,10 @@ class TestDryRunRealRunParity(unittest.TestCase):
         self._build_export(dry_export)
         self._build_export(real_export)
 
-        dry_results = FileProcessor(dry_export, dry_backup).process_all_files(
+        dry_results = FileProcessor(Settings(export_dir=dry_export, backup_dir=dry_backup)).process_all_files(
             dry_run=True
         )
-        real_results = FileProcessor(real_export, real_backup).process_all_files(
+        real_results = FileProcessor(Settings(export_dir=real_export, backup_dir=real_backup)).process_all_files(
             dry_run=False
         )
 
@@ -345,9 +345,7 @@ class TestDryRunRealRunParity(unittest.TestCase):
         self._build_export(export_dir)
 
         with patch("src.file_processor.os.remove") as mock_remove:
-            results = FileProcessor(
-                export_dir, os.path.join(self.temp_dir, "backup")
-            ).process_all_files(dry_run=True)
+            results = FileProcessor(Settings(export_dir=export_dir, backup_dir=os.path.join(self.temp_dir, "backup"))).process_all_files(dry_run=True)
 
         mock_remove.assert_not_called()
         self.assertEqual(results["sidecars_deleted"], 2)
@@ -385,7 +383,7 @@ class TestFailedRunLeavesSidecarsIntact(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)

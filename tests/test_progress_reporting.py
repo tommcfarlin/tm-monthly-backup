@@ -40,7 +40,7 @@ from rich.console import Console
 from rich.text import Text
 
 from src.cli_interface import CLIInterface, _CLIProgressReporter
-from src.file_processor import FileProcessor, ProgressReporter
+from src.file_processor import FileProcessor, ProgressReporter, Settings
 from tests.fixtures import make_exif_heic, make_exif_jpeg
 
 
@@ -100,7 +100,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
             )
             paths.append(path)
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         self.assertLess(len(paths), processor.HEIC_PARALLEL_THRESHOLD)
         reporter = _RecordingReporter()
 
@@ -135,7 +135,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
             )
             paths.append(path)
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         self.assertGreaterEqual(len(paths), processor.HEIC_PARALLEL_THRESHOLD)
         reporter = _RecordingReporter()
 
@@ -163,7 +163,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
                 os.path.join(self.export, f"IMG_{index:04d}.heic"),
                 date_time_original=f"2024:03:10 09:15:{index:02d}",
             )
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter()
 
         processor.process_all_files(dry_run=True, progress=reporter)
@@ -197,7 +197,7 @@ class TestCategorizedStatsCarryHeicCount(unittest.TestCase):
             date_time_original="2024:01:17 14:30:45",
         )
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 
@@ -229,7 +229,7 @@ class TestOnFileActionReflectsPhase(unittest.TestCase):
             date_time_original="2024:01:16 14:30:45",
         )
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 

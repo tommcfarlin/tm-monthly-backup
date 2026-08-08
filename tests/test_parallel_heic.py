@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 from unittest.mock import patch
 
 import src.file_processor as fp_module
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_heic
 
 
@@ -98,7 +98,7 @@ class TestParallelSequentialEquivalence(unittest.TestCase):
         export_dir = os.path.join(self.root, f"{tag}_export")
         backup_dir = os.path.join(self.root, f"{tag}_backup")
         _build_fixture_export(export_dir)
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
         if force_sequential:
             # Raise the threshold out of reach so no pool spawns and every HEIC
             # is converted inline -- the genuine pre-#42 sequential code path.
@@ -151,13 +151,13 @@ class TestWorkerCap(unittest.TestCase):
     """The pool must be capped, never sized to os.cpu_count()."""
 
     def test_worker_count_capped_below_cpu_count(self):
-        processor = FileProcessor("export", "backup")
+        processor = FileProcessor(Settings(export_dir="export", backup_dir="backup"))
         with patch("src.file_processor.os.cpu_count", return_value=10):
             # Plenty of files, but the cap (6) wins over 10 logical CPUs.
             self.assertEqual(processor._heic_worker_count(100), 6)
 
     def test_worker_count_bounded_by_file_count(self):
-        processor = FileProcessor("export", "backup")
+        processor = FileProcessor(Settings(export_dir="export", backup_dir="backup"))
         with patch("src.file_processor.os.cpu_count", return_value=10):
             self.assertEqual(processor._heic_worker_count(3), 3)
 
@@ -166,7 +166,7 @@ class TestWorkerCap(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         export_dir = os.path.join(root, "export")
         _build_fixture_export(export_dir)
-        processor = FileProcessor(export_dir, os.path.join(root, "backup"))
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=os.path.join(root, "backup")))
 
         seen = {}
         real_pool = fp_module.ProcessPoolExecutor
@@ -199,7 +199,7 @@ class TestThreshold(unittest.TestCase):
                 os.path.join(export_dir, f"IMG_{index:04d}.heic"),
                 date_time_original=f"2024:05:01 12:00:{index:02d}",
             )
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
 
         with patch.object(
             fp_module, "ProcessPoolExecutor"
@@ -224,7 +224,7 @@ class TestDryRunNoPool(unittest.TestCase):
         backup_dir = os.path.join(root, "backup")
         _build_fixture_export(export_dir)  # exceeds threshold
         before = sorted(os.listdir(export_dir))
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
 
         with patch.object(fp_module, "ProcessPoolExecutor") as pool_ctor:
             summary = processor.process_all_files(dry_run=True)
@@ -247,7 +247,7 @@ class TestWorkerFailureHandling(unittest.TestCase):
         export_dir = os.path.join(root, "export")
         backup_dir = os.path.join(root, "backup")
         _build_fixture_export(export_dir)  # includes one BROKEN.heic
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
 
         summary = processor.process_all_files(dry_run=False)
 

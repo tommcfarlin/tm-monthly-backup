@@ -30,7 +30,7 @@ from unittest.mock import patch
 from PIL import Image, ImageFile
 
 from src.cli_interface import is_unqualified_success
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.heic_converter import HeicConverter
 from src.main import determine_exit_code
 from tests.fixtures import make_exif_jpeg
@@ -44,7 +44,7 @@ class _Sandbox(unittest.TestCase):
         self.export = os.path.join(self.temp_dir, "export")
         self.backup = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
+        self.processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)

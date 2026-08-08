@@ -28,7 +28,7 @@ import unittest
 from unittest.mock import patch
 
 from src.cli_interface import CLIInterface, is_unqualified_success
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.main import determine_exit_code
 from tests.fixtures import make_exif_jpeg
 
@@ -39,7 +39,7 @@ class _Sandbox(unittest.TestCase):
         self.export = os.path.join(self.temp_dir, "export")
         self.backup = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
+        self.processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -215,14 +215,14 @@ class TestDryRunPredictsInBatchNameCollisions(_Sandbox):
         return paths
 
     def _planned_unknown_paths(self, dry_run):
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         processor.process_all_files(dry_run=dry_run)
         return processor
 
     def test_dry_run_plans_distinct_paths_for_two_same_named_unknowns(self):
         self._two_same_named("mystery.xyz")
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         processor.process_all_files(dry_run=True)
 
         planned = [
@@ -261,7 +261,7 @@ class TestDryRunPredictsInBatchNameCollisions(_Sandbox):
         """#10 parity: the plan must match what a real run produces."""
         self._two_same_named("mystery.xyz")
 
-        dry = FileProcessor(self.export, self.backup)
+        dry = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         planned = {
             dry._resolve_named_destination_dry_run(
                 os.path.join(self.backup, "unknown"), "mystery.xyz"
@@ -271,7 +271,7 @@ class TestDryRunPredictsInBatchNameCollisions(_Sandbox):
         # Second call must have bumped, so the set has two members.
         self.assertEqual(len(planned), 2)
 
-        real = FileProcessor(self.export, self.backup)
+        real = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         real.process_all_files(dry_run=False)
         landed = {
             os.path.basename(record["final_path"])

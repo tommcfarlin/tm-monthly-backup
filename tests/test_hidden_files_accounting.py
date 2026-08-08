@@ -51,7 +51,7 @@ import unittest
 
 from click.testing import CliRunner
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.cli_interface import CLIInterface
 from src.main import main
 from tests.fixtures import make_exif_heic, make_exif_jpeg
@@ -65,7 +65,7 @@ class TestHiddenFileIsCountedNotDropped(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -175,7 +175,7 @@ class TestHiddenFileIsCountedNotDropped(unittest.TestCase):
                 with open(os.path.join(export, name), "w") as fh:
                     fh.write("junk")
 
-                processor = FileProcessor(export, backup)
+                processor = FileProcessor(Settings(export_dir=export, backup_dir=backup))
                 results = processor.process_all_files(dry_run=False)
 
                 self.assertEqual(
@@ -208,7 +208,7 @@ class TestDottedDirectoryMatchesDottedFilePolicy(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -252,7 +252,7 @@ class TestAccountingIdentity(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -389,7 +389,7 @@ class TestSkippedFileDemotesTheSuccessBanner(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -568,10 +568,10 @@ class TestDryRunParityForSkippedFiles(unittest.TestCase):
         self._seed(self.dry_export)
         self._seed(self.real_export)
 
-        dry_processor = FileProcessor(self.dry_export, self.dry_backup)
+        dry_processor = FileProcessor(Settings(export_dir=self.dry_export, backup_dir=self.dry_backup))
         dry_results = dry_processor.process_all_files(dry_run=True)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_results = real_processor.process_all_files(dry_run=False)
 
         self.assertEqual(dry_results["files_skipped"], 2)
