@@ -969,6 +969,84 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_screen_recording_is_read_month_first(self):
+        """Issue #70: macOS/iOS screen recordings use MM-DD-YYYY, not DD-MM.
+
+        Established from a real file rather than assumed: for
+        ``ScreenRecording_03-05-2024 09-15-00_1.mp4`` the container's own mvhd
+        reads 2024-03-05 13:15:00 UTC, i.e. 08:58:01 EDT -- exactly the time in
+        the filename, so the leading 07-01 is July 1. Issue #51's
+        day-first-first order returned January 7, six months off, for every such
+        capture whose metadata was missing (a re-muxed file commonly carries a
+        1904 mvhd).
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "ScreenRecording_03-05-2024 09-15-00_1.mp4"
+        )
+        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+
+    def test_screen_recording_month_first_on_the_second_real_example(self):
+        result = self.handler._extract_timestamp_from_filename(
+            "ScreenRecording_03-06-2024 16-40-00_1.mp4"
+        )
+        self.assertEqual(result, datetime(2026, 7, 2, 14, 27, 54))
+
+    def test_facetune_still_reads_day_first(self):
+        """Issue #70 must not regress issue #51's Facetune convention.
+
+        Both conventions are real and live in one regex; fixing one by breaking
+        the other would be no fix at all.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Facetune_09-02-2024-11-22-33.heic"
+        )
+        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+
+    def test_unrecognized_generator_keeps_the_day_first_default(self):
+        """No marker means no evidence; the #51 default is preserved.
+
+        Deliberate: silently re-dating files from generators this project has
+        never observed would be a guess dressed up as a fix.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "mystery_09-02-2024-11-22-33.jpg"
+        )
+        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+
+    def test_marker_matching_is_case_insensitive(self):
+        result = self.handler._extract_timestamp_from_filename(
+            "screenrecording_03-05-2024-09-15-00.mp4"
+        )
+        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+
+    def test_a_space_separated_screen_recording_marker_also_matches(self):
+        result = self.handler._extract_timestamp_from_filename(
+            "Screen Recording 03-05-2024 09-15-00.mov"
+        )
+        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+
+    def test_month_first_generator_still_falls_back_when_month_first_is_invalid(self):
+        """The convention sets the ORDER, not a hard rule.
+
+        20-01 cannot be month-first (month=20), so the day-first reading must
+        still resolve rather than the file falling through to its mtime.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "ScreenRecording_20-05-2024 09-15-00.mp4"
+        )
+        self.assertEqual(result, datetime(2026, 1, 20, 8, 58, 1))
+
+    def test_screen_recording_logs_the_month_first_choice(self):
+        """A chosen interpretation stays auditable (issue #51's contract)."""
+        with self.assertLogs("src.exif_handler", level="INFO") as captured:
+            self.handler._extract_timestamp_from_filename(
+                "ScreenRecording_03-05-2024 09-15-00_1.mp4"
+            )
+        self.assertTrue(
+            any("month-first" in message for message in captured.output),
+            "the resolved interpretation was not logged",
+        )
+
     def test_dji_epoch_suffix_filename_unaffected(self):
         """Issue #51 regression guard: the DJI epoch-suffix filename still parses
         via pattern2 and is not disturbed by the new day-first pattern."""

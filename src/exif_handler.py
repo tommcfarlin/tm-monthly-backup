@@ -170,6 +170,57 @@ _MAX_MOOV_BYTES = 128 * 1024 * 1024
 # scanned-photo case described above; keep them separate.
 MIN_PLAUSIBLE_CAPTURE = datetime(1826, 1, 1)
 
+# Which way to read an ambiguous ``NN-NN-YYYY`` filename, keyed by a marker in
+# the filename that identifies the generator (issue #70).
+#
+# Two real conventions collide inside one regex, and the digits alone cannot
+# separate them whenever both leading fields are <= 12:
+#
+#   ScreenRecording_03-05-2024 09-15-00_1.mp4   is MONTH-first (July 1)
+#   Facetune_09-02-2024-11-22-33.heic           is DAY-first (4 July)
+#
+# The macOS/iOS screen-recording reading is not a guess: for a real file of that
+# name the container's own ``mvhd`` says 2024-03-05 13:15:00 UTC, which is
+# 08:58:01 EDT -- exactly the time in the filename, confirming the leading
+# ``07-01`` is month-first. Issue #51 introduced this pattern for Facetune and
+# tried day-first first for everything, so every ScreenRecording_ capture whose
+# metadata was missing (common: a re-muxed file often carries a 1904 ``mvhd``)
+# was filed up to eleven months off.
+#
+# Markers are matched case-insensitively anywhere in the filename. A name with
+# no known marker keeps the day-first-first order issue #51 established, because
+# there is genuinely no evidence either way for an unrecognized generator and
+# changing that default would silently re-date files this project has never
+# observed.
+_DAY_FIRST = 'day-first (DD-MM-YYYY)'
+_MONTH_FIRST = 'month-first (MM-DD-YYYY)'
+FILENAME_DATE_CONVENTIONS: Tuple[Tuple[str, str], ...] = (
+    ('screenrecording', _MONTH_FIRST),
+    ('screen recording', _MONTH_FIRST),
+    ('screen_recording', _MONTH_FIRST),
+    ('facetune', _DAY_FIRST),
+)
+DEFAULT_AMBIGUOUS_DATE_ORDER = _DAY_FIRST
+
+
+def filename_date_order(filename: str) -> str:
+    """
+    Return which reading of an ambiguous ``NN-NN-YYYY`` filename to try first.
+
+    Args:
+        filename: Basename to inspect (matched case-insensitively).
+
+    Returns:
+        ``_MONTH_FIRST`` or ``_DAY_FIRST`` -- the convention of the first
+        matching marker in :data:`FILENAME_DATE_CONVENTIONS`, or
+        :data:`DEFAULT_AMBIGUOUS_DATE_ORDER` when the generator is unrecognized.
+    """
+    lowered = filename.lower()
+    for marker, convention in FILENAME_DATE_CONVENTIONS:
+        if marker in lowered:
+            return convention
+    return DEFAULT_AMBIGUOUS_DATE_ORDER
+
 
 def _iter_boxes(buf: bytes, start: int, end: int) -> Iterator[Tuple[bytes, int, int]]:
     """
@@ -975,25 +1026,32 @@ class ExifHandler:
             except ValueError:
                 pass
 
-        # Pattern 3: DD-MM-YYYY-HH-MM-SS, e.g. Facetune's
-        # "Facetune_09-02-2024-11-22-33.heic" (issue #51). The two leading
-        # two-digit fields are ambiguous with MM-DD-YYYY whenever both are
-        # <= 12 (04-07 could be day=4/month=7 or month=4/day=7), so both
-        # readings are tried -- day-first first, since that is this pattern's
-        # documented convention -- and only a reading that produces a real
-        # calendar date is accepted. A filename where NEITHER reading (nor
-        # the other way around) produces a valid date returns None rather
-        # than guessing, preserving the fail-closed contract of this whole
-        # fallback chain. Whichever reading is used is logged at INFO so a
-        # wrong guess on a genuinely ambiguous name is auditable, not silent.
+        # Pattern 3: an ambiguous NN-NN-YYYY-HH-MM-SS date, which is DD-MM-YYYY
+        # for Facetune ("Facetune_09-02-2024-11-22-33.heic", issue #51) but
+        # MM-DD-YYYY for macOS/iOS screen recordings
+        # ("ScreenRecording_03-05-2024 09-15-00_1.mp4", issue #70). The two
+        # leading two-digit fields cannot be told apart from the digits alone
+        # whenever both are <= 12 (04-07 could be day=4/month=7 or
+        # month=4/day=7), so the ORDER the two readings are tried in comes from
+        # the generator named in the filename -- see `filename_date_order` for
+        # why the screen-recording convention is established fact rather than a
+        # guess. Only a reading that produces a real, plausible calendar date is
+        # accepted, and trying the second reading when the first is invalid is
+        # what lets an unrecognized generator still resolve. A filename where
+        # NEITHER reading produces a valid date returns None rather than
+        # guessing, preserving the fail-closed contract of this whole fallback
+        # chain. Whichever reading is used is logged at INFO so a wrong guess on
+        # a genuinely ambiguous name is auditable, not silent.
         pattern3 = r'(\d{2})[_\-\s](\d{2})[_\-\s](\d{4})[_\-\s](\d{2})[_\-\s](\d{2})[_\-\s](\d{2})'
         match = re.search(pattern3, filename)
         if match:
             first_field, second_field, year, hour, minute, second = map(int, match.groups())
-            candidate_readings = (
-                ('day-first (DD-MM-YYYY)', first_field, second_field),
-                ('month-first (MM-DD-YYYY)', second_field, first_field),
-            )
+            day_first_reading = (_DAY_FIRST, first_field, second_field)
+            month_first_reading = (_MONTH_FIRST, second_field, first_field)
+            if filename_date_order(filename) is _MONTH_FIRST:
+                candidate_readings = (month_first_reading, day_first_reading)
+            else:
+                candidate_readings = (day_first_reading, month_first_reading)
             for reading, day, month in candidate_readings:
                 try:
                     parsed = datetime(year, month, day, hour, minute, second)
