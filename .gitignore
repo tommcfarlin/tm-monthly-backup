@@ -36,6 +36,10 @@ backup/
 # otherwise stage the entire library.
 export-backup/
 export-*/
+# Likewise for alternate archive destinations: `--backup-dir backup-test` and
+# friends are how a run is verified without disturbing the existing archive, and
+# each one holds gigabytes of the user's own photographs.
+backup-*/
 
 # IDE
 .vscode/
