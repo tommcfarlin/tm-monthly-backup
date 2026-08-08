@@ -148,8 +148,20 @@ class TestCheckDirectories(unittest.TestCase):
                 cli.check_directories()
 
 
-class TestDisplayFileScanResults(unittest.TestCase):
-    """display_file_scan_results: empty and unknown-row branches."""
+class TestDisplayCategorizationSummary(unittest.TestCase):
+    """The discovery table's conditional rows.
+
+    Retargeted from the removed ``display_file_scan_results`` (issue #73) onto
+    ``display_categorization_summary``, which is the method the real run path
+    actually uses -- it renders from the stats FileProcessor already computed in
+    its single categorization pass, rather than re-driving categorization. The
+    rendering assertions are unchanged; only the way the stats are obtained is.
+    """
+
+    def _stats_for(self, files):
+        """Categorize in the test, not in the display layer."""
+        self.cli.processor.categorizer.batch_categorize(files)
+        return self.cli.processor.categorizer.get_categorization_stats()
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -161,10 +173,19 @@ class TestDisplayFileScanResults(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_empty_file_list_prints_nothing_to_process(self):
-        """An empty file list renders the no-files message and returns."""
-        self.cli.display_file_scan_results([])
+    def test_no_files_notice_comes_from_the_reporter_the_run_path_uses(self):
+        """The empty-scan branch lives on the run path, not the display helper.
+
+        ``FileProcessor`` fires ``on_no_files`` when the scan returns nothing,
+        which is what the user actually sees -- the removed helper's own
+        empty-list branch was never reached in a real run.
+        """
+        from src.cli_interface import _CLIProgressReporter
+
+        reporter = _CLIProgressReporter(self.cli, dry_run=False, yes=True)
+        reporter.on_no_files()
         self.assertIn("No files found", self.cli.console.export_text())
+        self.assertTrue(reporter.no_files)
 
     def test_unknown_files_add_unknown_row(self):
         """A batch containing an unrecognized file renders the Unknown row."""
@@ -175,7 +196,7 @@ class TestDisplayFileScanResults(unittest.TestCase):
         open(photo, "wb").close()
         open(mystery, "wb").close()
 
-        self.cli.display_file_scan_results([photo, mystery])
+        self.cli.display_categorization_summary(self._stats_for([photo, mystery]))
 
         text = self.cli.console.export_text()
         self.assertIn("Unknown", text)
@@ -195,7 +216,7 @@ class TestDisplayFileScanResults(unittest.TestCase):
             {"c2pa": "manifest-stub"},
         )
 
-        self.cli.display_file_scan_results([generated])
+        self.cli.display_categorization_summary(self._stats_for([generated]))
 
         text = self.cli.console.export_text()
         self.assertIn("Generated", text)
@@ -208,7 +229,7 @@ class TestDisplayFileScanResults(unittest.TestCase):
         photo = os.path.join(self.temp_dir, "photo.jpg")
         open(photo, "wb").close()
 
-        self.cli.display_file_scan_results([photo])
+        self.cli.display_categorization_summary(self._stats_for([photo]))
 
         text = self.cli.console.export_text()
         self.assertNotIn("Generated", text)

@@ -607,7 +607,19 @@ class FileProcessor:
             # conversion bar's total can never drift from the set of files
             # that actually go through ``on_heic_converted``.
             stats['heic'] = len(self._collect_heic_files(processable_files))
-            if not progress.on_categorized(len(all_files), stats):
+            # ``stats['total']``, not ``len(all_files)`` (issue #73).
+            #
+            # ``batch_categorize`` drops any path that fails ``os.path.exists``
+            # -- a file deleted between the scan and the categorize pass, e.g.
+            # Photos still finishing the export, or a concurrent cleanup. So
+            # ``len(all_files)`` can exceed the number of files that will
+            # actually be handled, and it was feeding the confirmation prompt and
+            # the organize bar's total while ``files_scanned`` in the summary used
+            # the post-categorization count. The prompt quoted 3 for a run that
+            # reported 2 scanned, and the bar sat permanently at 2/3 (rich does
+            # not clamp). Both now derive from the one number that describes what
+            # the run will actually do.
+            if not progress.on_categorized(stats['total'], stats):
                 logger.info("Processing aborted by progress reporter")
                 return self._generate_summary()
 
@@ -793,7 +805,20 @@ class FileProcessor:
                 # is therefore kept (its target is resolved/named in issue #63);
                 # FIFOs, sockets, devices, and broken symlinks are skipped.
                 if not Path(path).is_file():
+                    # Recorded, not merely logged (issue #73). This branch used
+                    # to `continue` with only a warning, so the file was absent
+                    # from every bucket -- a three-entry directory reported
+                    # files_scanned=1, the accounting identity "held" only
+                    # because the file was never counted at all, and the run
+                    # reported unqualified success while "export/ is fully
+                    # drained" was silently false. The rule this method's own
+                    # docstring states is that a pruned DIRECTORY is uncounted
+                    # because its contents were never individually visited,
+                    # whereas a leaf file that IS visited is the right place to
+                    # record it. A FIFO, socket, device node or broken symlink is
+                    # individually visited right here.
                     logger.warning("Skipping non-regular file: %s", path)
+                    self._skipped_files.append(('not_regular_file', path))
                     continue
 
                 files.append(path)
@@ -1776,11 +1801,26 @@ class FileProcessor:
         """
         stem = Path(filename).stem
         ext = Path(filename).suffix
+        # In-batch reservations are tracked in memory, mirroring what
+        # ``_resolve_destination_dry_run`` does for timestamped names (issue #73).
+        # Without this, two same-named sources in different export/ subdirectories
+        # both planned the identical path while a real run bumped the second to
+        # "stem (1).ext" via O_EXCL -- so the dry run under-reported the archive
+        # it would produce, and put duplicate 'final_path' values into
+        # ``_quarantined_files``. Reusing ``_taken_names`` keeps one bookkeeping
+        # mechanism rather than two; the timestamped resolver stores bare stems
+        # and this one stores full basenames, which cannot collide with each
+        # other because a timestamp stem is never a full filename with a suffix.
+        claimed = self._taken_names(target_dir)
         candidate = filename
         counter = 1
-        while (Path(target_dir) / candidate).exists():
+        while (
+            candidate in claimed
+            or (Path(target_dir) / candidate).exists()
+        ):
             candidate = f"{stem} ({counter}){ext}"
             counter += 1
+        claimed.add(candidate)
         return str(Path(target_dir) / candidate)
 
     def _taken_names(self, target_dir: str) -> Set[str]:
@@ -2193,9 +2233,19 @@ class FileProcessor:
             'heic_conversions': heic_stats['successful_conversions'],
             'heic_conversion_failures': heic_stats['failed_conversions'],
             'missing_exif_files': len(self._missing_exif_records),
-            'processed_files': self._processed_files.copy(),
+            # Per-ELEMENT copies, not just a list copy (issue #73). Both of
+            # these hold dicts, so ``list.copy()`` -- being shallow -- handed the
+            # caller the internal record objects themselves: mutating a returned
+            # record's 'final_path' rewrote ``_processed_files``. The
+            # ``missing_exif_list`` entry below already did per-element copies
+            # and cited issue #37 for exactly this reason; these two were the
+            # inconsistency. ``failed_files`` and ``conversion_log`` hold tuples
+            # (immutable), so a list copy is genuinely sufficient there.
+            'processed_files': [record.copy() for record in self._processed_files],
             'failed_files': self._failed_files.copy(),
-            'quarantined_files': self._quarantined_files.copy(),
+            'quarantined_files': [
+                record.copy() for record in self._quarantined_files
+            ],
             'conversion_log': self._conversion_log.copy(),
             # Each entry carries BOTH 'original_path' and 'final_path' so the
             # display layer can show a path that genuinely exists on disk

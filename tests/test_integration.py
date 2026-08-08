@@ -897,17 +897,23 @@ class TestCLIIntegration(unittest.TestCase):
             result = self.cli.check_directories()
             self.assertFalse(result)
 
-    def test_display_file_scan_results(self):
-        """Test file scan results display"""
-        # Create test files
+    def test_display_categorization_summary(self):
+        """The discovery table renders from already-computed stats.
+
+        Retargeted from the removed ``display_file_scan_results`` (issue #73):
+        the display layer no longer categorizes, so the stats are computed here
+        the way ``FileProcessor`` computes them once per run.
+        """
         test_files = [
             self.create_test_file("photo.jpg"),
             self.create_test_file("video.mov"),
             self.create_test_file("screenshot.png")
         ]
+        self.cli.processor.categorizer.batch_categorize(test_files)
+        stats = self.cli.processor.categorizer.get_categorization_stats()
 
         # This should not raise an exception
-        self.cli.display_file_scan_results(test_files)
+        self.cli.display_categorization_summary(stats)
 
     def test_process_with_progress_dry_run(self):
         """Test progress processing in dry run mode"""
