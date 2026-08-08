@@ -32,7 +32,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_jpeg
 
 
@@ -66,7 +66,7 @@ class TestMakedirsCalledOncePerCategoryNotPerFile(unittest.TestCase):
                 os.path.join(self.export_dir, f"photo{index}.jpg"),
                 date_time_original=f"2024:01:0{index + 1} 01:01:01",
             )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with patch("os.makedirs", wraps=os.makedirs) as spy:
             results = processor.process_all_files(dry_run=False)
@@ -85,7 +85,7 @@ class TestMakedirsCalledOncePerCategoryNotPerFile(unittest.TestCase):
             os.path.join(self.export_dir, "solo.jpg"),
             date_time_original="2024:05:06 07:08:09",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with patch("os.makedirs", wraps=os.makedirs) as spy:
             results = processor.process_all_files(dry_run=False)
@@ -99,7 +99,7 @@ class TestMakedirsCalledOncePerCategoryNotPerFile(unittest.TestCase):
             os.path.join(self.export_dir, "solo.jpg"),
             date_time_original="2024:05:06 07:08:09",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         results = processor.process_all_files(dry_run=False)
 
@@ -138,7 +138,7 @@ class TestDryRunStillCreatesNoDirectories(unittest.TestCase):
             os.path.join(self.export_dir, "photo.jpg"),
             date_time_original="2024:01:01 01:01:01",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with patch("os.makedirs", wraps=os.makedirs) as spy:
             results = processor.process_all_files(dry_run=True)
@@ -193,7 +193,7 @@ class TestAbsentTargetDirectoryRecordsRealCause(unittest.TestCase):
             date_time_original="2024:01:01 01:01:01",
         )
         target_dir = os.path.join(self.backup_dir, "photos")
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         # Drive the category loop directly -- process_all_files is not
         # involved, so ensure_target_directories never runs and target_dir
@@ -239,7 +239,7 @@ class TestAbsentTargetDirectoryRecordsRealCause(unittest.TestCase):
             os.path.join(self.export_dir, "photo_b.jpg"),
             date_time_original="2024:01:02 02:02:02",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         real_process_single_file = processor._process_single_file
         photos_dir = os.path.join(self.backup_dir, "photos")

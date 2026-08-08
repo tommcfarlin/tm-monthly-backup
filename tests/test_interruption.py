@@ -43,7 +43,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.file_categorizer import FileCategory
 from tests.fixtures import make_exif_jpeg
 
@@ -68,7 +68,7 @@ class TestKeyboardInterruptPropagation(unittest.TestCase):
                 date_time_original=f"2024:01:15 14:30:4{index}",
             )
 
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temporary tree."""
@@ -187,7 +187,7 @@ class TestDiskFullKeepsTrying(unittest.TestCase):
                 date_time_original=f"2024:02:20 10:11:1{index}",
             )
 
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temporary tree."""
@@ -271,7 +271,7 @@ class TestVanishingFileAfterScan(unittest.TestCase):
                 date_time_original=f"2024:03:10 08:09:0{index}",
             )
 
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temporary tree."""

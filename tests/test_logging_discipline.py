@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 
 from src.cli_interface import setup_logging
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_jpeg
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
@@ -142,7 +142,7 @@ class TestDefaultLevelIsQuietVerboseRestoresDetail(unittest.TestCase):
         remove. The run-level summary line (Categorization complete: ...)
         is unaffected, since that is a once-per-run summary, not per-file
         chatter, and stays at INFO by design."""
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with self.assertLogs("src.file_processor", level="INFO") as captured:
             processor.process_all_files(dry_run=False)
@@ -161,7 +161,7 @@ class TestDefaultLevelIsQuietVerboseRestoresDetail(unittest.TestCase):
     def test_verbose_level_restores_per_file_moved_lines(self):
         """The identical run, observed at DEBUG (what --verbose selects via
         setup_logging), shows the per-file detail that was hidden above."""
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with self.assertLogs("src.file_processor", level="DEBUG") as captured:
             processor.process_all_files(dry_run=False)
@@ -192,7 +192,7 @@ class TestUnknownFileWarningFiresExactlyOncePerFile(unittest.TestCase):
         mystery_b = os.path.join(self.export_dir, "mystery_b.dat")
         open(mystery_a, "wb").close()
         open(mystery_b, "wb").close()
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         with self.assertLogs("src.file_categorizer", level="WARNING") as captured:
             processor.process_all_files(dry_run=True)

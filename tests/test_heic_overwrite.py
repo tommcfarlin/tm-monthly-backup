@@ -24,7 +24,7 @@ from unittest import mock
 
 from PIL import Image
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from src.heic_converter import HeicConverter
 from tests.fixtures import make_exif_heic, make_exif_jpeg
 
@@ -49,7 +49,7 @@ class TestHeicOverwrite(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temp tree."""

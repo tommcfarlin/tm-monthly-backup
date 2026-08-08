@@ -26,7 +26,7 @@ import unittest
 
 from PIL import Image
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_jpeg
 
 
@@ -90,7 +90,7 @@ class TestBackupOverwriteSafety(unittest.TestCase):
             color="green",
             size=(40, 40),
         )
-        FileProcessor(export1, self.backup_dir).process_all_files(dry_run=False)
+        FileProcessor(Settings(export_dir=export1, backup_dir=self.backup_dir)).process_all_files(dry_run=False)
 
         first = os.path.join(self._photos_dir(), "2024.05.05.05.05.05.jpg")
         self.assertTrue(os.path.isfile(first), "run 1 photo did not land")
@@ -104,7 +104,7 @@ class TestBackupOverwriteSafety(unittest.TestCase):
             color="red",
             size=(80, 80),
         )
-        FileProcessor(export2, self.backup_dir).process_all_files(dry_run=False)
+        FileProcessor(Settings(export_dir=export2, backup_dir=self.backup_dir)).process_all_files(dry_run=False)
 
         # BOTH files survive as distinct files; neither was overwritten.
         second = os.path.join(self._photos_dir(), "2024.05.05.05.05.06.jpg")
@@ -138,7 +138,7 @@ class TestBackupOverwriteSafety(unittest.TestCase):
         # Video has no decodable metadata; the filename yields 2024-03-03 03:03:03.
         self._make_video(export, "clip_2024-03-03-03-03-03.mov", marker=b"NOTAVIDEO" * 7)
 
-        FileProcessor(export, self.backup_dir).process_all_files(dry_run=False)
+        FileProcessor(Settings(export_dir=export, backup_dir=self.backup_dir)).process_all_files(dry_run=False)
 
         photo = os.path.join(self._photos_dir(), "2024.03.03.03.03.03.jpg")
         video = os.path.join(self.backup_dir, "videos", "2024.03.03.03.03.03.mov")
@@ -175,7 +175,7 @@ class TestBackupOverwriteSafety(unittest.TestCase):
             size=(80, 80),
         )
 
-        FileProcessor(export, self.backup_dir).process_all_files(dry_run=False)
+        FileProcessor(Settings(export_dir=export, backup_dir=self.backup_dir)).process_all_files(dry_run=False)
 
         landed = set(os.listdir(self._photos_dir()))
         self.assertEqual(
@@ -213,7 +213,7 @@ class TestBackupOverwriteSafety(unittest.TestCase):
             size=(48, 48),
         )
 
-        FileProcessor(export, self.backup_dir).process_all_files(dry_run=False)
+        FileProcessor(Settings(export_dir=export, backup_dir=self.backup_dir)).process_all_files(dry_run=False)
 
         # The pre-existing archive file is byte-for-byte untouched.
         with open(existing, "rb") as handle:

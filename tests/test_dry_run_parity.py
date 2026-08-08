@@ -27,7 +27,7 @@ import unittest
 from typing import List, Set
 from unittest.mock import patch
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_heic, make_exif_jpeg
 
 
@@ -157,7 +157,7 @@ class TestDryRunParity(unittest.TestCase):
         exactly as ``--verbose`` now restores it for a human running the
         tool directly.
         """
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
         capture = _PlanCapture()
         logger = logging.getLogger("src.file_processor")
         previous_level = logger.level
@@ -183,7 +183,7 @@ class TestDryRunParity(unittest.TestCase):
 
         dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_processor.process_all_files(dry_run=False)
         real_tree = _relative_backup_tree(self.real_backup)
 
@@ -227,7 +227,7 @@ class TestDryRunParity(unittest.TestCase):
 
         dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_processor.process_all_files(dry_run=False)
         real_tree = _relative_backup_tree(self.real_backup)
 
@@ -257,7 +257,7 @@ class TestDryRunParity(unittest.TestCase):
 
         dry_plan = self._capture_dry_run_plan(self.dry_export, self.dry_backup)
 
-        real_processor = FileProcessor(self.real_export, self.real_backup)
+        real_processor = FileProcessor(Settings(export_dir=self.real_export, backup_dir=self.real_backup))
         real_processor.process_all_files(dry_run=False)
         real_tree = _relative_backup_tree(self.real_backup)
 
@@ -277,7 +277,7 @@ class TestDryRunParity(unittest.TestCase):
         subdirectories, no placeholder files, nothing.
         """
         _build_mixed_export(self.dry_export)
-        processor = FileProcessor(self.dry_export, self.dry_backup)
+        processor = FileProcessor(Settings(export_dir=self.dry_export, backup_dir=self.dry_backup))
 
         with patch("src.file_processor.shutil.move") as mock_move, \
                 patch("src.file_processor.shutil.copy2") as mock_copy2, \

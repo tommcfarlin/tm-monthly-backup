@@ -30,7 +30,7 @@ from PIL import Image
 
 from src.file_categorizer import FileCategorizer, FileCategory
 from src.exif_handler import ExifHandler
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import (
     make_corrupt_jpeg,
     make_exif_heic,
@@ -140,7 +140,7 @@ class TestFullPassOpenCount(unittest.TestCase):
             os.path.join(self.export_dir, "a.jpg"),
             date_time_original="2024:01:01 01:01:01",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         wrapper, calls = _counting_open()
         with patch("PIL.Image.open", side_effect=wrapper):
@@ -158,7 +158,7 @@ class TestFullPassOpenCount(unittest.TestCase):
             os.path.join(self.export_dir, "a.heic"),
             date_time_original="2024:01:01 01:01:01",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         wrapper, calls = _counting_open()
         with patch("PIL.Image.open", side_effect=wrapper):
@@ -188,7 +188,7 @@ class TestFullPassOpenCount(unittest.TestCase):
             os.path.join(self.export_dir, "Screenshot 2024-01-15.png"),
             {"Comment": "an ordinary screenshot, no provenance markers"},
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         wrapper, calls = _counting_open()
         with patch("PIL.Image.open", side_effect=wrapper):
@@ -393,7 +393,7 @@ class TestQuarantineFullDecodeExactlyOnce(unittest.TestCase):
             os.path.join(self.export_dir, "good.jpg"),
             date_time_original="2024:02:03 04:05:06",
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         wrapper, decoded_objects = self._counting_load()
         with patch.object(Image.Image, "load", wrapper):
@@ -424,7 +424,7 @@ class TestQuarantineFullDecodeExactlyOnce(unittest.TestCase):
         make_corrupt_jpeg(
             os.path.join(self.export_dir, "bad.jpg"), content=truncated
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         wrapper, decoded_objects = self._counting_load()
         with patch.object(Image.Image, "load", wrapper):
@@ -474,7 +474,7 @@ class TestDecodeCountingMechanismDetectsGenuineDoubleDecode(unittest.TestCase):
         Image.new("RGB", (32, 32), "red").save(
             os.path.join(self.export_dir, "plain.png"), format="PNG"
         )
-        processor = FileProcessor(self.export_dir, self.backup_dir)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
         real_load = Image.Image.load
         decoded_objects = []

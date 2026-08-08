@@ -16,7 +16,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from src.file_categorizer import FileCategory
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_corrupt_jpeg, make_exif_jpeg
 
 
@@ -31,17 +31,14 @@ class TestScanAndOverlap(unittest.TestCase):
 
     def test_scan_missing_export_returns_empty(self):
         """Scanning a nonexistent export directory returns an empty list."""
-        processor = FileProcessor(
-            os.path.join(self.temp_dir, "nope"),
-            os.path.join(self.temp_dir, "backup"),
-        )
+        processor = FileProcessor(Settings(export_dir=os.path.join(self.temp_dir, "nope"), backup_dir=os.path.join(self.temp_dir, "backup")))
         self.assertEqual(processor._scan_export_directory(), [])
 
     def test_process_all_files_raises_on_overlap(self):
         """Overlapping export/backup roots raise ValueError before any work."""
         shared = os.path.join(self.temp_dir, "shared")
         os.makedirs(shared)
-        processor = FileProcessor(shared, os.path.join(shared, "backup"))
+        processor = FileProcessor(Settings(export_dir=shared, backup_dir=os.path.join(shared, "backup")))
 
         with self.assertRaises(ValueError):
             processor.process_all_files()
@@ -50,7 +47,7 @@ class TestScanAndOverlap(unittest.TestCase):
         """An empty export dir yields a zeroed summary, not a crash."""
         export = os.path.join(self.temp_dir, "export")
         os.makedirs(export)
-        processor = FileProcessor(export, os.path.join(self.temp_dir, "backup"))
+        processor = FileProcessor(Settings(export_dir=export, backup_dir=os.path.join(self.temp_dir, "backup")))
 
         summary = processor.process_all_files()
 
@@ -69,10 +66,7 @@ class TestSidecarDeletionFailure(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.processor = FileProcessor(
-            os.path.join(self.temp_dir, "export"),
-            os.path.join(self.temp_dir, "backup"),
-        )
+        self.processor = FileProcessor(Settings(export_dir=os.path.join(self.temp_dir, "export"), backup_dir=os.path.join(self.temp_dir, "backup")))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -164,7 +158,7 @@ class TestMoveFailureRecording(unittest.TestCase):
         self.export = os.path.join(self.temp_dir, "export")
         self.backup = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
+        self.processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -282,7 +276,7 @@ class TestQuarantinePaths(unittest.TestCase):
         self.export = os.path.join(self.temp_dir, "export")
         self.backup = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
+        self.processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -354,7 +348,7 @@ class TestUnknownFilePaths(unittest.TestCase):
         self.export = os.path.join(self.temp_dir, "export")
         self.backup = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export)
-        self.processor = FileProcessor(self.export, self.backup)
+        self.processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         self.unknown_dir = os.path.join(self.backup, "unknown")
 
     def tearDown(self):
@@ -436,10 +430,7 @@ class TestReserveDestinationCollision(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.processor = FileProcessor(
-            os.path.join(self.temp_dir, "export"),
-            os.path.join(self.temp_dir, "backup"),
-        )
+        self.processor = FileProcessor(Settings(export_dir=os.path.join(self.temp_dir, "export"), backup_dir=os.path.join(self.temp_dir, "backup")))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -510,7 +501,7 @@ class TestGenerateSummaryIndependence(unittest.TestCase):
     """
 
     def test_returned_lists_do_not_alias_internal_state(self):
-        processor = FileProcessor("export", "backup")
+        processor = FileProcessor(Settings(export_dir="export", backup_dir="backup"))
         processor._processed_files.append({"path": "a.jpg"})
         processor._failed_files.append(("move_file", "b.jpg", "boom"))
         processor._conversion_log.append(("c.heic", "c.jpg"))
@@ -532,7 +523,7 @@ class TestGenerateSummaryIndependence(unittest.TestCase):
         self.assertEqual(processor._conversion_log, [("c.heic", "c.jpg")])
 
     def test_later_internal_mutation_does_not_reach_earlier_summary(self):
-        processor = FileProcessor("export", "backup")
+        processor = FileProcessor(Settings(export_dir="export", backup_dir="backup"))
         processor._processed_files.append({"path": "a.jpg"})
 
         first_summary = processor._generate_summary()
@@ -553,7 +544,7 @@ class TestClearProcessingState(unittest.TestCase):
 
     def test_clear_resets_all_state(self):
         """Every processing collection is emptied by clear_processing_state."""
-        processor = FileProcessor("export", "backup")
+        processor = FileProcessor(Settings(export_dir="export", backup_dir="backup"))
         processor._processed_files.append({"x": 1})
         processor._failed_files.append(("op", "f", "e"))
         processor._quarantined_files.append({"x": 1})

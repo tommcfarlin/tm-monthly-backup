@@ -22,7 +22,7 @@ import unittest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_heic, make_exif_jpeg
 
 
@@ -35,7 +35,7 @@ class TestLandingPaths(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temp tree."""

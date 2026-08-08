@@ -31,7 +31,7 @@ import unittest
 
 from PIL import Image
 
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_corrupt_jpeg, make_exif_heic, make_exif_jpeg
 
 
@@ -48,7 +48,7 @@ class TestSymlinkTargetArchiving(unittest.TestCase):
         self.outside_dir = os.path.join(self.temp_dir, "elsewhere")
         os.makedirs(self.export_dir, exist_ok=True)
         os.makedirs(self.outside_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         """Remove the temp tree."""

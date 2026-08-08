@@ -25,7 +25,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 from src.cli_interface import CLIInterface
-from src.file_processor import FileProcessor, ProgressReporter
+from src.file_processor import FileProcessor, ProgressReporter, Settings
 from tests.fixtures import make_exif_jpeg
 
 
@@ -146,7 +146,7 @@ class TestProgressReporterSeam(unittest.TestCase):
         # total but must NOT produce an on_file event.
         open(os.path.join(self.export, "a.aae"), "wb").close()
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter(proceed=True)
         processor.process_all_files(dry_run=False, progress=reporter)
 
@@ -173,7 +173,7 @@ class TestProgressReporterSeam(unittest.TestCase):
 
     def test_no_files_fires_on_no_files_only(self):
         """An empty export fires on_no_files and neither of the other hooks."""
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 
@@ -190,7 +190,7 @@ class TestProgressReporterSeam(unittest.TestCase):
         sidecar = os.path.join(self.export, "a.aae")
         open(sidecar, "wb").close()
 
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         reporter = _RecordingReporter(proceed=False)
 
         with patch.object(
@@ -225,7 +225,7 @@ class TestHeadlessRunUnaffected(unittest.TestCase):
             os.path.join(self.export, "a.jpg"),
             date_time_original="2024:01:15 14:30:45",
         )
-        processor = FileProcessor(self.export, self.backup)
+        processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
 
         summary = processor.process_all_files(dry_run=False)
 
@@ -235,3 +235,63 @@ class TestHeadlessRunUnaffected(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSettingsIsTheSingleConstructorArgument(unittest.TestCase):
+    """Issue #67: one configuration channel, and it is genuinely immutable.
+
+    Issue #41 bundled the tunables into ``Settings`` but left the directories as
+    positional parameters, so the constructor carried two shapes and only some of
+    the configuration was actually frozen. This pins the completed contract; no
+    behavior is asserted here beyond construction, because the refactor changed
+    none.
+    """
+
+    def test_settings_is_the_only_parameter(self):
+        """The signature has exactly one parameter besides self."""
+        import inspect
+        parameters = list(
+            inspect.signature(FileProcessor.__init__).parameters
+        )
+        self.assertEqual(parameters, ['self', 'settings'])
+
+    def test_directories_come_from_settings(self):
+        processor = FileProcessor(
+            Settings(export_dir='some/export', backup_dir='some/backup')
+        )
+        self.assertEqual(processor.export_dir, 'some/export')
+        self.assertEqual(processor.backup_dir, 'some/backup')
+
+    def test_omitting_settings_uses_the_documented_defaults(self):
+        processor = FileProcessor()
+        self.assertEqual(processor.export_dir, 'export')
+        self.assertEqual(processor.backup_dir, 'backup')
+
+    def test_export_dir_cannot_be_reassigned_mid_run(self):
+        """The immutability guarantee #41 only partly delivered.
+
+        Before this, ``processor.export_dir = ...`` silently repointed a run at a
+        different directory partway through.
+        """
+        processor = FileProcessor(
+            Settings(export_dir='e', backup_dir='b')
+        )
+        with self.assertRaises(AttributeError):
+            processor.export_dir = '/tmp/somewhere-else'
+        with self.assertRaises(AttributeError):
+            processor.backup_dir = '/tmp/somewhere-else'
+
+    def test_settings_itself_is_still_frozen(self):
+        import dataclasses
+        settings = Settings(export_dir='e', backup_dir='b')
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            settings.jpeg_quality = 1
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            settings.export_dir = 'elsewhere'
+
+    def test_jpeg_quality_still_reaches_the_converter(self):
+        """Zero behavior change: the tunable still lands where it did."""
+        processor = FileProcessor(
+            Settings(export_dir='e', backup_dir='b', jpeg_quality=90)
+        )
+        self.assertEqual(processor.heic_converter.jpeg_quality, 90)

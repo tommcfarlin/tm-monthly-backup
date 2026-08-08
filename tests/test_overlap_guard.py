@@ -26,7 +26,7 @@ import unittest
 from unittest.mock import patch
 
 from src.cli_interface import CLIInterface
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 from tests.fixtures import make_exif_jpeg
 
 
@@ -61,7 +61,7 @@ class TestOverlapGuard(unittest.TestCase):
         names both paths.
         """
         sentinel = self._sentinel()
-        processor = FileProcessor(export_dir, backup_dir)
+        processor = FileProcessor(Settings(export_dir=export_dir, backup_dir=backup_dir))
         with self.assertRaises(ValueError) as ctx:
             processor.process_all_files(dry_run=False)
         # No processing/deletion occurred: the sidecar sentinel survives and no
@@ -153,7 +153,7 @@ class TestOverlapGuard(unittest.TestCase):
             os.path.join(self.export_dir, "photo.jpg"),
             date_time_original="2024:01:15 14:30:45",
         )
-        processor = FileProcessor(self.export_dir, backup)
+        processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=backup))
         results = processor.process_all_files(dry_run=False)
 
         self.assertEqual(results["files_processed"], 1)

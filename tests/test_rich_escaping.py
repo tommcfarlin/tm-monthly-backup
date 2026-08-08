@@ -39,7 +39,7 @@ from src.cli_interface import (
     setup_logging,
 )
 from src.file_categorizer import FileCategorizer
-from src.file_processor import FileProcessor
+from src.file_processor import FileProcessor, Settings
 
 # A filename fragment that carries every hostile shape at once: a swallowed
 # valid tag, an unmatched closing tag, and a raw ANSI colour sequence.
@@ -275,7 +275,7 @@ class TestEndToEndHostilePath(unittest.TestCase):
         self.export_dir = os.path.join(self.temp_dir, "export")
         self.backup_dir = os.path.join(self.temp_dir, "backup")
         os.makedirs(self.export_dir, exist_ok=True)
-        self.processor = FileProcessor(self.export_dir, self.backup_dir)
+        self.processor = FileProcessor(Settings(export_dir=self.export_dir, backup_dir=self.backup_dir))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
