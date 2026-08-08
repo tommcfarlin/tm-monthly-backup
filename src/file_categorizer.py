@@ -57,6 +57,14 @@ class CategoryDisplayInfo(NamedTuple):
 # table's own Unknown/Generated rows for the same reason: an all-photos
 # run should not carry a permanent "Generated: 0" line implying generated
 # content is a routine category the way Photos/Videos/Screenshots are.
+# The canonical hyphenated UUID form, 8-4-4-4-12. Used to gate `uuid.UUID`,
+# which on its own strips all hyphens and accepts any 32 hex digits -- see
+# FileCategorizer._has_uuid_stem for what that admitted (issue #71).
+_CANONICAL_UUID_STEM = re.compile(
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+    re.IGNORECASE,
+)
+
 CATEGORY_DISPLAY_ORDER: tuple[CategoryDisplayInfo, ...] = (
     CategoryDisplayInfo(
         FileCategory.PHOTO, "Photos", "JPEG, PNG, HEIC, etc.",
@@ -270,6 +278,19 @@ class FileCategorizer:
     # enough to flag content as generated; see _exif_shows_synthetic_edit.
     EDITING_SOFTWARE = (
         'snapseed', 'photoshop', 'lightroom', 'gimp', 'canva',
+    )
+
+    # Matched at WORD BOUNDARIES, not as bare substrings (issue #71). The bare
+    # `editor in software` test bled exactly the way issue #8 found the AI
+    # markers bleeding before it added \b there: 'canva' is a substring of
+    # 'Canvas', so EXIF ``Software = "Canvas X 2019"`` flagged a drawing as
+    # generated, and 'gimp' is short enough to sit inside other product names
+    # the same way. The short entries are the dangerous ones, and the fix is the
+    # same one already applied to AI_MARKER_PATTERN -- these two lists guard the
+    # same bucket and should not use two different matching rules.
+    EDITING_SOFTWARE_PATTERN = re.compile(
+        r'\b(' + '|'.join(EDITING_SOFTWARE) + r')\b',
+        re.IGNORECASE,
     )
 
     def __init__(self):
@@ -616,8 +637,19 @@ class FileCategorizer:
             logger.debug("Detected heavily edited content: %s", file_path)
             return True
 
-        # UUID-style stems are a common convention for generated output.
-        if self._has_uuid_stem(file_path):
+        # UUID-style stems are a common convention for generated output -- but
+        # only in the ABSENCE of a genuine capture timestamp (issue #71).
+        #
+        # This rule previously fired unconditionally, so unlike the
+        # editing-software rule above (which has always required "and no capture
+        # timestamp") real EXIF could not rescue the file. A photo exported from
+        # Apple Photos under its asset UUID, carrying a perfectly good
+        # DateTimeOriginal, was filed to backup/generated/ and named from that
+        # very timestamp. A filename is the weakest evidence available here and
+        # must not outrank the camera's own record of when the shutter opened;
+        # this library demonstrably contains Apple asset-UUID names, so the bare
+        # form is one export mode away.
+        if self._has_uuid_stem(file_path) and not self._has_original_timestamp(exif):
             logger.debug("Detected UUID filename (likely generated): %s", file_path)
             return True
 
@@ -720,9 +752,8 @@ class FileCategorizer:
         if not ifd0:
             return False
 
-        software = str(ifd0.get('Software', '')).lower()
-        has_editing_software = any(editor in software for editor in self.EDITING_SOFTWARE)
-        if not has_editing_software:
+        software = str(ifd0.get('Software', ''))
+        if not self.EDITING_SOFTWARE_PATTERN.search(software):
             return False
 
         return not self._has_original_timestamp(exif)
@@ -737,32 +768,60 @@ class FileCategorizer:
         is already the merged tag-name view that includes it (see
         :func:`media_types.merge_exif_ifds`), so this is a plain key lookup.
 
+        ``DateTime`` (IFD0, 0x0132) counts too (issue #71). It was omitted, which
+        put this module in direct disagreement with ``ExifHandler`` about the
+        same tag: ``ExifHandler.TIMESTAMP_TAGS`` accepts ``DateTime`` as a
+        capture time and will happily *name the archived file from it*, while
+        this predicate treated its presence as no evidence of capture at all.
+        The file that lost that argument was a scanned family photograph: opening
+        a 1950 print in Photoshop and re-saving writes ``Software`` plus IFD0
+        ``DateTime`` and no ``DateTimeOriginal``, so the photo was filed to
+        ``backup/generated/1950.06.01.12.00.00.jpg`` -- named from the very
+        timestamp that was ruled not to exist. ``DateTime`` is weaker evidence
+        (it is a file-modification time in some writers' hands), but "weaker than
+        DateTimeOriginal" is not "absent", and the cost of the two modules
+        disagreeing is a real photo in the generated bucket.
+
         Args:
             exif: Merged tag-name -> value mapping.
 
         Returns:
-            True if an original/digitized capture timestamp is present.
+            True if an original/digitized/modification capture timestamp is
+            present -- the same set ``ExifHandler.TIMESTAMP_TAGS`` will name a
+            file from.
         """
-        return 'DateTimeOriginal' in exif or 'DateTimeDigitized' in exif
+        return any(
+            tag in exif
+            for tag in ('DateTimeOriginal', 'DateTimeDigitized', 'DateTime')
+        )
 
     @staticmethod
     def _has_uuid_stem(file_path: str) -> bool:
         """
-        Report whether a file's stem is a valid UUID (a common generator name).
+        Report whether a file's stem is a canonically-formatted UUID.
 
-        The stem is parsed with :class:`uuid.UUID`; a :class:`ValueError` means
-        it is not a UUID. This replaces the previous shape-only heuristic
-        (``len == 36 and four hyphens``), which accepted any 36-character string
-        with four hyphens -- validating neither the hex digits nor the segment
-        lengths (issue #8).
+        The stem must match the canonical 8-4-4-4-12 hyphenated form before it is
+        handed to :class:`uuid.UUID` (issue #71). ``uuid.UUID`` alone is far wider
+        than "is a UUID": it strips ALL hyphens and accepts any 32 hex digits, and
+        also tolerates a ``urn:uuid:`` prefix and surrounding braces. So the
+        previous check matched an MD5-named photo
+        (``d41d8cd98f00b204e9800998ecf8427e.jpg``), a run of 32 digits
+        (``12345678901234567890123456789012.jpg``), and arbitrary
+        wrong-segmentation strings (``1234-5678-9012-3456-7890-1234-5678-9012``).
+        The docstring claimed it validated "the hex digits **and** the segment
+        lengths"; it validated only the digits. Anchoring the shape first makes
+        the claim true and keeps the check to the convention it is actually
+        modelling -- a generator writing a real UUID filename.
 
         Args:
             file_path: Path whose stem is tested.
 
         Returns:
-            True if the stem parses as a UUID.
+            True if the stem is a canonically-formatted UUID.
         """
         stem = Path(file_path).stem
+        if not _CANONICAL_UUID_STEM.fullmatch(stem):
+            return False
         try:
             uuid.UUID(stem)
         except ValueError:
