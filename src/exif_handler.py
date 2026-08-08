@@ -27,6 +27,12 @@ from .media_types import VIDEO_EXTENSIONS as _SHARED_VIDEO_EXTENSIONS, merge_exi
 # fallback is actually reached.
 HACHOIR_AVAILABLE = None
 
+# The two hachoir internals ``_create_parser_closing_stream_on_error`` needs
+# (issue #66). Bound lazily by ``_ensure_hachoir_imported`` alongside everything
+# else, so a photo-only run still never pays hachoir's import cost (issue #47).
+_FileInputStream = None
+_guessParser = None
+
 
 def _forward_hachoir_log(level, prefix, text, context) -> None:
     """
@@ -62,6 +68,71 @@ def _forward_hachoir_log(level, prefix, text, context) -> None:
     logger.debug("hachoir: %s %s", prefix, text)
 
 
+def _create_parser_closing_stream_on_error(file_path: str):
+    """
+    hachoir's ``createParser``, but without leaking a file descriptor (issue #66).
+
+    hachoir's own implementation is::
+
+        stream = FileInputStream(filename, ...)   # opens the file internally
+        guess = guessParser(stream)
+        if guess is None:
+            stream.close()
+        return guess
+
+    It closes the stream when ``guessParser`` *returns* ``None``, but nothing
+    closes anything when either call *raises* -- and they do raise, routinely, on
+    the input this tool is pointed at: a zero-byte ``.mov`` in an export is
+    enough, and produces ``InputStreamError("Input size is nul")`` from inside
+    ``FileInputStream`` itself, *after* it has already called
+    ``open(real_filename, 'rb')``.
+
+    That detail dictates the shape of this function, and was established by
+    measurement rather than assumed. Wrapping only ``guessParser`` in a
+    try/except fixes nothing, because the common failure happens one step
+    earlier, before any ``stream`` local exists to close. The file handle is
+    therefore opened HERE and passed in (``FileInputStream`` accepts a file
+    object, deriving its ``source`` from ``.name``), so this function owns the
+    descriptor on every path and can guarantee its release.
+
+    Why the descriptor survives at all: on CPython, refcounting reclaims an
+    abandoned stream immediately, so a discarded exception leaks nothing. But
+    this project deliberately retains exception OBJECTS (not ``str(error)``) in
+    its failure records, and a retained exception keeps its traceback, which
+    keeps the raising frame alive, which keeps that frame's open file alive --
+    for the rest of the run. Measured: 40 unparseable videos with their
+    exceptions retained held 40 extra descriptors open; with this function, zero.
+
+    On success, ownership passes to the caller, whose ``with parser:`` block
+    closes the stream and with it this handle.
+
+    Bound onto the module-level ``createParser`` name by
+    :func:`_ensure_hachoir_imported`, deliberately: that name is the seam the
+    test suite patches, so replacing what it points at fixes production without
+    silently defanging any test that patches it.
+
+    Args:
+        file_path: Path to the media file to parse.
+
+    Returns:
+        A hachoir parser, or ``None`` when the format is unrecognized.
+    """
+    handle = open(file_path, 'rb')
+    try:
+        stream = _FileInputStream(handle)
+        parser = _guessParser(stream)
+    except BaseException:
+        # BaseException so a KeyboardInterrupt mid-parse also releases the
+        # descriptor rather than leaking it on the way out.
+        handle.close()
+        raise
+    if parser is None:
+        # Mirrors hachoir's own None handling. Closing the stream closes the
+        # handle it was built from.
+        stream.close()
+    return parser
+
+
 def _ensure_hachoir_imported() -> None:
     """
     Resolve ``HACHOIR_AVAILABLE`` and bind ``createParser``/``extractMetadata``.
@@ -82,16 +153,25 @@ def _ensure_hachoir_imported() -> None:
     one of those tests -- the exact trap this issue's brief warns about.
     """
     global HACHOIR_AVAILABLE, createParser, extractMetadata
+    global _FileInputStream, _guessParser
     if HACHOIR_AVAILABLE is not None:
         return
     try:
-        from hachoir.parser import createParser as _createParser
         from hachoir.metadata import extractMetadata as _extractMetadata
         from hachoir.core.log import log as _hachoir_log
+        # The two pieces hachoir's own createParser is built from. Imported
+        # directly so the stream can be closed when guessParser raises, which
+        # hachoir's version does not do (issue #66).
+        from hachoir.stream import FileInputStream as _stream_factory
+        from hachoir.parser.guess import guessParser as _guess_parser
     except ImportError:
         HACHOIR_AVAILABLE = False
         return
-    createParser = _createParser
+    _FileInputStream = _stream_factory
+    _guessParser = _guess_parser
+    # Bound to the leak-free equivalent rather than hachoir's createParser --
+    # same contract, same return values, minus the descriptor leak (issue #66).
+    createParser = _create_parser_closing_stream_on_error
     extractMetadata = _extractMetadata
     # Silence hachoir's own stderr writes and redirect them through this
     # module's logger instead (issue #60). Done here, at the same lazy

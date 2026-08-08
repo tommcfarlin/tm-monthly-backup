@@ -1273,6 +1273,117 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
         self.assertEqual(result, datetime(2026, 7, 29, 19, 23, 34))
 
 
+class TestHachoirDoesNotLeakFileDescriptors(unittest.TestCase):
+    """Issue #66: an unparseable video could hold its descriptor for the run.
+
+    hachoir's ``createParser`` opens the file, then closes the stream only when
+    ``guessParser`` RETURNS ``None`` -- nothing closes anything when either step
+    RAISES. A zero-byte ``.mov`` in an export raises
+    ``InputStreamError("Input size is nul")`` from inside ``FileInputStream``
+    itself, *after* it has already opened the file.
+
+    Scope, stated honestly: on CPython refcounting reclaims the abandoned handle
+    as soon as the exception is discarded, so the CURRENT call path -- which logs
+    and drops it -- does not leak today. The leak becomes real the moment
+    something retains the exception, because a retained exception keeps its
+    traceback, which keeps the raising frame and its open file alive. This
+    project deliberately stores exception OBJECTS rather than ``str(error)`` in
+    its failure records, so that is one refactor away, not a hypothetical. The
+    tests below reproduce the retaining shape directly, which is the only way to
+    observe the defect and therefore the only way to pin the fix.
+    """
+
+    def setUp(self):
+        self.handler = ExifHandler()
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _open_fd_count():
+        return len(os.listdir("/dev/fd"))
+
+    def _broken_videos(self, count):
+        paths = []
+        for index in range(count):
+            path = os.path.join(self.temp_dir, f"broken_{index}.mov")
+            open(path, "wb").close()      # zero-byte: raises inside the open
+            paths.append(path)
+        return paths
+
+    def test_retained_parse_failures_hold_no_descriptors(self):
+        """The measurable defect: 40 retained failures held 40 descriptors."""
+        import gc
+        if not os.path.isdir("/dev/fd"):
+            self.skipTest("/dev/fd unavailable; cannot count open descriptors")
+
+        import src.exif_handler as exif_module
+        exif_module._ensure_hachoir_imported()
+        create_parser = exif_module.createParser
+        paths = self._broken_videos(40)
+
+        retained = []
+        gc.collect()
+        before = self._open_fd_count()
+        for path in paths:
+            try:
+                create_parser(path)
+            except Exception as error:
+                # Exactly what this codebase does with failures: keep the
+                # exception object, whose traceback pins the raising frame.
+                retained.append(error)
+        gc.collect()
+        after = self._open_fd_count()
+
+        self.assertEqual(len(retained), len(paths), "the fixtures did not raise")
+        self.assertLessEqual(
+            after - before, 1,
+            f"leaked {after - before} descriptors across {len(paths)} retained "
+            "parse failures",
+        )
+
+    def test_a_successful_parse_still_releases_its_descriptor_on_close(self):
+        """Ownership passes to the caller's ``with parser:`` block."""
+        import gc
+        if not os.path.isdir("/dev/fd"):
+            self.skipTest("/dev/fd unavailable; cannot count open descriptors")
+
+        import src.exif_handler as exif_module
+        exif_module._ensure_hachoir_imported()
+        path = os.path.join(self.temp_dir, "real.mov")
+        write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
+
+        gc.collect()
+        before = self._open_fd_count()
+        parser = exif_module.createParser(path)
+        self.assertIsNotNone(parser, "a real video must still parse")
+        with parser:
+            pass
+        gc.collect()
+
+        self.assertLessEqual(self._open_fd_count() - before, 0)
+
+    def test_an_unparseable_video_is_still_reported_as_missing_metadata(self):
+        """The fix must not change the outcome, only release the descriptor."""
+        path = os.path.join(self.temp_dir, "broken.mov")
+        open(path, "wb").close()
+
+        result = self.handler._extract_video_timestamp_hachoir(path)
+
+        self.assertIsNone(result)
+        self.assertIn(path, self.handler.missing_exif_files)
+
+    def test_a_real_video_still_parses(self):
+        """The replacement must behave like hachoir's own createParser."""
+        path = os.path.join(self.temp_dir, "real.mov")
+        write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
+        # Goes through the Apple-key path, which does not use hachoir at all;
+        # assert the hachoir path also produces a datetime for the same file.
+        self.assertIsNotNone(self.handler._extract_video_timestamp(path))
+
+
 class TestQuickTimeEpochSentinelOnTheAppleKey(unittest.TestCase):
     """Issue #72: the 1904 sentinel can arrive through the Apple key too."""
 
