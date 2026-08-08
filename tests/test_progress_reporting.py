@@ -40,35 +40,8 @@ from rich.console import Console
 from rich.text import Text
 
 from src.cli_interface import CLIInterface, _CLIProgressReporter
-from src.file_processor import FileProcessor, ProgressReporter, Settings
-from tests.fixtures import make_exif_heic, make_exif_jpeg
-
-
-class _RecordingReporter(ProgressReporter):
-    """A ProgressReporter recording every hook call, in firing order."""
-
-    def __init__(self, proceed=True):
-        self.proceed = proceed
-        self.categorized_calls = []  # list of (total, stats)
-        self.files = []              # list of (path, category, action)
-        self.heic_converted = []     # list of paths, in call order
-        self.events = []             # combined ordered log: ('heic', path) or
-                                      # ('file', path, category, action)
-
-    def on_no_files(self):
-        pass
-
-    def on_categorized(self, total, stats):
-        self.categorized_calls.append((total, dict(stats)))
-        return self.proceed
-
-    def on_heic_converted(self, path):
-        self.heic_converted.append(path)
-        self.events.append(('heic', path))
-
-    def on_file(self, path, category, action):
-        self.files.append((path, category, action))
-        self.events.append(('file', path, category, action))
+from src.file_processor import FileProcessor, Settings
+from tests.fixtures import RecordingReporter, make_exif_heic, make_exif_jpeg
 
 
 def _recording_cli(export_dir, backup_dir):
@@ -102,7 +75,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         self.assertLess(len(paths), processor.HEIC_PARALLEL_THRESHOLD)
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
 
         summary = processor.process_all_files(dry_run=False, progress=reporter)
 
@@ -137,7 +110,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
         self.assertGreaterEqual(len(paths), processor.HEIC_PARALLEL_THRESHOLD)
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
 
         summary = processor.process_all_files(dry_run=False, progress=reporter)
 
@@ -164,7 +137,7 @@ class TestOnHeicConvertedHook(unittest.TestCase):
                 date_time_original=f"2024:03:10 09:15:{index:02d}",
             )
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
 
         processor.process_all_files(dry_run=True, progress=reporter)
 
@@ -198,7 +171,7 @@ class TestCategorizedStatsCarryHeicCount(unittest.TestCase):
         )
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 
         self.assertEqual(len(reporter.categorized_calls), 1)
@@ -230,7 +203,7 @@ class TestOnFileActionReflectsPhase(unittest.TestCase):
         )
 
         processor = FileProcessor(Settings(export_dir=self.export, backup_dir=self.backup))
-        reporter = _RecordingReporter()
+        reporter = RecordingReporter()
         processor.process_all_files(dry_run=False, progress=reporter)
 
         actions = {os.path.basename(p): a for p, _c, a in reporter.files}

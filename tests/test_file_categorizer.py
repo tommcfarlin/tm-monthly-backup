@@ -603,6 +603,15 @@ class TestFileCategorizer(unittest.TestCase):
     def test_categorization_results_order_independent(self):
         """Stats/summary are consistent no matter the order accessors run in (#37).
 
+        NOT a regression test for the #37 aliasing bug (issue #68). This passes
+        against the pre-#37 code too: both accessors always read
+        ``self.categorized_files`` fresh, so interleaving them was never the
+        failure mode. It satisfies the letter of #37's acceptance criterion and
+        pins a property worth keeping, but do not read it as evidence that the
+        aliasing defect is covered -- the tests that actually discriminate there
+        are the ones asserting ``batch_categorize``'s return value does not alias
+        the internal lists.
+
         ``get_categorization_stats`` and ``get_file_summary`` both read
         ``self.categorized_files`` fresh each call, and ``batch_categorize`` no
         longer hands out an aliased snapshot for a caller to accidentally

@@ -31,6 +31,16 @@ from PIL import Image
 from src.file_categorizer import FileCategorizer, FileCategory
 from src.exif_handler import ExifHandler
 from src.file_processor import FileProcessor, Settings
+
+
+class _ForcedDecode(BaseException):
+    """Raised by the no-decode traps below; see the comment at the first one.
+
+    A BaseException subclass on purpose: the code under test has a broad
+    `except Exception` that would swallow an AssertionError and turn a precise
+    "a decode happened" failure into a vague "result was None" one (issue #68).
+    """
+
 from tests.fixtures import (
     make_corrupt_jpeg,
     make_exif_heic,
@@ -487,7 +497,22 @@ class TestDecodeCountingMechanismDetectsGenuineDoubleDecode(unittest.TestCase):
             processor.process_all_files(dry_run=False)
 
         distinct_by_reference = len({id(o) for o in decoded_objects})
-        self.assertEqual(
+        # >= 2, not == 2 (issue #68).
+        #
+        # This pins DELIBERATELY-DEFERRED behavior: PngImageFile.getexif() forces
+        # load() when the file carries no eXIf chunk, so an EXIF-less PNG is
+        # decoded twice. That is Pillow's behavior, not a bug in this project, and
+        # it is on the list to address. Asserting == 2 would turn the eventual FIX
+        # into a red test carrying the message below -- which would send the next
+        # reader hunting for an unsound counting mechanism that was never the
+        # problem. The assertion's real job is to prove the reference-identity
+        # counter can distinguish two decodes from one; a lower bound does that,
+        # and stays true whichever way the deferred behavior lands.
+        #
+        # If you are here because this went red: the count DROPPED below 2, which
+        # means the double decode is gone. That is the improvement. Update this to
+        # assert the new exact count.
+        self.assertGreaterEqual(
             distinct_by_reference, 2,
             "the known pre-existing double decode for an EXIF-less PNG was "
             "not detected -- the counting mechanism itself is unsound",
@@ -559,7 +584,16 @@ class TestReadImageMetadataDoesNotDecodePng(unittest.TestCase):
         )
 
         def _must_not_load(self_img, *args, **kwargs):
-            raise AssertionError(
+            # BaseException, not AssertionError (issue #68).
+            #
+            # _read_image_metadata wraps its work in a broad `except Exception`
+            # (deliberately -- issue #39's sanctioned catch), which SWALLOWS an
+            # AssertionError raised here and returns None. The test still failed,
+            # via the assertIsNotNone below, but reported "unexpectedly None"
+            # instead of "a decode happened" -- pointing the reader at the wrong
+            # thing entirely. A BaseException subclass escapes that handler, so
+            # the failure names its own cause.
+            raise _ForcedDecode(
                 "_read_image_metadata forced a full pixel decode"
             )
 
@@ -579,7 +613,16 @@ class TestReadImageMetadataDoesNotDecodePng(unittest.TestCase):
         )
 
         def _must_not_load(self_img, *args, **kwargs):
-            raise AssertionError(
+            # BaseException, not AssertionError (issue #68).
+            #
+            # _read_image_metadata wraps its work in a broad `except Exception`
+            # (deliberately -- issue #39's sanctioned catch), which SWALLOWS an
+            # AssertionError raised here and returns None. The test still failed,
+            # via the assertIsNotNone below, but reported "unexpectedly None"
+            # instead of "a decode happened" -- pointing the reader at the wrong
+            # thing entirely. A BaseException subclass escapes that handler, so
+            # the failure names its own cause.
+            raise _ForcedDecode(
                 "_read_image_metadata forced a full pixel decode"
             )
 

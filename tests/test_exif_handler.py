@@ -1047,6 +1047,55 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
             "the resolved interpretation was not logged",
         )
 
+    def test_pattern_day_first_only_valid_reading_resolves(self):
+        """Issue #68 gap: the branch where only DAY-first is a real date.
+
+        ``25-03`` cannot be month-first (month=25), so the day-first reading must
+        resolve. The both-valid and only-month-first branches were already
+        covered; this was the third one, left open by #51.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Foo_25-03-2026-10-20-30.heic"
+        )
+        self.assertEqual(result, datetime(2026, 3, 25, 10, 20, 30))
+
+    def test_pattern_day_first_out_of_range_time_returns_none(self):
+        """Issue #68 gap: the out-of-range negative case for pattern 3.
+
+        #51's out-of-range test exercised pattern 1, so pattern 3's own
+        validation was untested. 25:61:61 is not a time under either reading, so
+        this must fall through to the filesystem rather than name a file from a
+        half-parsed value.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "Foo_04-07-2026-25-61-61.heic"
+        )
+        self.assertIsNone(result)
+
+    def test_pattern_one_at_its_widest_all_space_separated(self):
+        """Issue #68 gap: pattern 1's separator class at full width.
+
+        #51 widened the separator to ``[_\\-\\s]`` at all five positions, not just
+        the date/time boundary it needed, and that broadest form was never
+        exercised. Verified here so the widening is covered rather than merely
+        assumed harmless.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "2024 01 02 12 30 45.jpg"
+        )
+        self.assertEqual(result, datetime(2024, 1, 2, 12, 30, 45))
+
+    def test_epoch_suffix_is_still_not_mistaken_for_a_date(self):
+        """The counterweight to the widened separator.
+
+        A 13-digit epoch suffix must keep resolving via the compact pattern and
+        never be chewed into a date by the broader separator class.
+        """
+        result = self.handler._extract_timestamp_from_filename(
+            "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg"
+        )
+        self.assertEqual(result, datetime(2026, 7, 4, 13, 13, 28))
+
     def test_dji_epoch_suffix_filename_unaffected(self):
         """Issue #51 regression guard: the DJI epoch-suffix filename still parses
         via pattern2 and is not disturbed by the new day-first pattern."""
