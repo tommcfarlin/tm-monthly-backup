@@ -208,10 +208,10 @@ class TestIlstStringValue(unittest.TestCase):
         """A valid UTF-8 data payload is decoded and stripped of NULs."""
         data = _box(
             b"data",
-            struct.pack(">I", 1) + struct.pack(">I", 0) + b"2026-07-04\x00",
+            struct.pack(">I", 1) + struct.pack(">I", 0) + b"2024-06-15\x00",
         )
         buf = self._item(1, data)
-        self.assertEqual(_ilst_string_value(buf, 0, len(buf), index=1), "2026-07-04")
+        self.assertEqual(_ilst_string_value(buf, 0, len(buf), index=1), "2024-06-15")
 
 
 class TestReadMoovBytes(unittest.TestCase):
@@ -543,7 +543,7 @@ class TestHachoirFastPathRealBoundary(unittest.TestCase):
         """A real mvhd creation_time is read via get(); exportPlaintext never runs."""
         from hachoir.metadata.metadata import RootMetadata
 
-        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        utc_1904 = self._seconds_1904(datetime(2024, 6, 16, 1, 33, 3))
         path = os.path.join(self.temp_dir, "real_mvhd.mov")
         _write_minimal_mp4(path, _mvhd_only_moov(utc_1904))
 
@@ -552,7 +552,7 @@ class TestHachoirFastPathRealBoundary(unittest.TestCase):
         ) as spy:
             result = self.handler._extract_video_timestamp_hachoir(path)
 
-        self.assertEqual(result, datetime(2026, 7, 5, 1, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 16, 1, 33, 3))
         spy.assert_not_called()
 
     def test_real_metadata_without_creation_date_reaches_plaintext(self):

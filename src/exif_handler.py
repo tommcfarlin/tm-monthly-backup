@@ -256,13 +256,13 @@ MIN_PLAUSIBLE_CAPTURE = datetime(1826, 1, 1)
 # Two real conventions collide inside one regex, and the digits alone cannot
 # separate them whenever both leading fields are <= 12:
 #
-#   ScreenRecording_03-05-2024 09-15-00_1.mp4   is MONTH-first (July 1)
-#   Facetune_09-02-2024-11-22-33.heic           is DAY-first (4 July)
+#   ScreenRecording_03-05-2024 09-15-00_1.mp4   is MONTH-first (5 March)
+#   Facetune_09-02-2024-11-22-33.heic           is DAY-first (9 February)
 #
 # The macOS/iOS screen-recording reading is not a guess: for a real file of that
 # name the container's own ``mvhd`` says 2024-03-05 13:15:00 UTC, which is
 # 08:58:01 EDT -- exactly the time in the filename, confirming the leading
-# ``07-01`` is month-first. Issue #51 introduced this pattern for Facetune and
+# ``03-05`` is month-first. Issue #51 introduced this pattern for Facetune and
 # tried day-first first for everything, so every ScreenRecording_ capture whose
 # metadata was missing (common: a re-muxed file often carries a 1904 ``mvhd``)
 # was filed up to eleven months off.
@@ -759,7 +759,7 @@ class ExifHandler:
         Rule 2 exists because ``mvhd`` alone silently mis-times files that DO
         carry their local time, just not in a metadata key. A real screen
         recording named ``ScreenRecording_03-05-2024 09-15-00_1.mp4`` has
-        ``mvhd`` = 2024-03-05 13:15:00 UTC and was archived as ``12.58.01`` --
+        ``mvhd`` = 2024-03-05 13:15:00 UTC and was archived as ``13.15.00`` --
         four hours late, and for any capture after 20:00 EDT that lands on the
         WRONG CALENDAR DAY. The local time was available all along, in the name.
 

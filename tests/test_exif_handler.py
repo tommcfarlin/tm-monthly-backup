@@ -563,7 +563,7 @@ class TestQuicktimeEpochSentinel(unittest.TestCase):
 
     def test_ordinary_modern_date_is_not_a_sentinel(self):
         self.assertFalse(
-            ExifHandler._is_quicktime_epoch_sentinel(datetime(2026, 7, 4, 21, 33, 3))
+            ExifHandler._is_quicktime_epoch_sentinel(datetime(2024, 6, 15, 21, 33, 3))
         )
 
 
@@ -727,7 +727,7 @@ class TestParseLocalCreationdate(unittest.TestCase):
     def test_negative_offset_keeps_local_wall_clock(self):
         """A -0400 capture keeps its written clock time; the offset is dropped"""
         result = parse_local_creationdate("2024-06-15T21:33:03-0400")
-        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 15, 21, 33, 3))
 
     def test_positive_offset_keeps_local_wall_clock(self):
         """A +0530 capture keeps its written clock time, not a UTC-shifted one"""
@@ -737,12 +737,12 @@ class TestParseLocalCreationdate(unittest.TestCase):
     def test_zulu_utc_keeps_wall_clock_reading(self):
         """A trailing Z parses; the wall-clock reading is kept as written"""
         result = parse_local_creationdate("2024-06-15T18:30:00Z")
-        self.assertEqual(result, datetime(2026, 7, 4, 18, 30, 0))
+        self.assertEqual(result, datetime(2024, 6, 15, 18, 30, 0))
 
     def test_colon_offset_form_parses(self):
         """The expanded -04:00 offset form parses to the same wall clock"""
         result = parse_local_creationdate("2024-06-15T21:33:03-04:00")
-        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 15, 21, 33, 3))
 
     def test_returns_naive_datetime(self):
         """The result carries no tzinfo, so it formats as a local wall clock"""
@@ -815,14 +815,14 @@ class TestVideoLocalCreationDate(unittest.TestCase):
         """A 21:33 EDT capture (01:33Z next day) is named on the LOCAL day"""
         # mvhd carries the UTC time (2024-06-16 01:33:03) so this proves the
         # local key wins over the UTC atom, not merely that mvhd was ignored.
-        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        utc_1904 = self._seconds_1904(datetime(2024, 6, 16, 1, 33, 3))
         path = self._mov(
             "IMG_LATE.MOV",
             "2024-06-15T21:33:03-0400",
             mvhd_creation_1904=utc_1904,
         )
         result = self.handler.extract_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 15, 21, 33, 3))
         self.assertEqual(
             self.handler.format_timestamp_filename(result), "2024.06.15.21.33.03"
         )
@@ -849,7 +849,7 @@ class TestVideoLocalCreationDate(unittest.TestCase):
         winter = self._mov("winter.mov", "2026-01-15T21:33:03-0500")
         self.assertEqual(
             self.handler.extract_timestamp(summer),
-            datetime(2026, 7, 4, 21, 33, 3),
+            datetime(2024, 6, 15, 21, 33, 3),
         )
         self.assertEqual(
             self.handler.extract_timestamp(winter),
@@ -863,21 +863,21 @@ class TestVideoLocalCreationDate(unittest.TestCase):
         to hachoir's mvhd exactly as a missing key would, rather than naming
         the file from it.
         """
-        utc_1904 = self._seconds_1904(datetime(2026, 7, 5, 1, 33, 3))
+        utc_1904 = self._seconds_1904(datetime(2024, 6, 16, 1, 33, 3))
         path = self._mov(
             "IMG_CRAFTED.MOV",
             "9999-12-31T23:59:59-0400",
             mvhd_creation_1904=utc_1904,
         )
         result = self.handler.extract_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 5, 1, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 16, 1, 33, 3))
 
     def test_local_key_preferred_even_without_hachoir(self):
         """The Apple key path works even when hachoir is unavailable"""
         path = self._mov("nohachoir.mov", "2024-06-15T21:33:03-0400")
         with patch("src.exif_handler.HACHOIR_AVAILABLE", False):
             result = self.handler.extract_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 4, 21, 33, 3))
+        self.assertEqual(result, datetime(2024, 6, 15, 21, 33, 3))
         self.assertEqual(len(self.handler.missing_exif_files), 0)
 
     @staticmethod
@@ -922,7 +922,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "2011-03-09 18-20-30.jpg.jpeg"
         )
-        self.assertEqual(result, datetime(2014, 7, 5, 20, 0, 47))
+        self.assertEqual(result, datetime(2011, 3, 9, 18, 20, 30))
 
     def test_pattern_day_first_facetune_style(self):
         """Issue #51: DD-MM-YYYY-HH-MM-SS (Facetune's naming convention) parses.
@@ -933,7 +933,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "Facetune_09-02-2024-11-22-33.heic"
         )
-        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+        self.assertEqual(result, datetime(2024, 2, 9, 11, 22, 33))
 
     def test_pattern_day_first_logs_chosen_interpretation(self):
         """Issue #51: the resolved day-first/month-first reading is logged at INFO."""
@@ -983,13 +983,13 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "ScreenRecording_03-05-2024 09-15-00_1.mp4"
         )
-        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+        self.assertEqual(result, datetime(2024, 3, 5, 9, 15, 0))
 
     def test_screen_recording_month_first_on_the_second_real_example(self):
         result = self.handler._extract_timestamp_from_filename(
             "ScreenRecording_03-06-2024 16-40-00_1.mp4"
         )
-        self.assertEqual(result, datetime(2026, 7, 2, 14, 27, 54))
+        self.assertEqual(result, datetime(2024, 3, 6, 16, 40, 0))
 
     def test_facetune_still_reads_day_first(self):
         """Issue #70 must not regress issue #51's Facetune convention.
@@ -1000,7 +1000,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "Facetune_09-02-2024-11-22-33.heic"
         )
-        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+        self.assertEqual(result, datetime(2024, 2, 9, 11, 22, 33))
 
     def test_unrecognized_generator_keeps_the_day_first_default(self):
         """No marker means no evidence; the #51 default is preserved.
@@ -1011,19 +1011,19 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "mystery_09-02-2024-11-22-33.jpg"
         )
-        self.assertEqual(result, datetime(2026, 7, 4, 13, 32, 17))
+        self.assertEqual(result, datetime(2024, 2, 9, 11, 22, 33))
 
     def test_marker_matching_is_case_insensitive(self):
         result = self.handler._extract_timestamp_from_filename(
             "screenrecording_03-05-2024-09-15-00.mp4"
         )
-        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+        self.assertEqual(result, datetime(2024, 3, 5, 9, 15, 0))
 
     def test_a_space_separated_screen_recording_marker_also_matches(self):
         result = self.handler._extract_timestamp_from_filename(
             "Screen Recording 03-05-2024 09-15-00.mov"
         )
-        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+        self.assertEqual(result, datetime(2024, 3, 5, 9, 15, 0))
 
     def test_month_first_generator_still_falls_back_when_month_first_is_invalid(self):
         """The convention sets the ORDER, not a hard rule.
@@ -1034,7 +1034,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "ScreenRecording_20-05-2024 09-15-00.mp4"
         )
-        self.assertEqual(result, datetime(2026, 1, 20, 8, 58, 1))
+        self.assertEqual(result, datetime(2024, 5, 20, 9, 15, 0))
 
     def test_screen_recording_logs_the_month_first_choice(self):
         """A chosen interpretation stays auditable (issue #51's contract)."""
@@ -1055,9 +1055,9 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         covered; this was the third one, left open by #51.
         """
         result = self.handler._extract_timestamp_from_filename(
-            "Foo_25-03-2026-10-20-30.heic"
+            "Foo_25-03-2024-10-20-30.heic"
         )
-        self.assertEqual(result, datetime(2026, 3, 25, 10, 20, 30))
+        self.assertEqual(result, datetime(2024, 3, 25, 10, 20, 30))
 
     def test_pattern_day_first_out_of_range_time_returns_none(self):
         """Issue #68 gap: the out-of-range negative case for pattern 3.
@@ -1094,7 +1094,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg"
         )
-        self.assertEqual(result, datetime(2026, 7, 4, 13, 13, 28))
+        self.assertEqual(result, datetime(2024, 1, 15, 10, 11, 12))
 
     def test_dji_epoch_suffix_filename_unaffected(self):
         """Issue #51 regression guard: the DJI epoch-suffix filename still parses
@@ -1102,7 +1102,7 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         result = self.handler._extract_timestamp_from_filename(
             "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg"
         )
-        self.assertEqual(result, datetime(2026, 7, 4, 13, 13, 28))
+        self.assertEqual(result, datetime(2024, 1, 15, 10, 11, 12))
 
     def test_out_of_range_date_returns_none_not_raise(self):
         """Issue #51: an out-of-range YYYY-MM-DD-HH-MM-SS date returns None."""
@@ -1154,14 +1154,14 @@ class TestFilenameTimestampExtraction(unittest.TestCase):
         """Issue #51: every real filename shape identified in the QA audit now
         resolves to a timestamp instead of falling through to filesystem mtime."""
         fixtures = [
-            ("2011-03-09 18-20-30.jpg.jpeg", datetime(2014, 7, 5, 20, 0, 47)),
-            ("Facetune_09-02-2024-11-22-33.heic", datetime(2026, 7, 4, 13, 32, 17)),
-            ("Facetune_09-02-2024-11-24-43.heic", datetime(2026, 7, 4, 13, 34, 27)),
-            ("Facetune_09-02-2024-11-27-26.heic", datetime(2026, 7, 4, 13, 37, 10)),
-            ("Facetune_09-02-2024-11-28-21.heic", datetime(2026, 7, 4, 13, 38, 5)),
+            ("2011-03-09 18-20-30.jpg.jpeg", datetime(2011, 3, 9, 18, 20, 30)),
+            ("Facetune_09-02-2024-11-22-33.heic", datetime(2024, 2, 9, 11, 22, 33)),
+            ("Facetune_09-02-2024-11-24-43.heic", datetime(2024, 2, 9, 11, 24, 43)),
+            ("Facetune_09-02-2024-11-27-26.heic", datetime(2024, 2, 9, 11, 27, 26)),
+            ("Facetune_09-02-2024-11-28-21.heic", datetime(2024, 2, 9, 11, 28, 21)),
             (
                 "dji_fly_20240115_101112_105_1700000000000_photo_optimized.jpg",
-                datetime(2026, 7, 4, 13, 13, 28),
+                datetime(2024, 1, 15, 10, 11, 12),
             ),
         ]
         results = [
@@ -1239,21 +1239,21 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
         path = self._path("ScreenRecording_03-05-2024 09-15-00_1.mp4")
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir",
-            return_value=datetime(2026, 7, 1, 12, 58, 1),
+            return_value=datetime(2024, 3, 5, 13, 15, 0),
         ):
             result = self.handler._extract_video_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 1, 8, 58, 1))
+        self.assertEqual(result, datetime(2024, 3, 5, 9, 15, 0))
 
     def test_a_late_evening_capture_keeps_the_correct_calendar_day(self):
         """The consequence that matters: 22:30 EDT is 02:30 UTC the NEXT day."""
         path = self._path("ScreenRecording_03-05-2024 22-30-00.mp4")
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir",
-            return_value=datetime(2026, 7, 2, 2, 30, 0),
+            return_value=datetime(2024, 3, 6, 2, 30, 0),
         ):
             result = self.handler._extract_video_timestamp(path)
         self.assertEqual(
-            result, datetime(2026, 7, 1, 22, 30, 0),
+            result, datetime(2024, 3, 5, 22, 30, 0),
             "the capture was filed under the following day",
         )
 
@@ -1262,15 +1262,15 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
         path = self._path("Screen Recording 03-05-2024 18-45-00.mp4")
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir",
-            return_value=datetime(2026, 7, 1, 12, 58, 1),
+            return_value=datetime(2024, 3, 5, 13, 15, 0),
         ):
             result = self.handler._extract_video_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 1, 18, 28, 1))
+        self.assertEqual(result, datetime(2024, 3, 5, 18, 45, 0))
 
     def test_unrelated_filename_digits_do_not_outrank_the_container(self):
         """The cross-check is what makes preferring the filename safe."""
         path = self._path("dji_fly_20240115_101112_105_1700000000000_photo.mp4")
-        mvhd = datetime(2026, 7, 1, 12, 58, 1)
+        mvhd = datetime(2024, 3, 5, 13, 15, 0)
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
         ):
@@ -1283,7 +1283,7 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
     def test_an_implausible_offset_is_rejected(self):
         """Beyond +/-14h cannot be a zone; keep the container reading."""
         path = self._path("ScreenRecording_03-05-2024 09-15-00.mp4")
-        mvhd = datetime(2026, 7, 3, 4, 0, 0)
+        mvhd = datetime(2024, 3, 7, 4, 0, 0)
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
         ):
@@ -1291,7 +1291,7 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
 
     def test_an_offset_that_is_not_a_quarter_hour_is_rejected(self):
         path = self._path("ScreenRecording_03-05-2024 09-15-00.mp4")
-        mvhd = datetime(2026, 7, 1, 17, 58, 30)
+        mvhd = datetime(2024, 3, 5, 18, 58, 30)
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir", return_value=mvhd
         ):
@@ -1307,7 +1307,7 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
         # ...and the chain still reaches the filename on its own.
         self.assertEqual(
             self.handler.get_fallback_timestamp(path),
-            datetime(2026, 7, 1, 8, 58, 1),
+            datetime(2024, 3, 5, 9, 15, 0),
         )
 
     def test_the_apple_key_still_outranks_both(self):
@@ -1316,10 +1316,10 @@ class TestVideoLocalTimeBeatsUtcContainerTime(unittest.TestCase):
         write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
         with patch.object(
             self.handler, "_extract_video_timestamp_hachoir",
-            return_value=datetime(2026, 7, 1, 12, 58, 1),
+            return_value=datetime(2024, 3, 5, 13, 15, 0),
         ):
             result = self.handler._extract_video_timestamp(path)
-        self.assertEqual(result, datetime(2026, 7, 29, 19, 23, 34))
+        self.assertEqual(result, datetime(2024, 6, 20, 19, 23, 34))
 
 
 class TestHachoirDoesNotLeakFileDescriptors(unittest.TestCase):
@@ -1461,7 +1461,7 @@ class TestQuickTimeEpochSentinelOnTheAppleKey(unittest.TestCase):
         write_quicktime_mov(path, "2024-06-20T19:23:34-0400")
         self.assertEqual(
             self.handler._extract_quicktime_creationdate(path),
-            datetime(2026, 7, 29, 19, 23, 34),
+            datetime(2024, 6, 20, 19, 23, 34),
         )
 
     def test_a_1904_date_that_is_not_the_sentinel_instant_is_untouched(self):
