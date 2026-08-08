@@ -668,13 +668,30 @@ class ExifHandler:
         """
         Extract creation timestamp from video metadata.
 
-        Prefers Apple's ``com.apple.quicktime.creationdate`` key, which records
-        the TRUE local wall-clock capture time with its UTC offset, and names
-        the file by that local reading (see issue #28). Only when that key is
-        absent does it fall back to hachoir's ``mvhd`` creation_time, which is
-        UTC; that fallback can therefore be off by the UTC offset and land a
-        late-evening capture on the next calendar day. This is a pre-existing
-        limitation preserved here, not one this change introduces.
+        Three sources, in descending order of authority:
+
+        1. Apple's ``com.apple.quicktime.creationdate`` key, which records the
+           TRUE local wall-clock capture time with its UTC offset (issue #28).
+        2. The filename, when it can be *confirmed* to be a local rendering of
+           the same instant the container reports (issue #70, issue #72).
+        3. hachoir's ``mvhd`` creation_time, which is UTC.
+
+        Rule 2 exists because ``mvhd`` alone silently mis-times files that DO
+        carry their local time, just not in a metadata key. A real screen
+        recording named ``ScreenRecording_03-05-2024 09-15-00_1.mp4`` has
+        ``mvhd`` = 2024-03-05 13:15:00 UTC and was archived as ``12.58.01`` --
+        four hours late, and for any capture after 20:00 EDT that lands on the
+        WRONG CALENDAR DAY. The local time was available all along, in the name.
+
+        The cross-check is what makes preferring the name safe. The filename is
+        used only when its reading differs from the ``mvhd`` reading by a
+        plausible UTC offset -- a whole number of quarter-hours within +/-14h,
+        which covers every real zone including the :30 and :45 ones. That is
+        strong evidence the two describe one moment in two zones, so the local
+        rendering is the better name. A filename whose digits are unrelated to
+        the capture (an ID, a resolution, an epoch suffix) will not satisfy it
+        and ``mvhd`` is kept. Without that check, blindly preferring the
+        filename would let any number pattern outrank real container metadata.
 
         Args:
             file_path: Path to video file
@@ -691,7 +708,55 @@ class ExifHandler:
             )
             return local_creation
 
-        return self._extract_video_timestamp_hachoir(file_path)
+        utc_reading = self._extract_video_timestamp_hachoir(file_path)
+        if utc_reading is None:
+            # No container time at all. The caller's fallback chain reaches the
+            # filename on its own from here (``get_fallback_timestamp``), so
+            # there is nothing to cross-check against and nothing to prefer.
+            return None
+
+        local_reading = self._local_reading_confirming_utc(file_path, utc_reading)
+        if local_reading is not None:
+            logger.info(
+                "Video filename carries the local capture time for the same "
+                "instant as the UTC container time; using the local reading: "
+                "%s -> %s (mvhd reported %s)",
+                file_path, local_reading, utc_reading,
+            )
+            return local_reading
+
+        return utc_reading
+
+    def _local_reading_confirming_utc(
+        self, file_path: str, utc_reading: datetime
+    ) -> Optional[datetime]:
+        """
+        Return the filename's timestamp if it is the same instant as ``utc_reading``.
+
+        "Same instant" means the two differ by a plausible UTC offset: a whole
+        number of quarter-hours, no more than 14 hours either way. Real zones run
+        from -12:00 to +14:00 and the only sub-hour ones are :30 and :45, so this
+        admits every genuine offset while rejecting an unrelated number that
+        merely happens to parse as a date.
+
+        Args:
+            file_path: Path whose basename is parsed for a timestamp.
+            utc_reading: The UTC capture time read from the container.
+
+        Returns:
+            The filename's local reading, or ``None`` when the filename has no
+            timestamp or the two cannot be the same moment.
+        """
+        from_name = self._extract_timestamp_from_filename(file_path)
+        if from_name is None:
+            return None
+
+        offset_seconds = (from_name - utc_reading).total_seconds()
+        if abs(offset_seconds) > 14 * 3600:
+            return None
+        if offset_seconds % (15 * 60) != 0:
+            return None
+        return from_name
 
     def _extract_quicktime_creationdate(self, file_path: str) -> Optional[datetime]:
         """
@@ -726,6 +791,22 @@ class ExifHandler:
         if parsed is None:
             logger.warning(
                 "Unparseable QuickTime creationdate in %s: %r", file_path, value
+            )
+            return None
+
+        # The zero-epoch sentinel can appear HERE too (issue #72). This check was
+        # scoped to the mvhd path on the reasoning that Apple's key "has no
+        # zero-epoch encoding of its own" -- true of the encoding, but not of the
+        # value: a re-muxer that synthesizes this key from a zeroed mvhd writes
+        # the literal string "1904-01-01T00:00:00+0000", which parses fine and
+        # would be archived as videos/1904.01.01.00.00.00.mov -- exactly the
+        # outcome issue #62 exists to prevent, arriving through the sibling
+        # field. Returning None drops to the mvhd path and then to the filename
+        # and filesystem fallbacks, which is what #62 does for the same value.
+        if self._is_quicktime_epoch_sentinel(parsed):
+            logger.warning(
+                "Implausible QuickTime creationdate (zero-epoch sentinel) in "
+                "%s: %r", file_path, value
             )
             return None
 
