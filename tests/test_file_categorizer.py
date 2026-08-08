@@ -1375,5 +1375,154 @@ class TestReadImageMetadataExceptionNarrowing(unittest.TestCase):
         self.assertIn("PermissionError", message)
 
 
+class TestGeneratedFalsePositives(unittest.TestCase):
+    """Issue #71: three ways a real photograph was filed as AI-generated.
+
+    Each of these routes a genuine photo into ``backup/generated/`` -- a
+    directory the owner has no reason to look in. Every test here is paired with
+    a true-positive assertion, because loosening a detector until it stops firing
+    is not a fix.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.categorizer = FileCategorizer()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _jpeg(self, name, software=None, tag=None, value=None):
+        from PIL import Image
+        path = os.path.join(self.temp_dir, name)
+        img = Image.new("RGB", (64, 64), (120, 120, 120))
+        exif = img.getexif()
+        if software is not None:
+            exif[0x0131] = software          # Software (IFD0)
+        if tag is not None:
+            exif[tag] = value
+        img.save(path, exif=exif)
+        return path
+
+    # --- 1. The two modules disagreed about IFD0 DateTime ---
+
+    def test_a_photoshopped_scan_with_ifd0_datetime_is_a_photo(self):
+        """The case that motivated this: a 1950 print re-saved by Photoshop.
+
+        Photoshop "Save As" writes Software + IFD0 DateTime and no
+        DateTimeOriginal. ExifHandler.TIMESTAMP_TAGS accepts DateTime and names
+        the file from it, so filing the photo as generated meant naming it from
+        a timestamp this module had just ruled non-existent.
+        """
+        path = self._jpeg(
+            "grandparents_wedding.jpg",
+            software="Adobe Photoshop 24.0 (Macintosh)",
+            tag=0x0132, value="1950:06:01 12:00:00",
+        )
+        self.assertEqual(self.categorizer.categorize_file(path), FileCategory.PHOTO)
+
+    def test_editing_software_with_no_timestamp_at_all_is_still_generated(self):
+        """The true positive must survive: no capture evidence of any kind."""
+        path = self._jpeg("composite.jpg", software="Adobe Photoshop 24.0 (Macintosh)")
+        self.assertEqual(
+            self.categorizer.categorize_file(path), FileCategory.GENERATED
+        )
+
+    def test_datetime_original_still_counts(self):
+        path = self._jpeg(
+            "portrait.jpg", software="Adobe Lightroom",
+            tag=0x9003, value="2024:05:05 05:05:05",
+        )
+        self.assertEqual(self.categorizer.categorize_file(path), FileCategory.PHOTO)
+
+    # --- 2. Bare-substring matching on the software list ---
+
+    def test_canvas_is_not_canva(self):
+        """'canva' is a substring of 'Canvas' -- issue #8's bleed, unfixed here."""
+        path = self._jpeg(
+            "drawing.jpg", software="Canvas X 2019",
+            tag=0x0132, value="2019:03:03 09:00:00",
+        )
+        self.assertEqual(self.categorizer.categorize_file(path), FileCategory.PHOTO)
+
+    def test_canvas_with_no_timestamp_is_still_not_canva(self):
+        """The word-boundary fix must hold independently of the timestamp guard."""
+        path = self._jpeg("drawing_bare.jpg", software="Canvas X 2019")
+        self.assertEqual(self.categorizer.categorize_file(path), FileCategory.PHOTO)
+
+    def test_canva_proper_is_still_detected(self):
+        path = self._jpeg("poster.jpg", software="Canva")
+        self.assertEqual(
+            self.categorizer.categorize_file(path), FileCategory.GENERATED
+        )
+
+    def test_editing_software_still_matches_inside_a_longer_string(self):
+        """Word boundaries, not exact equality -- real tags carry versions."""
+        path = self._jpeg("edit.jpg", software="Adobe Photoshop 24.0 (Macintosh)")
+        self.assertEqual(
+            self.categorizer.categorize_file(path), FileCategory.GENERATED
+        )
+
+    # --- 3. The UUID rule overrode real EXIF, and over-matched ---
+
+    def test_a_uuid_named_photo_with_real_exif_is_a_photo(self):
+        """A filename must not outrank the camera's own capture record.
+
+        Apple exports assets under their UUID; this library already contains
+        such names. Unlike the editing-software rule, this one had no
+        "and no capture timestamp" guard, so genuine EXIF could not rescue it.
+        """
+        path = self._jpeg(
+            "A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D.jpg",
+            tag=0x9003, value="2024:06:15 11:55:41",
+        )
+        self.assertEqual(self.categorizer.categorize_file(path), FileCategory.PHOTO)
+
+    def test_a_uuid_named_file_with_no_timestamp_is_still_generated(self):
+        path = self._jpeg("A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C6D.jpg")
+        self.assertEqual(
+            self.categorizer.categorize_file(path), FileCategory.GENERATED
+        )
+
+    def test_an_md5_named_photo_is_not_a_uuid(self):
+        """uuid.UUID strips all hyphens and takes any 32 hex digits."""
+        self.assertFalse(
+            FileCategorizer._has_uuid_stem("d41d8cd98f00b204e9800998ecf8427e.jpg")
+        )
+
+    def test_a_run_of_32_digits_is_not_a_uuid(self):
+        self.assertFalse(
+            FileCategorizer._has_uuid_stem("12345678901234567890123456789012.jpg")
+        )
+
+    def test_wrong_segment_lengths_are_not_a_uuid(self):
+        """The old docstring claimed segment lengths were validated; they were not."""
+        self.assertFalse(
+            FileCategorizer._has_uuid_stem(
+                "1234-5678-9012-3456-7890-1234-5678-9012.jpg"
+            )
+        )
+
+    def test_a_urn_prefixed_uuid_is_not_a_bare_uuid_stem(self):
+        self.assertFalse(
+            FileCategorizer._has_uuid_stem(
+                "urn:uuid:a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d.jpg"
+            )
+        )
+
+    def test_a_canonical_uuid_stem_is_still_recognized(self):
+        """The true positive: the convention this rule actually models."""
+        self.assertTrue(
+            FileCategorizer._has_uuid_stem(
+                "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d.png"
+            )
+        )
+        self.assertTrue(
+            FileCategorizer._has_uuid_stem(
+                "A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D.png"
+            )
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
